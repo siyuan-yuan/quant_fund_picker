@@ -1,0 +1,72 @@
+/home/user/quant_fund_picker/factor_study.py:17: FutureWarning: 'Q' is deprecated and will be removed in a future version, please use 'QE' instead.
+  DATES = [str(d.date()) for d in pd.date_range("2019-03-31", "2025-12-31", freq="Q")]
+[池] 候选 1349 只, 开始拉取净值...
+    nav 100/1349 合格 7 (0s)
+    nav 200/1349 合格 18 (1s)
+    nav 300/1349 合格 36 (1s)
+    nav 400/1349 合格 54 (1s)
+    nav 500/1349 合格 66 (2s)
+    nav 600/1349 合格 73 (2s)
+    nav 700/1349 合格 93 (2s)
+    nav 800/1349 合格 108 (2s)
+    nav 900/1349 合格 123 (3s)
+    nav 1000/1349 合格 141 (3s)
+    nav 1100/1349 合格 161 (3s)
+    nav 1200/1349 合格 186 (4s)
+    nav 1300/1349 合格 205 (4s)
+[池] 满足 2014-12-31 前成立 & 数据贯穿至2025-09 的基金: 217 只
+[done] 2019-03-31 n=216 (12s)
+[done] 2019-06-30 n=216 (23s)
+[done] 2019-09-30 n=216 (34s)
+[done] 2019-12-31 n=216 (45s)
+[done] 2020-03-31 n=216 (55s)
+[done] 2020-06-30 n=216 (66s)
+[done] 2020-09-30 n=216 (77s)
+[done] 2020-12-31 n=216 (88s)
+[done] 2021-03-31 n=216 (100s)
+[done] 2021-06-30 n=217 (116s)
+[done] 2021-09-30 n=217 (129s)
+[done] 2021-12-31 n=217 (140s)
+[done] 2022-03-31 n=217 (152s)
+[done] 2022-06-30 n=217 (164s)
+[done] 2022-09-30 n=217 (177s)
+[done] 2022-12-31 n=217 (190s)
+[done] 2023-03-31 n=217 (203s)
+[done] 2023-06-30 n=217 (216s)
+[done] 2023-09-30 n=217 (229s)
+[done] 2023-12-31 n=217 (242s)
+[done] 2024-03-31 n=217 (255s)
+[done] 2024-06-30 n=217 (269s)
+[done] 2024-09-30 n=217 (281s)
+[done] 2024-12-31 n=217 (294s)
+[done] 2025-03-31 n=217 (307s)
+[done] 2025-06-30 n=217 (321s)
+[done] 2025-09-30 n=217 (335s)
+[done] 2025-12-31 n=217 (349s)
+[校验] V0复建 vs 引擎S: 相关 1.0000 最大差 12.0
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.13/site-packages/pandas/core/indexes/base.py", line 3805, in get_loc
+    return self._engine.get_loc(casted_key)
+           ~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
+  File "index.pyx", line 167, in pandas._libs.index.IndexEngine.get_loc
+  File "index.pyx", line 196, in pandas._libs.index.IndexEngine.get_loc
+  File "pandas/_libs/hashtable_class_helper.pxi", line 7081, in pandas._libs.hashtable.PyObjectHashTable.get_item
+  File "pandas/_libs/hashtable_class_helper.pxi", line 7089, in pandas._libs.hashtable.PyObjectHashTable.get_item
+KeyError: 'rk_V0'
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/home/user/quant_fund_picker/factor_study.py", line 165, in <module>
+    main()
+    ~~~~^^
+  File "/home/user/quant_fund_picker/factor_study.py", line 153, in main
+    tbl = stats_table(df)
+  File "/home/user/quant_fund_picker/factor_study.py", line 134, in stats_table
+    mo = dd[(dd[sc] >= 50) & (dd[f"rk_{v[:2]}"] >= 0.95) & (dd.fwd6.notna())]
+                              ~~^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.13/site-packages/pandas/core/frame.py", line 4102, in __getitem__
+    indexer = self.columns.get_loc(key)
+  File "/usr/local/lib/python3.13/site-packages/pandas/core/indexes/base.py", line 3812, in get_loc
+    raise KeyError(key) from err
+KeyError: 'rk_V0'
