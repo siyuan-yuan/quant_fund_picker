@@ -4,6 +4,7 @@
 =================================================================
 用法(在 quant_fund_picker 目录下):
     python backtest_local.py                          # 默认: V3.8 最优执行层, 70买45卖
+    python backtest_local.py --pool-mode pit-top --pit-top-n 100 --score-suffix auto  # 严格历史动态池复盘(PiT)
     python backtest_local.py --legacy                 # 旧版纯S阈值回测
     python backtest_local.py --sell 50                # 改动一条线对比
     python backtest_local.py --capital 200000 --slots 8
@@ -17,17 +18,16 @@
     bt_equity_<tag>.png   净值与回撤图(vs 沪深300)
 
 评分面板缓存 output/bt_scores_cache/: 每个季点打一次分永久缓存, 二次运行秒级
-严格口径: 默认必须提供历史可投池快照（含清盘基金），每月动态建池；信号 T+2 真实交易日成交；回测豁免无法获得历史档案的任期/AUM 惩罚。
+诚实边界: 默认使用全市场池（scan_market.py 生成的 rank_all.csv）; 回测豁免任期惩罚
 =================================================================
 """
-import os, sys, argparse, time
+import os, sys, argparse, hashlib, time, re
 import numpy as np
 import pandas as pd
 
 import provider
 import rbsa, factors
 from engine import score_fund, finalize
-from pit_universe import PITUniverseStore, PITUniverseError
 from config import (STRAT_BUY_TH, STRAT_SELL_TH, STRAT_SLOTS, STRAT_VERSION,
                     STRAT_CASH_YIELD, STRAT_REBALANCE, STRAT_TRAIL_STOP,
                     STRAT_CRISIS_MA, STRAT_CRISIS_VOL_WINDOW, STRAT_CRISIS_VOL_Q,
@@ -37,6 +37,41 @@ from config import (STRAT_BUY_TH, STRAT_SELL_TH, STRAT_SLOTS, STRAT_VERSION,
                     STRAT_HI_WATER, STRAT_HI_WATER_SLOTS)
 
 CACHE_DIR = "output/bt_scores_cache"
+FACTOR_ROWS = "output/factor_rows"
+
+
+def get_best_score_suffix(cache_dir=CACHE_DIR):
+    """自动选择覆盖行数最多的评分缓存后缀"""
+    if not os.path.exists(cache_dir):
+        return ""
+    suffix_rows = {}
+    pattern = re.compile(r'^\d{4}-\d{2}-\d{2}(.*)\.csv$')
+    for fname in os.listdir(cache_dir):
+        m = pattern.match(fname)
+        if not m:
+            continue
+        suf = m.group(1)
+        fpath = os.path.join(cache_dir, fname)
+        try:
+            with open(fpath, "r", encoding="utf-8") as fp:
+                rows = sum(1 for _ in fp) - 1
+                suffix_rows[suf] = suffix_rows.get(suf, 0) + max(rows, 0)
+        except Exception:
+            pass
+    if not suffix_rows:
+        return ""
+    return max(suffix_rows.items(), key=lambda x: x[1])[0]
+
+
+def resolve_score_suffix(suffix_arg, cache_dir=CACHE_DIR):
+    if suffix_arg == "auto" or not suffix_arg:
+        best_suf = get_best_score_suffix(cache_dir)
+        return best_suf
+    else:
+        suf = suffix_arg.lstrip("*")
+        if suf and not suf.startswith("_"):
+            suf = "_" + suf
+        return suf
 
 
 # ============ 1. 打分面板: 每个季点一份(优先复用已有, 缺失则现打现存) ============
@@ -73,14 +108,13 @@ def score_from_raw(g):
     return g
 
 
-def harvest_date(d, universe):
-    """仅对该日历史快照的成员打分；pit_meta 阻断今天元数据泄漏。"""
+def harvest_date(d, codes):
+    """对一个季点现打分(慢, 打一次即缓存)"""
     t0 = time.time()
     rows = []
-    meta = universe.set_index("code")[["name", "fund_type"]].to_dict("index")
     from concurrent.futures import ThreadPoolExecutor, as_completed
     with ThreadPoolExecutor(max_workers=10) as ex:
-        futs = {ex.submit(score_fund, c, as_of=d, bt=True, pit_meta=meta[c]): c for c in meta}
+        futs = {ex.submit(score_fund, c, as_of=d, bt=True): c for c in codes}
         for fut in as_completed(futs):
             try:
                 r = fut.result()
@@ -101,33 +135,49 @@ def harvest_date(d, universe):
             trend_ok=bool(h.trend_ok), wr=h.ir_winrate, dc=h.down_capture,
             r4=h.mom_4m1m, r7=h.mom_7m1m, R_MDD=pdt.get("R_MDD"), other_pen=op))
     df = pd.DataFrame(recs)
-    print(f"  [PiT harvest] {d} 快照成员 {len(universe)}，有效评分 {len(df)} ({time.time()-t0:.0f}s)", flush=True)
+    print(f"  [harvest] {d} 打分 {len(df)} 只 ({time.time()-t0:.0f}s)", flush=True)
     return df
 
 
-def build_panel(dates, universe_store, rebuild=False):
-    """严格动态可投池：每个信号日独立取历史快照，不复用旧研究池原料。"""
-    root = os.path.join(CACHE_DIR, "strict_" + universe_store.manifest_hash())
-    os.makedirs(root, exist_ok=True)
-    parts, audits = [], []
+def build_panel(dates, codes, default_universe, rebuild=False, pool_mode="default", score_suffix="auto"):
+    """返回 DataFrame: date × code 的原始量+S; 逐季点缓存"""
+    os.makedirs(CACHE_DIR, exist_ok=True)
+    parts = []
+    if pool_mode == "pit-top":
+        suf = resolve_score_suffix(score_suffix, CACHE_DIR)
+        print(f"  [PiT] 使用评分缓存后缀: '{suf or '(无后缀)'}'")
+        for d in dates:
+            ck = f"{CACHE_DIR}/{d}{suf}.csv"
+            if os.path.exists(ck):
+                g = pd.read_csv(ck, dtype={"code": str})
+                if not g.empty:
+                    g = score_from_raw(g)
+                    g["date"] = d
+                    parts.append(g[["date", "code", "S", "water", "R_MDD"]])
+            else:
+                print(f"  [warn] {d} 无评分缓存数据 ({ck}), 跳过")
+        return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+    uid = "" if default_universe else "_" + hashlib.md5(",".join(sorted(codes)).encode()).hexdigest()[:8]
     for d in dates:
-        universe, audit = universe_store.universe(d)
-        ck = f"{root}/{d}.csv"
-        if (not rebuild) and os.path.exists(ck):
+        fr = f"{FACTOR_ROWS}/{d}.csv"
+        ck = f"{CACHE_DIR}/{d}{uid}.csv"
+        if default_universe and os.path.exists(fr):          # 研究池已有原料行
+            g = pd.read_csv(fr, dtype={"code": str})
+            g = g[g.code.isin(codes)].copy()
+        elif (not rebuild) and os.path.exists(ck):
             g = pd.read_csv(ck, dtype={"code": str})
         else:
-            g = harvest_date(d, universe)
+            g = harvest_date(d, codes)
             if not g.empty:
                 g.to_csv(ck, index=False, encoding="utf-8-sig")
-        audit.update(scored_members=int(len(g)), cache_file=ck)
-        audits.append(audit)
         if g.empty:
-            print(f"  [warn] {d} 没有可用的 PiT 评分，跳过")
+            print(f"  [warn] {d} 无评分数据, 跳过")
             continue
         g = score_from_raw(g)
         g["date"] = d
         parts.append(g[["date", "code", "S", "water", "R_MDD"]])
-    return (pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(), audits)
+    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
 
 # ============ 2. 数据 ============
@@ -188,6 +238,12 @@ def simulate(panel, navs, bench, dates, args):
     用 `--legacy` 可退回旧的 S>buy / S<sell / fixed-slot 逻辑。
     """
     by_date = {d: g.set_index("code") for d, g in panel.groupby("date")}
+    eligible_by_date = {}
+    if getattr(args, "pool_mode", "default") == "pit-top":
+        pit_top_n = getattr(args, "pit_top_n", 100)
+        for d, g in by_date.items():
+            eligible_by_date[d] = set(g.nlargest(pit_top_n, "S").index)
+
     T0, T1 = pd.Timestamp(dates[0]), pd.Timestamp(dates[-1])
     day_grid = bench.loc[T0:T1].index
 
@@ -385,7 +441,11 @@ def simulate(panel, navs, bench, dates, args):
         if day_str in by_date:
             g = by_date[day_str]
             last_scores = g
-            candidates = g[g.S > args.buy].sort_values("S", ascending=False)
+            if getattr(args, "pool_mode", "default") == "pit-top":
+                eligible = eligible_by_date.get(day_str, set())
+                candidates = g[(g.S > args.buy) & (g.index.isin(eligible))].sort_values("S", ascending=False)
+            else:
+                candidates = g[g.S > args.buy].sort_values("S", ascending=False)
 
             # 熔断后：仅在右侧信号出现且非危机时复活，并重置HWM为当前净值
             if cppi_on and cppi_locked:
@@ -417,6 +477,9 @@ def simulate(panel, navs, bench, dates, args):
                 crisis_blocked += len(candidates)
             elif daily_cap > 0:
                 for c, row in candidates.iterrows():
+                    if getattr(args, "pool_mode", "default") == "pit-top":
+                        if c not in eligible_by_date.get(day_str, set()):
+                            continue
                     if c in positions or len(positions) >= min(args.slots, daily_cap) or c not in navs:
                         continue
                     price = px(navs[c], day)
@@ -468,6 +531,10 @@ def report(ec, tr, bench, args, dates, names, tag):
     model_name = ec.attrs.get("model", "legacy")
     S.append(f"# 本地回测报告  区间 {dates[0]} → {dates[-1]}  tag={tag}\n")
     S.append(f"模型: **{model_name}**\n")
+    if getattr(args, "pool_mode", "default") == "pit-top":
+        S.append(f"候选池模式: **严格历史动态池复盘 (PiT Top{getattr(args, 'pit_top_n', 100)})**\n")
+    else:
+        S.append("候选池模式: **默认/自选池 (非严格PiT)**\n")
     v38_on = not getattr(args, 'legacy', False)
     S.append(f"参数: 买 S>{args.buy:.0f} / 卖 S<{args.sell:.0f} / 槽位 {args.slots} / 本金 {args.capital:,.0f} 元 / "
              f"成本 申购{args.cost_in:.2%}+赎回{args.cost_out:.2%} / "
@@ -524,7 +591,10 @@ def report(ec, tr, bench, args, dates, names, tag):
         S.append("### 最差 5 笔")
         S.append(tr.nsmallest(5, "net_ret")[["code", "entry_date", "exit_date", "entry_S",
               "net_ret", "pnl_yuan", "hold_days"]].round(3).to_markdown(index=False) + "\n")
-    S.append("> 严格 PiT 口径：每月只使用当时已知的历史可投池快照，信号日后延迟成交；快照审计见 `bt_pit_audit.json`。历史经理任期/AUM未有逐日档案，评分中已豁免，不能解释为该两项通过验证。仅量化研究用途，不构成投资建议。\n")
+    if getattr(args, "pool_mode", "default") == "pit-top":
+        S.append("> 仅量化研究用途，不构成投资建议。严格历史动态池复盘：买入仅限当日评分 TopN 基金，避免未来函数的幸存者偏差；卖出仍按照当日全市场评分执行。\n")
+    else:
+        S.append("> 仅量化研究用途，不构成投资建议。默认池含幸存者偏差(收益上偏); 回测豁免任期惩罚。\n")
     txt = "\n".join(S)
     open(f"output/bt_summary_{tag}.md", "w", encoding="utf-8").write(txt)
     # 控制台精简版
@@ -574,11 +644,7 @@ def main():
     ap.add_argument("--capital", type=float, default=100000)
     ap.add_argument("--cost-in", dest="cost_in", type=float, default=0.0015)
     ap.add_argument("--cost-out", dest="cost_out", type=float, default=0.005)
-    ap.add_argument("--codes", default=None, help="严格模式禁用：请把历史成分写入 --universe-dir 快照")
-    ap.add_argument("--universe-dir", default="data/pit_universe",
-                    help="历史可投池快照目录（严格模式必需，含清盘基金）")
-    ap.add_argument("--execution-lag", type=int, default=2,
-                    help="信号日后延迟的基准交易日数；默认2：T+1披露净值后按下一日净值成交")
+    ap.add_argument("--codes", default=None)
     ap.add_argument("--rebuild", action="store_true")
     ap.add_argument("--legacy", action="store_true", help="关闭V3.8执行层，回到旧版纯S阈值回测")
     ap.add_argument("--cash-yield", type=float, default=STRAT_CASH_YIELD, help="V3.8闲置现金年化收益")
@@ -591,57 +657,64 @@ def main():
     ap.add_argument("--crisis-ma", type=int, default=STRAT_CRISIS_MA)
     ap.add_argument("--crisis-vol-window", type=int, default=STRAT_CRISIS_VOL_WINDOW)
     ap.add_argument("--crisis-vol-q", type=float, default=STRAT_CRISIS_VOL_Q)
+    ap.add_argument("--pool-mode", choices=["default", "pit-top"], default="default",
+                    help="候选池模式: default 为普通模式, pit-top 为严格历史动态池复盘")
+    ap.add_argument("--pit-top-n", dest="pit_top_n", type=int, default=100,
+                    help="严格历史复盘模式下，每个决策日买入仅限当日 S 分排名前 N 的基金")
+    ap.add_argument("--score-suffix", dest="score_suffix", default="auto",
+                    help="评分缓存后缀，如 _2e4ec0f5，或者 auto 自动选择覆盖行数最多的后缀")
     args = ap.parse_args()
 
-    if args.codes:
-        ap.error("--codes 是静态自选池，会破坏动态可投池；严格 PiT 回测请提供历史快照。")
-    if args.execution_lag < 1:
-        ap.error("--execution-lag 必须至少为 1，禁止信号日同价成交。")
-    try:
-        universe_store = PITUniverseStore(args.universe_dir)
-    except PITUniverseError as exc:
-        ap.error(str(exc))
+    # 读取基金池
+    if args.pool_mode == "pit-top":
+        suf = resolve_score_suffix(args.score_suffix, CACHE_DIR)
+        print(f"[PiT] 启用严格历史动态池复盘 (买入限当日 Top{args.pit_top_n})")
+        print(f"[PiT] 读取缓存后缀: '{suf or '(无后缀)'}' (无需静态代码池，避免历史并集池未来函数)")
+        codes = []
+        default_universe = False
+    elif args.codes:
+        if "top100" in str(args.codes):
+            print("⚠️ 提醒：top100_history_pool.txt 是历史并集池，会提前暴露未来入榜基金。")
+            print("   严格回测请使用 --pool-mode pit-top --pit-top-n 100")
+        codes = [l.strip().zfill(6) for l in open(args.codes, encoding="utf-8")
+                 if l.strip() and l.strip()[0].isdigit()]
+        default_universe = False
+        print(f"[池] 自定义 {len(codes)} 只: {args.codes}")
+    else:
+        codes = sorted(set(pd.concat([pd.read_csv(f"{FACTOR_ROWS}/{f}", dtype={"code": str})["code"]
+                                      for f in os.listdir(FACTOR_ROWS) if f.endswith(".csv")]).tolist()))
+        default_universe = True
+        print(f"[池] 全市场池 {len(codes)} 只")
 
-    # 每月末仅使用截至该日已知的信息打分；交易在净值披露后的后续交易日执行。
+    # ========== 关键修改：每月末打分 ==========
     end = args.end or str((pd.Timestamp.today() - pd.offsets.MonthEnd(1)).date())
-    signal_dates = [str(d.date()) for d in pd.date_range(args.start, end, freq="ME")]
-    if not signal_dates:
-        ap.error("回测区间内没有月末信号日。")
-    print(f"[严格 PiT] 信号 {signal_dates[0]} → {signal_dates[-1]}，共 {len(signal_dates)} 个；"
-          f"快照指纹 {universe_store.manifest_hash()}")
+    qs = [str(d.date()) for d in pd.date_range(args.start, end, freq="ME")]
+    print(f"[打分区间] {qs[0]} → {qs[-1]} 共 {len(qs)} 个月末")
 
-    panel, audits = build_panel(signal_dates, universe_store, args.rebuild)
-    if panel.empty:
-        print("❌ 没有任何可用 PiT 评分月份，程序退出")
-        return
-    bench = provider.get_close_by_src("sina", "sh000300").dropna().sort_index()
-    # 防止月末节假日和同日成交：每个信号映射到至少 T+1，默认 T+2 的真实基准交易日。
-    trade_map = {}
-    for d in sorted(panel.date.unique()):
-        pos = bench.index.searchsorted(pd.Timestamp(d), side="right") + args.execution_lag - 1
-        if pos < len(bench.index):
-            trade_map[d] = str(bench.index[pos].date())
-    panel["signal_date"] = panel["date"]
-    panel["date"] = panel["date"].map(trade_map)
-    panel = panel.dropna(subset=["date"])
-    if panel.empty:
-        print("❌ 信号日之后没有可用于成交的基准交易日，程序退出")
-        return
-    pd.DataFrame(audits).to_csv("output/bt_pit_universe_audit.csv", index=False, encoding="utf-8-sig")
-    import json
-    with open("output/bt_pit_audit.json", "w", encoding="utf-8") as fh:
-        json.dump({"mode": "strict_point_in_time_dynamic_universe", "execution_lag_sessions": args.execution_lag,
-                   "manifest": universe_store.manifest_hash(), "snapshots": audits}, fh,
-                  ensure_ascii=False, indent=2)
-    print(f"[面板] 严格动态评分行 {len(panel)} | S>{args.buy:.0f} 信号 {int((panel.S > args.buy).sum())} 个")
+    panel = build_panel(qs, codes, default_universe, args.rebuild,
+                        pool_mode=args.pool_mode, score_suffix=args.score_suffix)
+    print(f"[面板] 评分行 {len(panel)} | S>{args.buy:.0f} 信号 {int((panel.S > args.buy).sum())} 个")
 
-    qs = sorted(panel["date"].unique())
-    print(f"[有效执行月] {len(qs)} 个（信号日后 T+{args.execution_lag} 交易日成交）")
+    # 过滤掉没有打分数据的月份
+    available_dates = set(panel["date"].unique())
+    qs = [d for d in qs if d in available_dates]
+    print(f"[有效打分月] 实际可用 {len(qs)} 个月")
+
+    if not qs:
+        print("❌ 没有任何可用打分月份，程序退出")
+        return
+
     navs = load_navs(list(set(panel.code)))
     print(f"[净值] 可用 {len(navs)}/{panel.code.nunique()}")
 
+    bench = provider.get_close_by_src("sina", "sh000300").dropna().sort_index()
+
     model_tag = "legacy" if args.legacy else "v38"
-    tag = f"pit_{model_tag}_b{args.buy:.0f}s{args.sell:.0f}n{args.slots}k{int(args.capital/10000)}w"
+    if args.pool_mode == "pit-top":
+        pool_suffix = f"_pittop{args.pit_top_n}"
+    else:
+        pool_suffix = "_monthly" if not default_universe else ""
+    tag = (f"{model_tag}_b{args.buy:.0f}s{args.sell:.0f}n{args.slots}k{int(args.capital/10000)}w" + pool_suffix)
 
     ec, tr = simulate(panel, navs, bench, qs, args)
     names = load_names()
