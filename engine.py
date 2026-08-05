@@ -176,7 +176,7 @@ def finalize(rows: list, as_of: str = None) -> pd.DataFrame:
         base = (num / den) if den > 1e-9 else 0.0
         return round(risk.apply_penalties(base, r["penalties"] or []), 1)
 
-    df["S_total"] = df.apply(total, axis=1)
+    df["S_total"] = [total(r) for _, r in df.iterrows()]
     df["water"] = None if water != water else round(water, 4)
     df["weights_mode"] = mode
     df["w_value"], df["w_alpha"], df["w_mom"] = wv, wa, wm

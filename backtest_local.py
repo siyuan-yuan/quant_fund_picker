@@ -16,7 +16,7 @@
     bt_equity_<tag>.png   净值与回撤图(vs 沪深300)
 
 评分面板缓存 output/bt_scores_cache/: 每个季点打一次分永久缓存, 二次运行秒级
-诚实边界: 默认池=存活至今的217只研究池(幸存者偏差上偏); 回测豁免任期惩罚
+诚实边界: 默认使用全市场池（scan_market.py 生成的 rank_all.csv）; 回测豁免任期惩罚
 =================================================================
 """
 import os, sys, argparse, hashlib, time
@@ -159,14 +159,8 @@ def px(s, dt):
 # ============ 3. 逐日模拟(金额记账) ============
 def simulate(panel, navs, bench, dates, args):
     by_date = {d: g.set_index("code") for d, g in panel.groupby("date")}
-    water = panel.groupby("date")["water"].first()
     T0, T1 = pd.Timestamp(dates[0]), pd.Timestamp(dates[-1])
-    day_grid = bench.loc[:T1].index[bench.loc[:T1].index >= T0]
-    dmap = {}
-    for d in dates:
-        elig = day_grid[day_grid <= pd.Timestamp(d)]
-        if len(elig):
-            dmap[str(elig[-1].date())] = d
+    day_grid = bench.loc[T0:T1].index
 
     cash, positions, trades, curve = float(args.capital), {}, [], []
 
@@ -180,53 +174,47 @@ def simulate(panel, navs, bench, dates, args):
         trades.append(dict(
             code=code, entry_date=p["entry_date"], exit_date=str(pd.Timestamp(day).date()),
             entry_px=round(p["entry_px"], 4), exit_px=round(price, 4),
-            entry_S=round(p["entry_S"], 1),
-            exit_S=round(exit_s, 1) if pd.notna(exit_s) else np.nan,
-            entry_water=p["entry_water"], exit_reason=reason,
+            entry_S=round(p["entry_S"], 1), exit_S=round(exit_s, 1) if pd.notna(exit_s) else np.nan,
             hold_days=(pd.Timestamp(day) - pd.Timestamp(p["entry_date"])).days,
-            gross_ret=round(price / p["entry_px"] - 1, 4),
-            net_ret=round(ret, 4),
-            ann_ret=round((1 + ret) ** (365.25 / max((pd.Timestamp(day) - pd.Timestamp(p["entry_date"])).days, 1)) - 1, 4),
-            pnl_yuan=round(net_out - p["alloc"], 2),
-            alloc_yuan=round(p["alloc"], 2)))
+            net_ret=round(ret, 4), pnl_yuan=round(net_out - p["alloc"], 2)))
 
     for day in day_grid:
-        if str(day.date()) in dmap:
-            dkey = dmap[str(day.date())]
-            g = by_date[dkey]
-            w = float(water.get(dkey, np.nan))
-            for c in list(positions):                        # 先卖
-                if c not in g.index or pd.isna(g.loc[c, "S"]):
-                    sell(c, day, "跌出面板")
-                elif g.loc[c, "S"] < args.sell:
-                    sell(c, day, f"S<{args.sell:.0f}", exit_s=g.loc[c, "S"])
-            max_slots = args.slots
-            if args.hi_water and w >= STRAT_HI_WATER:        # 休眠安全网(默认关)
-                max_slots = STRAT_HI_WATER_SLOTS
-                if len(positions) > max_slots:
-                    order = sorted(positions, key=lambda c: g.loc[c, "S"] if c in g.index else -1,
-                                   reverse=True)
-                    for c in order[max_slots:]:
-                        sell(c, day, f"水位≥{STRAT_HI_WATER:.0%}瘦身",
-                             exit_s=g.loc[c, "S"] if c in g.index else np.nan)
+        day_str = str(day.date())
+
+        # ========== 每天检查卖出 ==========
+        for c in list(positions):
+            if c not in by_date.get(day_str, pd.DataFrame()).index:
+                continue
+            score = by_date[day_str].loc[c, "S"]
+            if pd.notna(score) and score < args.sell:
+                sell(c, day, f"S<{args.sell:.0f}", exit_s=score)
+
+        # ========== 每天检查买入（如果当天有打分）==========
+        if day_str in by_date:
+            g = by_date[day_str]
             equity_now = cash + sum(p["units"] * px(navs[c], day) for c, p in positions.items())
+
             for c, row in g[g.S > args.buy].sort_values("S", ascending=False).iterrows():
-                if c in positions or len(positions) >= max_slots or c not in navs:
+                if c in positions or len(positions) >= args.slots or c not in navs:
                     continue
                 price = px(navs[c], day)
-                if pd.isna(price) or pd.Timestamp(navs[c].index[0]) > day:
+                if pd.isna(price):
                     continue
-                alloc = min(cash, equity_now / max_slots)
+                alloc = min(cash, equity_now / args.slots)
                 if alloc < equity_now * 0.02:
                     continue
                 positions[c] = dict(units=alloc / (price * (1 + args.cost_in)),
-                                    entry_px=price, entry_date=dkey,
-                                    entry_S=row.S, entry_water=w, alloc=alloc)
+                                    entry_px=price, entry_date=day_str,
+                                    entry_S=row.S, alloc=alloc)
                 cash -= alloc
+
         eq = cash + sum(p["units"] * px(navs[c], day) for c, p in positions.items())
         curve.append((day, eq, len(positions)))
+
+    # 期末清仓
     for c in list(positions):
-        sell(c, pd.Timestamp(dates[-1]), "期末清算")
+        sell(c, T1, "期末清算")
+
     ec = pd.DataFrame(curve, columns=["date", "equity", "n_pos"]).set_index("date")
     ec["drawdown"] = ec.equity / ec.equity.cummax() - 1
     return ec, pd.DataFrame(trades)
@@ -248,7 +236,7 @@ def report(ec, tr, bench, args, dates, names, tag):
     S = []
     S.append(f"# 本地回测报告  区间 {dates[0]} → {dates[-1]}  tag={tag}\n")
     S.append(f"参数: 买 S>{args.buy:.0f} / 卖 S<{args.sell:.0f} / 槽位 {args.slots} / 本金 {args.capital:,.0f} 元 / "
-             f"成本 申购{args.cost_in:.2%}+赎回{args.cost_out:.2%} / 高位瘦身 {'开' if args.hi_water else '关'}\n")
+             f"成本 申购{args.cost_in:.2%}+赎回{args.cost_out:.2%} / 高位瘦身 {'开' if getattr(args, 'hi_water', False) else '关'}\\n")
     S.append("## 总账")
     S.append(f"| 指标 | 数值 |\n|---|---|")
     S.append(f"| 期末资产 | **{ec.equity.iloc[-1]:,.0f} 元** |")
@@ -268,11 +256,19 @@ def report(ec, tr, bench, args, dates, names, tag):
         S.append(f"| 盈亏比 | {pf} (均盈{aw:+.1%} / 均亏{al if pd.notna(al) else 0:+.1%}) |")
         S.append(f"| 平均持有 | {tr.hold_days.mean():.0f} 天 |")
         S.append(f"| 累计盈亏 | {tr.pnl_yuan.sum():+,.0f} 元 |")
-        S.append(f"| 累计交易成本 | {(tr.alloc_yuan * args.cost_in + (tr.alloc_yuan + tr.pnl_yuan) * args.cost_out).sum():,.0f} 元 |\n")
+        cost_in_total = (tr["alloc_yuan"] * args.cost_in).sum() if "alloc_yuan" in tr.columns else 0
+        cost_out_total = (
+                    (tr["alloc_yuan"] + tr["pnl_yuan"]) * args.cost_out).sum() if "alloc_yuan" in tr.columns else 0
+        S.append(f"| 累计交易成本 | {cost_in_total + cost_out_total:,.0f} 元 |\n")
         S.append("### 退出原因")
-        S.append(tr.groupby("exit_reason").agg(n=("net_ret", "size"),
-              均净收益=("net_ret", "mean"), 胜率=("net_ret", lambda x: (x > 0).mean())
-              ).round(3).to_markdown() + "\n")
+        ### 退出原因
+        if len(tr) > 0 and "exit_reason" in tr.columns:
+            S.append(tr.groupby("exit_reason").agg(n=("net_ret", "size"),
+                                                   均净收益=("net_ret", "mean"),
+                                                   胜率=("net_ret", lambda x: (x > 0).mean())
+                                                   ).round(3).to_markdown() + "\n")
+        else:
+            S.append("（无交易记录）\n")
         S.append("### 按入场年")
         tr2 = tr.copy(); tr2["yr"] = pd.to_datetime(tr2.entry_date).dt.year
         S.append(tr2.groupby("yr").agg(n=("net_ret", "size"),
@@ -325,22 +321,20 @@ def chart(ec, bench, args, dates, tag):
 
 # ============ 5. 入口 ============
 def main():
-    ap = argparse.ArgumentParser(description="本地自助回测 (>70买/<45卖 战略纪律)")
-    ap.add_argument("--start", default="2019-03-31", help="起始季(季末日), 默认 2019-03-31")
-    ap.add_argument("--end", default=None, help="结束季(季末日), 默认最近完整季")
-    ap.add_argument("--buy", type=float, default=STRAT_BUY_TH)
-    ap.add_argument("--sell", type=float, default=STRAT_SELL_TH)
-    ap.add_argument("--slots", type=int, default=STRAT_SLOTS)
-    ap.add_argument("--capital", type=float, default=100000, help="本金(元)")
+    ap = argparse.ArgumentParser(description="月度打分 + 日度再平衡回测")
+    ap.add_argument("--start", default="2006-03-31", help="起始日期")
+    ap.add_argument("--end", default=None, help="结束日期")
+    ap.add_argument("--buy", type=float, default=70.0)
+    ap.add_argument("--sell", type=float, default=45.0)
+    ap.add_argument("--slots", type=int, default=10)
+    ap.add_argument("--capital", type=float, default=100000)
     ap.add_argument("--cost-in", dest="cost_in", type=float, default=0.0015)
     ap.add_argument("--cost-out", dest="cost_out", type=float, default=0.005)
-    ap.add_argument("--hi-water", dest="hi_water", action="store_true",
-                    help="开启水位≥90%%持仓瘦身(样本从未触发的安全网)")
-    ap.add_argument("--codes", default=None, help="自定义基金池文件(每行一个代码); 缺省=217研究池")
-    ap.add_argument("--rebuild", action="store_true", help="强制重打新季度评分(换模型参数后使用)")
+    ap.add_argument("--codes", default=None)
+    ap.add_argument("--rebuild", action="store_true")
     args = ap.parse_args()
 
-    # 池
+    # 读取基金池
     if args.codes:
         codes = [l.strip().zfill(6) for l in open(args.codes, encoding="utf-8")
                  if l.strip() and l.strip()[0].isdigit()]
@@ -350,32 +344,44 @@ def main():
         codes = sorted(set(pd.concat([pd.read_csv(f"{FACTOR_ROWS}/{f}", dtype={"code": str})["code"]
                                       for f in os.listdir(FACTOR_ROWS) if f.endswith(".csv")]).tolist()))
         default_universe = True
-        print(f"[池] 默认研究池 {len(codes)} 只")
-    # 季点
-    end = args.end or str((pd.Timestamp.today() - pd.offsets.QuarterEnd(1)).date())  # 最近已完整季
-    qs = [str(d.date()) for d in pd.date_range(args.start, end, freq="Q")]
-    print(f"[区间] {qs[0]} → {qs[-1]} 共 {len(qs)} 个季点")
+        print(f"[池] 全市场池 {len(codes)} 只")
+
+    # ========== 关键修改：每月末打分 ==========
+    end = args.end or str((pd.Timestamp.today() - pd.offsets.MonthEnd(1)).date())
+    qs = [str(d.date()) for d in pd.date_range(args.start, end, freq="ME")]
+    print(f"[打分区间] {qs[0]} → {qs[-1]} 共 {len(qs)} 个月末")
 
     panel = build_panel(qs, codes, default_universe, args.rebuild)
     print(f"[面板] 评分行 {len(panel)} | S>{args.buy:.0f} 信号 {int((panel.S > args.buy).sum())} 个")
+
+    # 过滤掉没有打分数据的月份
+    available_dates = set(panel["date"].unique())
+    qs = [d for d in qs if d in available_dates]
+    print(f"[有效打分月] 实际可用 {len(qs)} 个月")
+
+    if not qs:
+        print("❌ 没有任何可用打分月份，程序退出")
+        return
+
     navs = load_navs(list(set(panel.code)))
     print(f"[净值] 可用 {len(navs)}/{panel.code.nunique()}")
-    bench = provider.get_close_by_src("sina", "sh000300")
-    bench = bench.dropna().sort_index()
+
+    bench = provider.get_close_by_src("sina", "sh000300").dropna().sort_index()
 
     tag = (f"b{args.buy:.0f}s{args.sell:.0f}n{args.slots}k{int(args.capital/10000)}w" +
-           ("_hiw" if args.hi_water else "") + ("_custom" if not default_universe else ""))
+           ("_monthly" if not default_universe else ""))
+
     ec, tr = simulate(panel, navs, bench, qs, args)
     names = load_names()
     if len(tr):
         tr.insert(1, "name", tr.code.map(lambda c: names.get(c, "")))
         tr = tr.sort_values(["entry_date", "code"])
+
     tr.to_csv(f"output/bt_trades_{tag}.csv", index=False, encoding="utf-8-sig")
     ec.reset_index().to_csv(f"output/bt_daily_{tag}.csv", index=False, encoding="utf-8-sig")
     report(ec, tr, bench, args, qs, names, tag)
     chart(ec, bench, args, qs, tag)
     print(f"[输出] output/bt_trades_{tag}.csv | bt_daily_{tag}.csv | bt_summary_{tag}.md")
-
 
 if __name__ == "__main__":
     main()
