@@ -1,0 +1,8 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local/generated strategy experiment artifacts (large, reproducible)
+output/strategy_experiment_*.csv
+output/strategy_experiment_*.md
+output/strategy_experiment_*.png

@@ -3,7 +3,8 @@
 本地自助回测 —— 你只管敲命令，它帮你出三本账
 =================================================================
 用法(在 quant_fund_picker 目录下):
-    python backtest_local.py                          # 默认: 2019Q1→最近完整季, 70买45卖
+    python backtest_local.py                          # 默认: V3.8 最优执行层, 70买45卖
+    python backtest_local.py --legacy                 # 旧版纯S阈值回测
     python backtest_local.py --sell 50                # 改动一条线对比
     python backtest_local.py --capital 200000 --slots 8
     python backtest_local.py --codes 自选.txt         # 对自定义基金池回测(每行一个6位代码)
@@ -26,7 +27,12 @@ import pandas as pd
 import provider
 import rbsa, factors
 from engine import score_fund, finalize
-from config import (STRAT_BUY_TH, STRAT_SELL_TH, STRAT_SLOTS,
+from config import (STRAT_BUY_TH, STRAT_SELL_TH, STRAT_SLOTS, STRAT_VERSION,
+                    STRAT_CASH_YIELD, STRAT_REBALANCE, STRAT_TRAIL_STOP,
+                    STRAT_CRISIS_MA, STRAT_CRISIS_VOL_WINDOW, STRAT_CRISIS_VOL_Q,
+                    STRAT_CPPI, STRAT_CPPI_DD1, STRAT_CPPI_SLOTS1,
+                    STRAT_CPPI_DD2, STRAT_CPPI_SLOTS2, STRAT_CPPI_DD3,
+                    STRAT_CPPI_SLOTS3, STRAT_CPPI_HWM_MODE,
                     STRAT_HI_WATER, STRAT_HI_WATER_SLOTS)
 
 CACHE_DIR = "output/bt_scores_cache"
@@ -156,67 +162,292 @@ def px(s, dt):
     return float(v) if pd.notna(v) else np.nan
 
 
+def realized_vol_regime(bench, window=20, q=0.80, min_hist=60):
+    """返回 (ann_vol, rolling_prior_quantile)。分位阈值只使用当日之前历史，避免未来函数。"""
+    ret = bench.pct_change()
+    vol = ret.rolling(window).std() * np.sqrt(252)
+    vals, th = [], []
+    for v in vol.values:
+        hist = [x for x in vals if pd.notna(x)]
+        th.append(float(np.quantile(hist, q)) if len(hist) >= min_hist else np.nan)
+        if pd.notna(v):
+            vals.append(float(v))
+    return vol, pd.Series(th, index=bench.index)
+
+
+def is_quarter_end_signal(day_str):
+    return pd.Timestamp(day_str).month in (3, 6, 9, 12)
+
+
 # ============ 3. 逐日模拟(金额记账) ============
 def simulate(panel, navs, bench, dates, args):
+    """V3.8 Calmar 版逐日模拟。
+
+    默认执行 `config.STRAT_VERSION`：固定10槽、季度再平衡、20%单基移动止损、
+    现金2.5%收益、MA200&Vol80危机禁买、组合自身CPPI(-15/-20/-25)。
+    用 `--legacy` 可退回旧的 S>buy / S<sell / fixed-slot 逻辑。
+    """
     by_date = {d: g.set_index("code") for d, g in panel.groupby("date")}
     T0, T1 = pd.Timestamp(dates[0]), pd.Timestamp(dates[-1])
     day_grid = bench.loc[T0:T1].index
 
+    # ===== V3.8 开关 =====
+    use_v38 = not getattr(args, "legacy", False)
+    cash_yield = float(getattr(args, "cash_yield", STRAT_CASH_YIELD) or 0.0) if use_v38 else 0.0
+    trail_stop = float(getattr(args, "trail_stop", STRAT_TRAIL_STOP) or 0.0) if use_v38 else 0.0
+    rebalance_freq = getattr(args, "rebalance", STRAT_REBALANCE) if use_v38 else "none"
+    crisis_on = bool(getattr(args, "crisis", True)) if use_v38 else False
+    cppi_on = bool(getattr(args, "cppi", STRAT_CPPI)) if use_v38 else False
+
+    ma = bench.rolling(int(getattr(args, "crisis_ma", STRAT_CRISIS_MA))).mean() if crisis_on else None
+    vol, vol_th = realized_vol_regime(
+        bench,
+        window=int(getattr(args, "crisis_vol_window", STRAT_CRISIS_VOL_WINDOW)),
+        q=float(getattr(args, "crisis_vol_q", STRAT_CRISIS_VOL_Q)),
+    ) if crisis_on else (None, None)
+
     cash, positions, trades, curve = float(args.capital), {}, [], []
+    last_scores = None
+    total_cost, cash_interest_total, rebal_turnover = 0.0, 0.0, 0.0
+    prev_day = None
+    crisis_days = crisis_blocked = 0
+    cppi_hwm, cppi_locked = float(args.capital), False
+    cppi_sells = cppi_hard_stops = cppi_unlocks = 0
+
+    def pos_value(code, day):
+        return positions[code]["units"] * px(navs[code], day)
+
+    def equity(day):
+        return cash + sum(pos_value(c, day) for c in positions)
 
     def sell(code, day, reason, exit_s=np.nan, price=None):
-        nonlocal cash
+        nonlocal cash, total_cost
         p = positions.pop(code)
         price = price if price is not None else px(navs[code], day)
-        net_out = p["units"] * price * (1 - args.cost_out)
+        if pd.isna(price):
+            positions[code] = p
+            return False
+        gross = p["units"] * price
+        fee = gross * args.cost_out
+        net_out = gross - fee
         cash += net_out
+        total_cost += fee
         ret = net_out / p["alloc"] - 1
         trades.append(dict(
             code=code, entry_date=p["entry_date"], exit_date=str(pd.Timestamp(day).date()),
             entry_px=round(p["entry_px"], 4), exit_px=round(price, 4),
             entry_S=round(p["entry_S"], 1), exit_S=round(exit_s, 1) if pd.notna(exit_s) else np.nan,
+            exit_reason=reason,
             hold_days=(pd.Timestamp(day) - pd.Timestamp(p["entry_date"])).days,
-            net_ret=round(ret, 4), pnl_yuan=round(net_out - p["alloc"], 2)))
+            alloc_yuan=round(p["alloc"], 2), net_ret=round(ret, 4),
+            pnl_yuan=round(net_out - p["alloc"], 2)))
+        return True
+
+    def trim_to_cap(day, cap_slots, scores, reason):
+        """只降风险、不补仓：卖弱留强到 cap_slots，并把剩余仓位卖回每槽10%左右。"""
+        nonlocal cash, total_cost, rebal_turnover, cppi_sells
+        sold = 0
+        cap_slots = max(0, int(cap_slots))
+        if cap_slots == 0:
+            for c in list(positions):
+                exit_s = scores.loc[c, "S"] if scores is not None and c in scores.index else np.nan
+                sold += int(sell(c, day, reason, exit_s=exit_s))
+            cppi_sells += sold
+            return sold
+
+        if len(positions) > cap_slots:
+            order = sorted(positions,
+                           key=lambda c: (scores.loc[c, "S"] if scores is not None and c in scores.index else -1),
+                           reverse=True)
+            for c in order[cap_slots:]:
+                exit_s = scores.loc[c, "S"] if scores is not None and c in scores.index else np.nan
+                sold += int(sell(c, day, reason, exit_s=exit_s))
+
+        eq = equity(day)
+        target = eq / args.slots if eq > 0 else 0
+        for c in list(positions):
+            price = px(navs[c], day)
+            if pd.isna(price) or target <= 0:
+                continue
+            val = positions[c]["units"] * price
+            if val <= target * 1.01:
+                continue
+            sell_units = (val - target) / price
+            if sell_units <= 0 or sell_units >= positions[c]["units"]:
+                continue
+            ratio = sell_units / positions[c]["units"]
+            positions[c]["units"] -= sell_units
+            positions[c]["alloc"] *= (1 - ratio)
+            gross = sell_units * price
+            fee = gross * args.cost_out
+            cash += gross - fee
+            total_cost += fee
+            rebal_turnover += gross
+        cppi_sells += sold
+        return sold
+
+    def rebalance_to_10slots(day):
+        """季度等权再平衡：每只目标约等于组合1/10。"""
+        nonlocal cash, total_cost, rebal_turnover
+        if not positions:
+            return
+        eq = equity(day)
+        target = eq / args.slots
+        # 先卖超配
+        for c in list(positions):
+            price = px(navs[c], day)
+            if pd.isna(price):
+                continue
+            val = positions[c]["units"] * price
+            if val <= target * 1.01:
+                continue
+            sell_units = (val - target) / price
+            if sell_units <= 0 or sell_units >= positions[c]["units"]:
+                continue
+            ratio = sell_units / positions[c]["units"]
+            positions[c]["units"] -= sell_units
+            positions[c]["alloc"] *= (1 - ratio)
+            gross = sell_units * price
+            fee = gross * args.cost_out
+            cash += gross - fee
+            total_cost += fee
+            rebal_turnover += gross
+        # 再补低配；不会增加新标的数量
+        for c in list(positions):
+            if cash <= 0:
+                break
+            price = px(navs[c], day)
+            if pd.isna(price):
+                continue
+            val = positions[c]["units"] * price
+            if val >= target * 0.99:
+                continue
+            alloc = min(cash, (target - val) * (1 + args.cost_in))
+            if alloc <= 0:
+                continue
+            positions[c]["units"] += alloc / (price * (1 + args.cost_in))
+            positions[c]["alloc"] += alloc
+            cash -= alloc
+            total_cost += alloc * args.cost_in / (1 + args.cost_in)
+            rebal_turnover += alloc
+
+    def is_crisis(day):
+        if not crisis_on:
+            return False
+        if day not in bench.index:
+            return False
+        return (pd.notna(ma.asof(day)) and pd.notna(vol.asof(day)) and pd.notna(vol_th.asof(day))
+                and bench.asof(day) < ma.asof(day) and vol.asof(day) > vol_th.asof(day))
 
     for day in day_grid:
+        if prev_day is not None and cash_yield > 0:
+            dt = max(0, (pd.Timestamp(day) - pd.Timestamp(prev_day)).days)
+            if dt:
+                interest = cash * cash_yield * dt / 365.25
+                cash += interest
+                cash_interest_total += interest
+        prev_day = day
+
+        # 单基金 20% trailing stop
+        if trail_stop > 0:
+            for c in list(positions):
+                price = px(navs[c], day)
+                if pd.notna(price):
+                    positions[c]["peak"] = max(positions[c].get("peak", positions[c]["entry_px"]), price)
+                    if price < positions[c]["peak"] * (1 - trail_stop):
+                        sell(c, day, f"trail_{trail_stop:.0%}", price=price)
+
+        crisis_active = is_crisis(day)
+        if crisis_active:
+            crisis_days += 1
+
+        # 组合级 CPPI：自身净值回撤预算
+        daily_cap = args.slots
+        if cppi_on:
+            eq_now = equity(day)
+            if (not cppi_locked) and eq_now > cppi_hwm:
+                cppi_hwm = eq_now
+            dd = eq_now / cppi_hwm - 1 if cppi_hwm > 0 else 0
+            if cppi_locked:
+                daily_cap = 0
+            elif dd <= STRAT_CPPI_DD3:
+                daily_cap = STRAT_CPPI_SLOTS3
+                cppi_locked = True
+                cppi_hard_stops += 1
+            elif dd <= STRAT_CPPI_DD2:
+                daily_cap = STRAT_CPPI_SLOTS2
+            elif dd <= STRAT_CPPI_DD1:
+                daily_cap = STRAT_CPPI_SLOTS1
+            if daily_cap < len(positions):
+                trim_to_cap(day, daily_cap, last_scores, f"cppi_cap{daily_cap}")
+
         day_str = str(day.date())
-
-        # ========== 每天检查卖出 ==========
-        for c in list(positions):
-            if c not in by_date.get(day_str, pd.DataFrame()).index:
-                continue
-            score = by_date[day_str].loc[c, "S"]
-            if pd.notna(score) and score < args.sell:
-                sell(c, day, f"S<{args.sell:.0f}", exit_s=score)
-
-        # ========== 每天检查买入（如果当天有打分）==========
         if day_str in by_date:
             g = by_date[day_str]
-            equity_now = cash + sum(p["units"] * px(navs[c], day) for c, p in positions.items())
+            last_scores = g
+            candidates = g[g.S > args.buy].sort_values("S", ascending=False)
 
-            for c, row in g[g.S > args.buy].sort_values("S", ascending=False).iterrows():
-                if c in positions or len(positions) >= args.slots or c not in navs:
-                    continue
-                price = px(navs[c], day)
-                if pd.isna(price):
-                    continue
-                alloc = min(cash, equity_now / args.slots)
-                if alloc < equity_now * 0.02:
-                    continue
-                positions[c] = dict(units=alloc / (price * (1 + args.cost_in)),
-                                    entry_px=price, entry_date=day_str,
-                                    entry_S=row.S, alloc=alloc)
-                cash -= alloc
+            # 熔断后：仅在右侧信号出现且非危机时复活，并重置HWM为当前净值
+            if cppi_on and cppi_locked:
+                if len(candidates) and not crisis_active:
+                    cppi_locked = False
+                    cppi_hwm = equity(day)
+                    daily_cap = args.slots
+                    cppi_unlocks += 1
+                else:
+                    daily_cap = 0
 
-        eq = cash + sum(p["units"] * px(navs[c], day) for c, p in positions.items())
-        curve.append((day, eq, len(positions)))
+            # 卖出：跌破 S 阈值
+            for c in list(positions):
+                if c not in g.index:
+                    continue
+                score = g.loc[c, "S"]
+                if pd.notna(score) and score < args.sell:
+                    sell(c, day, f"S<{args.sell:.0f}", exit_s=score)
+
+            if cppi_on and daily_cap < len(positions):
+                trim_to_cap(day, daily_cap, g, f"cppi_cap{daily_cap}")
+
+            # 季度再平衡：先卖后买之后的风险预算仍按10槽目标权重执行
+            if use_v38 and rebalance_freq == "quarterly" and is_quarter_end_signal(day_str):
+                rebalance_to_10slots(day)
+
+            # 危机期禁买；旧MA200单因子过滤不再使用
+            if crisis_active:
+                crisis_blocked += len(candidates)
+            elif daily_cap > 0:
+                for c, row in candidates.iterrows():
+                    if c in positions or len(positions) >= min(args.slots, daily_cap) or c not in navs:
+                        continue
+                    price = px(navs[c], day)
+                    if pd.isna(price):
+                        continue
+                    eq_now = equity(day)
+                    alloc = min(cash, eq_now / args.slots)  # 最新最优模型保留固定槽位，不强行填满空槽
+                    if alloc < eq_now * 0.02:
+                        continue
+                    positions[c] = dict(units=alloc / (price * (1 + args.cost_in)),
+                                        entry_px=price, entry_date=day_str,
+                                        entry_S=row.S, alloc=alloc, peak=price)
+                    cash -= alloc
+                    total_cost += alloc * args.cost_in / (1 + args.cost_in)
+
+        eq = equity(day)
+        curve.append((day, eq, len(positions), cash, cash / eq if eq else np.nan,
+                      crisis_active, cppi_hwm, cppi_locked))
 
     # 期末清仓
     for c in list(positions):
         sell(c, T1, "期末清算")
 
-    ec = pd.DataFrame(curve, columns=["date", "equity", "n_pos"]).set_index("date")
+    ec = pd.DataFrame(curve, columns=["date", "equity", "n_pos", "cash", "cash_ratio",
+                                      "crisis", "cppi_hwm", "cppi_locked"]).set_index("date")
     ec["drawdown"] = ec.equity / ec.equity.cummax() - 1
+    ec.attrs.update(dict(model=STRAT_VERSION if use_v38 else "legacy", cash_interest=cash_interest_total,
+                         total_cost=total_cost, rebal_turnover=rebal_turnover,
+                         crisis_days=crisis_days, crisis_blocked=crisis_blocked,
+                         cppi_sells=cppi_sells, cppi_hard_stops=cppi_hard_stops,
+                         cppi_unlocks=cppi_unlocks))
     return ec, pd.DataFrame(trades)
 
 
@@ -234,9 +465,15 @@ def report(ec, tr, bench, args, dates, names, tag):
     invested = (ec.n_pos > 0).mean()
 
     S = []
+    model_name = ec.attrs.get("model", "legacy")
     S.append(f"# 本地回测报告  区间 {dates[0]} → {dates[-1]}  tag={tag}\n")
+    S.append(f"模型: **{model_name}**\n")
+    v38_on = not getattr(args, 'legacy', False)
     S.append(f"参数: 买 S>{args.buy:.0f} / 卖 S<{args.sell:.0f} / 槽位 {args.slots} / 本金 {args.capital:,.0f} 元 / "
-             f"成本 申购{args.cost_in:.2%}+赎回{args.cost_out:.2%} / 高位瘦身 {'开' if getattr(args, 'hi_water', False) else '关'}\\n")
+             f"成本 申购{args.cost_in:.2%}+赎回{args.cost_out:.2%} / "
+             f"现金年化{(getattr(args, 'cash_yield', STRAT_CASH_YIELD) if v38_on else 0):.2%} / "
+             f"20%止损 {'开' if v38_on else '关'} / "
+             f"CPPI {'开' if v38_on else '关'}\\n")
     S.append("## 总账")
     S.append(f"| 指标 | 数值 |\n|---|---|")
     S.append(f"| 期末资产 | **{ec.equity.iloc[-1]:,.0f} 元** |")
@@ -245,7 +482,11 @@ def report(ec, tr, bench, args, dates, names, tag):
     S.append(f"| 最大回撤(日频) | {dd:.1%} |")
     S.append(f"| Calmar | {cagr / abs(dd):.2f} |")
     S.append(f"| 沪深300 同期 | {btot:+.1%} (超额 {tot - btot:+.1%}) |")
-    S.append(f"| 有持仓天数占比 | {invested:.0%} |\n")
+    S.append(f"| 有持仓天数占比 | {invested:.0%} |")
+    S.append(f"| 平均现金占比 | {ec.cash_ratio.mean():.1%} |" if "cash_ratio" in ec else "| 平均现金占比 | — |")
+    S.append(f"| 现金收益累计 | {ec.attrs.get('cash_interest', 0):,.0f} 元 |")
+    S.append(f"| 危机日/禁买信号 | {ec.attrs.get('crisis_days', 0)} / {ec.attrs.get('crisis_blocked', 0)} |")
+    S.append(f"| CPPI卖出/熔断/重启 | {ec.attrs.get('cppi_sells', 0)} / {ec.attrs.get('cppi_hard_stops', 0)} / {ec.attrs.get('cppi_unlocks', 0)} |\n")
     if len(tr):
         S.append("## 交易账")
         S.append(f"| 指标 | 数值 |\n|---|---|")
@@ -256,10 +497,13 @@ def report(ec, tr, bench, args, dates, names, tag):
         S.append(f"| 盈亏比 | {pf} (均盈{aw:+.1%} / 均亏{al if pd.notna(al) else 0:+.1%}) |")
         S.append(f"| 平均持有 | {tr.hold_days.mean():.0f} 天 |")
         S.append(f"| 累计盈亏 | {tr.pnl_yuan.sum():+,.0f} 元 |")
-        cost_in_total = (tr["alloc_yuan"] * args.cost_in).sum() if "alloc_yuan" in tr.columns else 0
-        cost_out_total = (
-                    (tr["alloc_yuan"] + tr["pnl_yuan"]) * args.cost_out).sum() if "alloc_yuan" in tr.columns else 0
-        S.append(f"| 累计交易成本 | {cost_in_total + cost_out_total:,.0f} 元 |\n")
+        # 交易成本以模拟器逐笔/再平衡实际扣除为准；旧账本缺少再平衡成本时才回退估算。
+        cost_est = ec.attrs.get("total_cost")
+        if cost_est is None:
+            cost_in_total = (tr["alloc_yuan"] * args.cost_in).sum() if "alloc_yuan" in tr.columns else 0
+            cost_out_total = ((tr["alloc_yuan"] + tr["pnl_yuan"]) * args.cost_out).sum() if "alloc_yuan" in tr.columns else 0
+            cost_est = cost_in_total + cost_out_total
+        S.append(f"| 累计交易成本 | {cost_est:,.0f} 元 |\n")
         S.append("### 退出原因")
         ### 退出原因
         if len(tr) > 0 and "exit_reason" in tr.columns:
@@ -332,6 +576,17 @@ def main():
     ap.add_argument("--cost-out", dest="cost_out", type=float, default=0.005)
     ap.add_argument("--codes", default=None)
     ap.add_argument("--rebuild", action="store_true")
+    ap.add_argument("--legacy", action="store_true", help="关闭V3.8执行层，回到旧版纯S阈值回测")
+    ap.add_argument("--cash-yield", type=float, default=STRAT_CASH_YIELD, help="V3.8闲置现金年化收益")
+    ap.add_argument("--trail-stop", type=float, default=STRAT_TRAIL_STOP, help="V3.8单基移动止损阈值")
+    ap.add_argument("--rebalance", choices=["none", "quarterly"], default=STRAT_REBALANCE)
+    ap.add_argument("--no-crisis", dest="crisis", action="store_false", help="关闭MA+Vol危机禁买过滤")
+    ap.set_defaults(crisis=True)
+    ap.add_argument("--no-cppi", dest="cppi", action="store_false", help="关闭组合级CPPI风险预算")
+    ap.set_defaults(cppi=STRAT_CPPI)
+    ap.add_argument("--crisis-ma", type=int, default=STRAT_CRISIS_MA)
+    ap.add_argument("--crisis-vol-window", type=int, default=STRAT_CRISIS_VOL_WINDOW)
+    ap.add_argument("--crisis-vol-q", type=float, default=STRAT_CRISIS_VOL_Q)
     args = ap.parse_args()
 
     # 读取基金池
@@ -368,7 +623,8 @@ def main():
 
     bench = provider.get_close_by_src("sina", "sh000300").dropna().sort_index()
 
-    tag = (f"b{args.buy:.0f}s{args.sell:.0f}n{args.slots}k{int(args.capital/10000)}w" +
+    model_tag = "legacy" if args.legacy else "v38"
+    tag = (f"{model_tag}_b{args.buy:.0f}s{args.sell:.0f}n{args.slots}k{int(args.capital/10000)}w" +
            ("_monthly" if not default_universe else ""))
 
     ec, tr = simulate(panel, navs, bench, qs, args)

@@ -126,18 +126,47 @@ output/       scores/scan 结果 （csv/json）
 
 **复现**: `python strategy_bt.py`(策略模拟) / `python rbsa_ew_study.py`(EW变体) / 裁决证据链附 `output/strategy_bt_*.csv`
 
-## 本地自助回测 (2026-08-03) — `backtest_local.py`
+## V3.8 (2026-08-06) Calmar 优化执行层 — 最新默认模型
+
+最新执行层主候选已落地到 `config.py` 与 `backtest_local.py`，实验脚本为 `strategy_experiment.py`。
+
+**默认模型**: `fixedslot_qreb_trail20_y25_crisis_cppi_15_20_25`
+
+规则组合:
+1. **固定10槽战略仓**: S>70 买入、S<45 卖出；保留空槽，不强行用低质量信号填满权益仓位。
+2. **闲置现金收益**: 现金按年化 2.5% 货基/短债代理日度单利计提 (`STRAT_CASH_YIELD=0.025`)。
+3. **季度再平衡**: 季末把存量持仓拉回每只约10%目标权重，锁定暴涨仓利润。
+4. **单基金20%移动止损**: 自入场后高点回撤20%离场，作为微观经理/风格漂移保险。
+5. **危机禁买**: 沪深300 < MA200 且 20日实现波动率 > 历史80%分位时，禁止新开权益仓。
+6. **组合级CPPI风险预算**: 策略自身净值回撤≤-15%限6槽、≤-20%限3槽、≤-25%清仓；熔断后等待右侧买入信号且非危机状态，再重置HWM复活。
+
+实验证据（2006-09-30→2026-03-31，幸存者池上界）:
+- 原收益增强版：CAGR **8.56%** / MaxDD **-42.73%** / Calmar **0.20**
+- 最新 V3.8 主候选：CAGR **8.45%** / MaxDD **-26.07%** / Calmar **0.324**
+- 全局HWM、时间衰减HWM、部分重置HWM、主动危机降仓、阈值网格均已实验；未超过当前主候选。
+
+复现:
+```bash
+python strategy_experiment.py                 # 全部变体实验
+python backtest_local.py                      # 默认 V3.8 执行层
+python backtest_local.py --legacy             # 旧版纯S阈值回测
+```
+
+## 本地自助回测 (2026-08-06) — `backtest_local.py`
 
 ```bash
-python backtest_local.py                      # 默认: 2019Q1→最近完整季, 70买45卖, 10槽, 10万本金
+python backtest_local.py                      # 默认: V3.8执行层, 70买45卖, 10槽, 10万本金
+python backtest_local.py --legacy             # 旧版纯S阈值回测
 python backtest_local.py --sell 50            # 改平仓线对比
+python backtest_local.py --no-cppi            # 关闭CPPI风险预算做消融
+python backtest_local.py --no-crisis          # 关闭MA200&Vol80危机禁买做消融
 python backtest_local.py --capital 200000 --slots 8
 python backtest_local.py --codes mypool.txt   # 自定义池(每行一个6位代码)
 python backtest_local.py --rebuild            # 换模型参数后强制重打分
 ```
 - **全自动续期**: 新季度首次自动 PiT 打分(~20s)并永久缓存 `output/bt_scores_cache/`, 二次秒跑
-- **三本账**: `bt_trades_<tag>.csv`(逐笔买卖: 价/分/持有天数/净收益/年化/盈亏元) + `bt_daily_<tag>.csv`(逐日净值回撤) + `bt_summary_<tag>.md`(汇总报告) + `bt_equity_<tag>.png`(净值图 vs 沪深300)
-- 30 季实测 (2019Q1→2026Q2, 默认参数): **+126.2%**, CAGR +11.9%, 24笔胜率79%, 盈亏比6.17, 最大回撤-19.7% (同期沪深300 +25.3%, -45.6%)
+- **三本账**: `bt_trades_<tag>.csv`(逐笔买卖: 价/分/持有天数/净收益/年化/盈亏元) + `bt_daily_<tag>.csv`(逐日净值/回撤/现金/CPPI状态) + `bt_summary_<tag>.md`(汇总报告) + `bt_equity_<tag>.png`(净值图 vs 沪深300)
+- 默认输出 tag 前缀为 `v38_`; 旧版回测为 `legacy_`。
 
 ## V3.7.3 (2026-08-05) 数据新鲜度事故修复 — 榜单墙钟 vs 数据截至同框
 
