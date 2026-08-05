@@ -2,6 +2,8 @@
 
 基于《量化选基系统核心打分模型_V3》的可执行实现，附 Web 控制台。
 
+> ⚠️ 仅供量化研究，不构成投资建议。
+
 ## 快速开始
 
 ```bash
@@ -10,7 +12,7 @@ cd quant_fund_picker
 python webapp.py
 ```
 
-浏览器打开 **http://127.0.0.1:8000**
+浏览器打开 **http://127.0.0.1:8000**。
 
 | 功能 | 操作 |
 |---|---|
@@ -156,7 +158,6 @@ python backtest_local.py --legacy             # 旧版纯S阈值回测
 
 ```bash
 python backtest_local.py                      # 默认: V3.8执行层, 70买45卖, 10槽, 10万本金
-python backtest_local.py --pool-mode pit-top --pit-top-n 100 --score-suffix auto  # 严格历史动态池复盘(PiT TopN)
 python backtest_local.py --legacy             # 旧版纯S阈值回测
 python backtest_local.py --sell 50            # 改平仓线对比
 python backtest_local.py --no-cppi            # 关闭CPPI风险预算做消融
@@ -165,8 +166,26 @@ python backtest_local.py --capital 200000 --slots 8
 python backtest_local.py --codes mypool.txt   # 自定义池(每行一个6位代码)
 python backtest_local.py --rebuild            # 换模型参数后强制重打分
 ```
+- **全自动续期**: 新季度首次自动 PiT 打分(~20s)并永久缓存 `output/bt_scores_cache/`, 二次秒跑
+- **三本账**: `bt_trades_<tag>.csv`(逐笔买卖: 价/分/持有天数/净收益/年化/盈亏元) + `bt_daily_<tag>.csv`(逐日净值/回撤/现金/CPPI状态) + `bt_summary_<tag>.md`(汇总报告) + `bt_equity_<tag>.png`(净值图 vs 沪深300)
+- 默认输出 tag 前缀为 `v38_`; 旧版回测为 `legacy_`。
 
-### 严格历史动态池复盘 (Point-in-Time)
+## V3.7.3 (2026-08-05) 数据新鲜度事故修复 — 榜单墙钟 vs 数据截至同框
+
+**事故**: 榜单显示 20260805 但透视/地形数据停在 07-31。根因三暗伤叠加:
+1. provider 进程级 `_memo` 无跨日过期 → webapp 长驻隔夜全程服务昨日数据 (元凶, 已修: `_roll_day` 跨日自动清缓存)
+2. 缓存保鲜只看文件 mtime → 全量覆盖拷贝刷新 mtime, 陈旧内容被误服 (已修: 改为**内容日期保鲜** `_content_fresh`, 数据截止必须≥期望交易日才免抓)
+3. `_csindex_df` 抓取窗口 end_date 硬编码 "20260801" (已修: 动态取今天)
+
+**新增**:
+- 抓取失败不再静默/崩溃: 回退旧缓存 + `STALE_SERVED` 警告账簿, 前端横幅红点提示"源降级"
+- `/api/results` 返回 `asof`(数据截至)/`asof_expected`/`asof_stale`, 榜单横幅: "扫描于 20260805 · 净值截至 2026-08-04", 陈旧即红色⚠标注
+- `/api/terrain` 同样返回 asof + 降级账簿; 地形头部日期随真实内容走, 陈旧红点
+- 境外指数(us/hk)保鲜期望日 -1 交易日(lag), 避免误抓
+- 每文件每日至多同步一次 (`_FETCHED_TODAY`), 防节假日空转锤源
+
+
+## V3.7.4 严格历史动态池复盘 (Point-in-Time)
 
 实现真正的 Point-in-Time 动态候选池：**每个决策日只允许买入当日 S 分排名 TopN 的基金**；持仓卖出与季度再平衡仍使用完整当日评分面板。
 
@@ -188,16 +207,3 @@ python backtest_local.py \
 - **三本账**: `bt_trades_<tag>.csv`(逐笔买卖: 价/分/持有天数/净收益/年化/盈亏元) + `bt_daily_<tag>.csv`(逐日净值/回撤/现金/CPPI状态) + `bt_summary_<tag>.md`(汇总报告) + `bt_equity_<tag>.png`(净值图 vs 沪深300)
 - 默认输出 tag 前缀为 `v38_`; 旧版回测为 `legacy_`。
 
-## V3.7.3 (2026-08-05) 数据新鲜度事故修复 — 榜单墙钟 vs 数据截至同框
-
-**事故**: 榜单显示 20260805 但透视/地形数据停在 07-31。根因三暗伤叠加:
-1. provider 进程级 `_memo` 无跨日过期 → webapp 长驻隔夜全程服务昨日数据 (元凶, 已修: `_roll_day` 跨日自动清缓存)
-2. 缓存保鲜只看文件 mtime → 全量覆盖拷贝刷新 mtime, 陈旧内容被误服 (已修: 改为**内容日期保鲜** `_content_fresh`, 数据截止必须≥期望交易日才免抓)
-3. `_csindex_df` 抓取窗口 end_date 硬编码 "20260801" (已修: 动态取今天)
-
-**新增**:
-- 抓取失败不再静默/崩溃: 回退旧缓存 + `STALE_SERVED` 警告账簿, 前端横幅红点提示"源降级"
-- `/api/results` 返回 `asof`(数据截至)/`asof_expected`/`asof_stale`, 榜单横幅: "扫描于 20260805 · 净值截至 2026-08-04", 陈旧即红色⚠标注
-- `/api/terrain` 同样返回 asof + 降级账簿; 地形头部日期随真实内容走, 陈旧红点
-- 境外指数(us/hk)保鲜期望日 -1 交易日(lag), 避免误抓
-- 每文件每日至多同步一次 (`_FETCHED_TODAY`), 防节假日空转锤源
