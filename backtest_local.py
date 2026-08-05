@@ -16,7 +16,7 @@
     bt_equity_<tag>.png   净值与回撤图(vs 沪深300)
 
 评分面板缓存 output/bt_scores_cache/: 每个季点打一次分永久缓存, 二次运行秒级
-诚实边界: 默认池=存活至今的217只研究池(幸存者偏差上偏); 回测豁免任期惩罚
+诚实边界: 默认使用全市场池（scan_market.py 生成的 rank_all.csv）; 回测豁免任期惩罚
 =================================================================
 """
 import os, sys, argparse, hashlib, time
@@ -326,7 +326,7 @@ def chart(ec, bench, args, dates, tag):
 # ============ 5. 入口 ============
 def main():
     ap = argparse.ArgumentParser(description="本地自助回测 (>70买/<45卖 战略纪律)")
-    ap.add_argument("--start", default="2019-03-31", help="起始季(季末日), 默认 2019-03-31")
+    ap.add_argument("--start", default="2006-03-31", help="起始季(季末日), 默认 2006-03-31")
     ap.add_argument("--end", default=None, help="结束季(季末日), 默认最近完整季")
     ap.add_argument("--buy", type=float, default=STRAT_BUY_TH)
     ap.add_argument("--sell", type=float, default=STRAT_SELL_TH)
@@ -336,7 +336,7 @@ def main():
     ap.add_argument("--cost-out", dest="cost_out", type=float, default=0.005)
     ap.add_argument("--hi-water", dest="hi_water", action="store_true",
                     help="开启水位≥90%%持仓瘦身(样本从未触发的安全网)")
-    ap.add_argument("--codes", default=None, help="自定义基金池文件(每行一个代码); 缺省=217研究池")
+    ap.add_argument("--codes", default=None, help="自定义基金池文件(每行一个代码); 缺省=全市场池")
     ap.add_argument("--rebuild", action="store_true", help="强制重打新季度评分(换模型参数后使用)")
     args = ap.parse_args()
 
@@ -350,10 +350,10 @@ def main():
         codes = sorted(set(pd.concat([pd.read_csv(f"{FACTOR_ROWS}/{f}", dtype={"code": str})["code"]
                                       for f in os.listdir(FACTOR_ROWS) if f.endswith(".csv")]).tolist()))
         default_universe = True
-        print(f"[池] 默认研究池 {len(codes)} 只")
+        print(f"[池] 全市场池 {len(codes)} 只")
     # 季点
     end = args.end or str((pd.Timestamp.today() - pd.offsets.QuarterEnd(1)).date())  # 最近已完整季
-    qs = [str(d.date()) for d in pd.date_range(args.start, end, freq="Q")]
+    qs = [str(d.date()) for d in pd.date_range(args.start, end, freq="QE")]
     print(f"[区间] {qs[0]} → {qs[-1]} 共 {len(qs)} 个季点")
 
     panel = build_panel(qs, codes, default_universe, args.rebuild)
