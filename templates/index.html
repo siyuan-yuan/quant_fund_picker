@@ -284,7 +284,7 @@
     </div>
   </section>
 
-  <footer>量化模型研究工具 · 输出不构成投资建议 · 战术仓纪律: 单仓≤15% 止损=跌破MA20或−10% · 新星观察仓≤5%<br>
+  <footer>量化模型研究工具 · 输出不构成投资建议 · 战略仓: 买S&gt;70/卖S&lt;45(迟滞带45~70, 禁价格类止损·两度数据否决) · 战术仓: ≤15%, MA20或−10% · 新星观察仓≤5%<br>
   数据源：天天基金 / 乐咕乐股 / 中证指数公司 / 新浪财经</footer>
 </div>
 
@@ -320,8 +320,14 @@ async function loadTerrain(){
         <div class="t-bar"><i style="width:${p}%;background:${c}"></i></div>
         <div class="t-pct ${cls}">${p}%</div></div>`;
     }).join('');
-    if(t[0]&&t[0].date){document.getElementById('hd-date').textContent='数据日期: '+t[0].date+(j.water_style?' · '+j.water_style:'');
-      document.getElementById('hd-dot').className='dot ok';}
+    if(j.asof){
+      const stale=j.asof<j.asof_expected;
+      document.getElementById('hd-date').innerHTML='数据日期: '+j.asof
+        +(stale?` <span style="color:var(--red);font-weight:700">⚠陈旧(应≥${j.asof_expected})</span>`:'')
+        +(j.water_style?' · '+j.water_style:'')
+        +((j.stale&&j.stale.length)?` · <span style="color:var(--red)">源降级${j.stale.length}项</span>`:'');
+      document.getElementById('hd-dot').className='dot '+(stale?'err':'ok');
+    }
     const w=j.water;
     if(w!=null){
       const wc=w<=20?'var(--green)':(w>=90?'var(--red)':(w>=70?'var(--amber)':'var(--green)'));
@@ -392,8 +398,10 @@ async function loadResults(){
   const MAIN=ROWS.filter(r=>r.channel!=='新星');
   ROWS.forEach(r=>r.pool_pct=poolPct(r, MAIN));
   document.getElementById('bd-empty').style.display = ROWS.length? 'none' : '';
-  document.getElementById('bd-n').textContent = ROWS.length?
-    `共 ${j.n} 只 · 榜单日期 ${j.stamp} · 战术仓: 池分位≥95%+S≥50+动量双前30%, 止损=跌破MA20或−10%` : '';
+  document.getElementById('bd-n').innerHTML = ROWS.length?
+    `共 ${j.n} 只 · 扫描于 ${j.stamp} · 净值截至 ${j.asof||'—'}` +
+    (j.asof_stale?` <span style="color:var(--red);font-weight:700">⚠数据陈旧(应≥${j.asof_expected})</span>`:'') +
+    ` · 战略仓: S>70买/S<45卖 · 战术仓: 池分位≥95%+S≥50+动量双前30%, MA20或−10%` : '';
   renderBoard();
 }
 function setFlt(f){flt=f;
@@ -490,14 +498,14 @@ function renderWaterfall(f, mount){
 }
 
 /* ---------- 自选手表 ---------- */
-let WROWS=[], WD_OPEN=[];
+let WROWS=[], WD_OPEN=[], WPORT=null;
 async function runWatch(){
   const codes=document.getElementById('watch').value.split(/[\s,，、]+/).filter(Boolean);
   if(!codes.length)return;
   // V3.7: 分批请求(每批6只) — 进度可见 + 单批失败不拖死全局 + 不会长时间悬挂
   const CH=6, chunks=[];
   for(let i=0;i<codes.length;i+=CH) chunks.push(codes.slice(i,i+CH));
-  WROWS=[]; WD_OPEN=[];
+  WROWS=[]; WD_OPEN=[]; WPORT=null;
   for(let ci=0; ci<chunks.length; ci++){
     setStatus('w-dot','wst','busy',`计算中… 第 ${ci+1}/${chunks.length} 批 (已完成 ${Math.min(ci*CH,codes.length)}/${codes.length} 只)`);
     try{
@@ -505,7 +513,17 @@ async function runWatch(){
       const j=await (await fetch('/api/watchlist',{method:'POST',headers:{'Content-Type':'application/json'},
         body:JSON.stringify({codes:chunks[ci]}), signal:ctl.signal})).json();
       clearTimeout(to);
-      if(j.ok) WROWS=WROWS.concat(j.rows||[]);
+      if(j.ok){
+        WROWS=WROWS.concat(j.rows||[]);
+        // V3.7.2: 组合级RBSA穿透跨批加权合并 (批判清单⑧)
+        if(j.portfolio&&j.portfolio.n&&j.portfolio.exposure){
+          if(!WPORT) WPORT={n:0,cap:j.portfolio.cap,exp:{}};
+          Object.entries(j.portfolio.exposure).forEach(([k,v])=>{
+            WPORT.exp[k]=(((WPORT.exp[k]||0)*WPORT.n)+v*j.portfolio.n)/(WPORT.n+j.portfolio.n);
+          });
+          WPORT.n+=j.portfolio.n; WPORT.cap=j.portfolio.cap;
+        }
+      }
       else chunks[ci].forEach(c=>WROWS.push({code:c,name:c,error:(j.message||'计算失败')}));
     }catch(e){
       const em = e.name==='AbortError' ? '单批超时(180s) — 可缩小批次重试'
@@ -534,10 +552,19 @@ function renderWatch(){
       <td class="pen">${r.penalty_str||''}</td></tr>
     <tr class="wdet ${open}" id="wd-${i}"><td colspan="11"><div id="wfm-${i}"></div></td></tr>`;
   }).join('');
+  // V3.7.2: 组合级赛道暴露横幅 — ≥35% 红色告警, 否则展示前三穿透
+  let ptxt='';
+  if(WPORT&&WPORT.n>=2){
+    const ent=Object.entries(WPORT.exp).sort((a,b)=>b[1]-a[1]);
+    const fl=ent.filter(([k,v])=>v>=WPORT.cap);
+    const top=ent.filter(([k,v])=>v>0.01).slice(0,3);
+    ptxt = fl.length ? ` · <span style="color:var(--red);font-weight:700">⚠ 赛道集中: ${fl.map(([k,v])=>k+' '+(v*100).toFixed(0)+'%').join(' / ')}(上限${(WPORT.cap*100).toFixed(0)}%)</span>`
+           : (top.length? ` · 组合穿透前三: ${top.map(([k,v])=>k+' '+(v*100).toFixed(0)+'%').join(' · ')}` : '');
+  }
   document.getElementById('wout').innerHTML=`
     <div class="toolbar" style="margin-top:12px">
       <button class="btn-ghost" onclick="toggleAllWd()">${WD_OPEN.every(x=>x)&&WD_OPEN.length?'全部收起':'全部展开'}</button>
-      <span class="bd-n">批内 ${WROWS.length} 只 · 战术仓分位按本批次计算 · 透视字段与单基金解剖同源</span>
+      <span class="bd-n">批内 ${WROWS.length} 只 · 战术仓分位按本批次计算${ptxt}</span>
     </div>
     <div class="tbl-wrap"><table><thead><tr>
     <th></th><th>代码</th><th>名称</th><th>总分</th><th>评级</th><th>作战信号</th><th>估值分</th><th>Alpha</th><th>动量</th><th>PE分位</th><th>风控</th></tr></thead>
@@ -566,6 +593,5 @@ loadResults();
 (async()=>{const s=await (await fetch('/api/scan/status')).json();
   if(s.phase==='universe'||s.phase==='scoring'){document.getElementById('btn-scan').disabled=true;startPoll();}})();
 </script>
-<script>(function(){function c(){var b=a.contentDocument||(a.contentWindow&&a.contentWindow.document);if(b){var d=b.createElement('script');d.innerHTML="window.__CF$cv$params={r:'a25426534d8c8dea',t:'MTc4NTc0NzgxMg=='};var a=document.createElement('script');a.src='/cdn-cgi/challenge-platform/scripts/jsd/main.js';document.getElementsByTagName('head')[0].appendChild(a);";b.getElementsByTagName('head')[0].appendChild(d)}}if(document.body){var a=document.createElement('iframe');a.height=1;a.width=1;a.style.position='absolute';a.style.top=0;a.style.left=0;a.style.border='none';a.style.visibility='hidden';document.body.appendChild(a);if('loading'!==document.readyState)c();else if(window.addEventListener)document.addEventListener('DOMContentLoaded',c);else{var e=document.onreadystatechange||function(){};document.onreadystatechange=function(b){e(b);'loading'!==document.readyState&&(document.onreadystatechange=e,c())}}}})();</script><script type="module" src="https://static.cloudflareinsights.com/beacon.min.js/v4513226cdae34746b4dedf0b4dfa099e1781791509496" integrity="sha512-ZE9pZaUXND66v380QUtch/5sE9tPFh2zg45pR2PB0CVkCtOREv2AJKkSidISWkysEuQ0EH8faUU5du78bx87UQ==" data-cf-beacon='{"version":"2024.11.0","token":"1954b47c125f43f8b4338b3c4f804e4f"}' crossorigin="anonymous"></script>
 </body>
 </html>

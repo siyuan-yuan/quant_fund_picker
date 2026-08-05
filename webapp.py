@@ -74,8 +74,12 @@ def terrain():
         except Exception as e:
             out.append({"name": name, "error": str(e)[:60]})
     w = market_water(None)
+    _dates = [o["date"] for o in out if o.get("date")]
     return jsonify({"items": out, "water": None if w != w else round(w * 100, 1),
                     "water_style": "6风格等权PE分位", "regime": regime_label(w),
+                    "asof": max(_dates) if _dates else None,
+                    "asof_expected": provider.expected_last_td(),
+                    "stale": provider.stale_warnings(),
                     "reversal": provider.market_reversal_signal("sh000300")})
 
 
@@ -93,8 +97,14 @@ def results():
     df = pd.read_csv(f, dtype={"code": str})
     df = df[df["error"].isna()] if "error" in df else df
     stamp = os.path.basename(f).split("_")[-1].split(".")[0]
+    # V3.7.3: 榜单墙钟 vs 数据内容截至 — 两个时钟必须同框展示
+    asof = str(df["last_date"].max())[:10] if "last_date" in df else None
+    exp = provider.expected_last_td()
     return jsonify({"rows": clean(df.where(pd.notna(df), None).to_dict("records")),
-                    "stamp": stamp, "n": len(df)})
+                    "stamp": stamp, "n": len(df),
+                    "asof": asof, "asof_expected": exp,
+                    "asof_stale": bool(asof and asof < exp),
+                    "stale": provider.stale_warnings()})
 
 
 # ---------------- 手动触发: 全市场扫描 ----------------
@@ -232,8 +242,20 @@ def watchlist():
             "F_momentum", "mom_4m1m", "mom_7m1m", "rbsa", "panel_mode",
             "tenure_days", "is_passive", "penalties", "penalty_detail",
             "penalty_str", "scale", "n_days", "last_date", "error"]
-    return jsonify({"ok": True, "rows": clean(
-        df[[c for c in cols if c in df]].where(pd.notna(df), None).to_dict("records"))})
+    # V3.7.2 批判清单⑧: 组合级 RBSA 穿透 — 等权聚合整批隐形仓位, 单一板块≥35% 告警
+    portfolio = None
+    rb = [r["rbsa"] for r in rows if isinstance(r.get("rbsa"), dict) and r["rbsa"]]
+    if rb:
+        agg = pd.DataFrame(rb).fillna(0).mean().sort_values(ascending=False)
+        from config import STRAT_STYLE_CAP
+        flags = [dict(style=k, pct=round(float(v), 3)) for k, v in agg.items() if v >= STRAT_STYLE_CAP]
+        portfolio = dict(n=len(rb), cap=STRAT_STYLE_CAP,
+                         exposure={k: round(float(v), 3) for k, v in agg.items() if v > 0.001},
+                         top=[dict(style=k, pct=round(float(v), 3))
+                              for k, v in agg.head(6).items() if v > 0.01],
+                         flags=flags)
+    return jsonify(dict(ok=True, portfolio=clean(portfolio), rows=clean(
+        df[[c for c in cols if c in df]].where(pd.notna(df), None).to_dict("records"))))
 
 
 if __name__ == "__main__":

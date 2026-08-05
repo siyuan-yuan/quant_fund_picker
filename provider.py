@@ -16,7 +16,69 @@ from config import CACHE_DIR
 os.makedirs(CACHE_DIR, exist_ok=True)
 TODAY = dt.date.today().isoformat()
 _memo = {}
+_memo_day = TODAY
+_FETCHED_TODAY = set()      # 每文件每日至多同步一次(防假期空转抓取)
+STALE_SERVED = []           # (文件, 旧数据截止日, 原因) — 降级不沉默
 STALE_OK = False   # True=使用过期缓存(walk-forward回测用, 历史数据不变)
+
+
+def _roll_day():
+    """跨日自动清进程缓存 — 修复 webapp 长驻隔夜后全程服务昨日数据的暗伤"""
+    global _memo_day
+    t = dt.date.today().isoformat()
+    if _memo_day != t:
+        _memo.clear(); _FETCHED_TODAY.clear(); _memo_day = t
+
+
+def expected_last_td(lag=0):
+    """期望的最新数据日: 18点前/周末 → 回退到上一交易日(周一至五近似); lag 用于境外源"""
+    now = dt.datetime.now()
+    d = now.date()
+    if now.hour < 18 or d.weekday() >= 5:
+        d -= dt.timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= dt.timedelta(days=1)
+    for _ in range(lag):
+        d -= dt.timedelta(days=1)
+        while d.weekday() >= 5:
+            d -= dt.timedelta(days=1)
+    return d.isoformat()
+
+
+def _content_fresh(path, lag=0):
+    """内容保鲜: 文件内最后数据日 ≥ 期望交易日 (mtime会被拷贝刷新, 内容日期不会撒谎)"""
+    try:
+        last = pd.read_csv(path, usecols=["date"], parse_dates=["date"])["date"].max()
+        return pd.notna(last) and last.date().isoformat() >= expected_last_td(lag)
+    except Exception:
+        return False
+
+
+def _cached_or_fetch(path, fetch_df, lag=0):
+    """统一装载: 内容日期过期→重抓; 重抓失败→回退旧文件并记警告(降级不沉默)"""
+    _roll_day()
+    if path not in _FETCHED_TODAY and not (_fresh(path) and _content_fresh(path, lag)):
+        try:
+            df = fetch_df()
+            df.to_csv(path, index=False)
+        except Exception as e:
+            if os.path.exists(path):
+                old = pd.read_csv(path, parse_dates=["date"])
+                STALE_SERVED.append((os.path.basename(path),
+                                     str(old["date"].max().date()), str(e)[:60]))
+                _FETCHED_TODAY.add(path)
+                return old
+            raise
+        _FETCHED_TODAY.add(path)
+    return pd.read_csv(path, parse_dates=["date"])
+
+
+def stale_warnings():
+    seen, out = set(), []
+    for f, d, why in STALE_SERVED:
+        if f not in seen:
+            seen.add(f); out.append({"file": f, "asof": d, "reason": why})
+    return out
 
 
 def _fresh(path):
@@ -39,19 +101,20 @@ def _retry(fn, n=3, sleep=1.5):
 def get_fund_nav(code: str) -> pd.DataFrame:
     """返回 [date, nav, ret(日增长率小数)] —— ret为东财官方复权日收益"""
     key = f"nav_{code}"
+    _roll_day()
     if key in _memo:
         return _memo[key]
     path = f"{CACHE_DIR}/nav_{code}.csv"
-    if _fresh(path):
-        df = pd.read_csv(path, parse_dates=["date"])
-    else:
+
+    def _build():
         raw = _retry(lambda: ak.fund_open_fund_info_em(symbol=code, indicator="单位净值走势"))
-        df = pd.DataFrame({
+        return pd.DataFrame({
             "date": pd.to_datetime(raw["净值日期"]),
             "nav": raw["单位净值"].astype(float).values,
             "ret": raw["日增长率"].astype(float).div(100).values,
         }).dropna().sort_values("date").reset_index(drop=True)
-        df.to_csv(path, index=False)
+
+    df = _cached_or_fetch(path, _build)
     _memo[key] = df
     return df
 
@@ -121,16 +184,18 @@ def parse_worktime_days(worktime: str) -> int:
 # ---------------- 指数日行情 (新浪) ----------------
 def get_index_close(sina_code: str) -> pd.Series:
     key = f"idx_{sina_code}"
+    _roll_day()
     if key in _memo:
         return _memo[key]
     path = f"{CACHE_DIR}/idx_{sina_code}.csv"
-    if _fresh(path):
-        df = pd.read_csv(path, parse_dates=["date"])
-    else:
+
+    def _build():
         raw = _retry(lambda: ak.stock_zh_index_daily(symbol=sina_code))
         df = raw[["date", "close"]].copy()
         df["date"] = pd.to_datetime(df["date"])
-        df.to_csv(path, index=False)
+        return df
+
+    df = _cached_or_fetch(path, _build)
     s = df.set_index("date")["close"].sort_index()
     _memo[key] = s
     return s
@@ -139,17 +204,18 @@ def get_index_close(sina_code: str) -> pd.Series:
 # ---------------- 指数OHLCV (含成交量, 右侧反转信号用) ----------------
 def get_index_ohlcv(sina_code: str) -> pd.DataFrame:
     key = f"idxfull_{sina_code}"
+    _roll_day()
     if key in _memo:
         return _memo[key]
     path = f"{CACHE_DIR}/idxfull_{sina_code}.csv"
-    if _fresh(path):
-        df = pd.read_csv(path, parse_dates=["date"])
-    else:
+
+    def _build():
         raw = _retry(lambda: ak.stock_zh_index_daily(symbol=sina_code))
         df = raw.copy()
         df["date"] = pd.to_datetime(df["date"])
-        df.to_csv(path, index=False)
-    df = df.sort_values("date").reset_index(drop=True)
+        return df.sort_values("date").reset_index(drop=True)
+
+    df = _cached_or_fetch(path, _build)
     _memo[key] = df
     return df
 
@@ -171,18 +237,20 @@ def market_reversal_signal(sina_code="sh000300") -> dict:
 # ---------------- 中证全指行业指数 (csindex: 收盘+滚动PE同源) ----------------
 def _csindex_df(csicode: str) -> pd.DataFrame:
     key = f"csi_{csicode}"
+    _roll_day()
     if key in _memo:
         return _memo[key]
     path = f"{CACHE_DIR}/csi_{csicode}.csv"
-    if _fresh(path):
-        df = pd.read_csv(path, parse_dates=["date"])
-    else:
+
+    def _build():
         raw = _retry(lambda: ak.stock_zh_index_hist_csindex(
-            symbol=csicode, start_date="20210801", end_date="20260801"))
-        df = pd.DataFrame({"date": pd.to_datetime(raw["日期"]),
-                           "close": raw["收盘"].astype(float).values,
-                           "pe": raw["滚动市盈率"].astype(float).values})
-        df.to_csv(path, index=False)
+            symbol=csicode, start_date="20210801",
+            end_date=dt.date.today().strftime("%Y%m%d")))   # V3.7.3: 修硬编码20260801化石
+        return pd.DataFrame({"date": pd.to_datetime(raw["日期"]),
+                             "close": raw["收盘"].astype(float).values,
+                             "pe": raw["滚动市盈率"].astype(float).values})
+
+    df = _cached_or_fetch(path, _build)
     _memo[key] = df
     return df
 
@@ -201,16 +269,18 @@ def get_index_pe_csindex(csicode: str) -> pd.Series:
 def get_us_index_close(us_code: str) -> pd.Series:
     """新浪美股指数: .NDX / .INX"""
     key = f"idxus_{us_code}"
+    _roll_day()
     if key in _memo:
         return _memo[key]
     path = f"{CACHE_DIR}/idx_us_{us_code.replace('.','_')}.csv"
-    if _fresh(path):
-        df = pd.read_csv(path, parse_dates=["date"])
-    else:
+
+    def _build():
         raw = _retry(lambda: ak.stock_us_daily(symbol=us_code, adjust=""))
         df = raw[["date", "close"]].copy()
         df["date"] = pd.to_datetime(df["date"])
-        df.to_csv(path, index=False)
+        return df
+
+    df = _cached_or_fetch(path, _build, lag=1)   # 境外源晚一个交易日
     s = df.set_index("date")["close"].sort_index()
     _memo[key] = s
     return s
@@ -219,16 +289,18 @@ def get_us_index_close(us_code: str) -> pd.Series:
 def get_hk_index_close(hk_code: str) -> pd.Series:
     """新浪港股指数: HSI / HSTECH / HSCEI"""
     key = f"idxhk_{hk_code}"
+    _roll_day()
     if key in _memo:
         return _memo[key]
     path = f"{CACHE_DIR}/idx_hk_{hk_code}.csv"
-    if _fresh(path):
-        df = pd.read_csv(path, parse_dates=["date"])
-    else:
+
+    def _build():
         raw = _retry(lambda: ak.stock_hk_index_daily_sina(symbol=hk_code))
         df = raw[["date", "close"]].copy()
         df["date"] = pd.to_datetime(df["date"])
-        df.to_csv(path, index=False)
+        return df
+
+    df = _cached_or_fetch(path, _build, lag=1)
     s = df.set_index("date")["close"].sort_index()
     _memo[key] = s
     return s
@@ -262,16 +334,17 @@ def get_pe_by_src(src: str, pe_key: str) -> pd.Series:
 # ---------------- 指数PE历史 (乐咕) ----------------
 def get_index_pe(lg_symbol: str) -> pd.Series:
     key = f"pe_{lg_symbol}"
+    _roll_day()
     if key in _memo:
         return _memo[key]
     path = f"{CACHE_DIR}/pe_{lg_symbol}.csv"
-    if _fresh(path):
-        df = pd.read_csv(path, parse_dates=["date"])
-    else:
+
+    def _build():
         raw = _retry(lambda: ak.stock_index_pe_lg(symbol=lg_symbol))
-        df = pd.DataFrame({"date": pd.to_datetime(raw["日期"]),
-                           "pe": raw["滚动市盈率"].astype(float).values})
-        df.to_csv(path, index=False)
+        return pd.DataFrame({"date": pd.to_datetime(raw["日期"]),
+                             "pe": raw["滚动市盈率"].astype(float).values})
+
+    df = _cached_or_fetch(path, _build)
     s = df.set_index("date")["pe"].sort_index()
     _memo[key] = s
     return s

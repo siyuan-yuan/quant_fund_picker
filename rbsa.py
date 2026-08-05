@@ -18,6 +18,10 @@ import provider
 _FULL_MAT = {}
 _PEP_CACHE = {}
 
+# V3.7.2 研究钩子(rbsa_ew_study): 非None时按指数衰减加权(半衰期, 交易日)
+# 批判清单④候选: 常规60日平权 → EW加权, 提升风格漂移响应速度
+EW_HALFLIFE = None
+
 
 def index_return_matrix(dates: pd.DatetimeIndex, indices=None) -> pd.DataFrame:
     """因子收益矩阵, 按基金净值日期对齐; indices 可指定面板(回测用风格6)
@@ -49,8 +53,12 @@ def rbsa_weights(fund_ret: pd.Series, idx_ret: pd.DataFrame) -> pd.Series:
         X = idx_ret.iloc[end - RBSA_WINDOW:end][names].fillna(0).values
         if np.nanstd(y) < 1e-8:
             continue
+        sw = None
+        if EW_HALFLIFE:
+            ages = np.arange(len(y) - 1, -1, -1)          # 最新样本 age=0 → 权重1
+            sw = 0.5 ** (ages / float(EW_HALFLIFE))
         m = Ridge(alpha=RIDGE_ALPHA, positive=True, fit_intercept=True)
-        m.fit(X, y)
+        m.fit(X, y, sample_weight=sw)
         w = np.clip(m.coef_, 0, None)
         s = w.sum()
         if s > 1e-6:
