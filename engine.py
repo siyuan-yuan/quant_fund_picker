@@ -13,8 +13,9 @@ from config import (W_VALUE, W_ALPHA, W_MOMENTUM, RATING_BANDS,
 import provider, rbsa, factors, risk
 
 
-def is_overseas_fund(code: str, name: str) -> bool:
-    ftype = provider.fund_type(code) or ""
+def is_overseas_fund(code: str, name: str, ftype: str = None) -> bool:
+    """判断必须可注入历史类型，PiT 回测不可回查今天的基金名录。"""
+    ftype = ftype if ftype is not None else (provider.fund_type(code) or "")
     return ("海外" in ftype) or ("QDII" in ftype) or ("QDII" in name.upper())
 
 
@@ -30,11 +31,14 @@ def resolve_weights(water: float):
     return (W_VALUE, W_ALPHA, W_MOMENTUM), "标准"
 
 
-def score_fund(code: str, as_of: str = None, bt: bool = False, indices=None) -> dict:
+def score_fund(code: str, as_of: str = None, bt: bool = False, indices=None,
+               pit_meta: dict = None) -> dict:
     """
     单基金流水线(动量截面排名在 universe 层完成)
       as_of: 回测截止日 —— 净值/估值全部截断至该日(Point-in-Time)
       bt=True: 回测模式 —— 跳过非PiT数据(经理档案/AUM/缩水加分)与其挂钩惩罚
+      pit_meta: 历史快照里的 ``name``/``fund_type``。严格回测传入后，类型、
+                被动基金识别及海外判断均不会查询今天的 fund_meta。
       indices: 因子面板(默认 config 全局; 回测传风格6面板)
     """
     nav = provider.get_fund_nav(code)
@@ -43,22 +47,33 @@ def score_fund(code: str, as_of: str = None, bt: bool = False, indices=None) -> 
         nav = nav[nav["date"] <= as_of_ts]
     dossier = {} if bt else provider.get_fund_dossier(code)
     if bt:
-        try:
-            name = str(provider.get_fund_meta().loc[code, "基金简称"])
-        except Exception:
-            name = code
+        # pit_meta 是严格回测的唯一元数据来源；缺失时保留旧兼容路径，调用方须披露。
+        if pit_meta is not None:
+            name = str(pit_meta.get("name") or code)
+            ftype = str(pit_meta.get("fund_type") or "")
+        else:
+            try:
+                name = str(provider.get_fund_meta().loc[code, "基金简称"])
+            except Exception:
+                name = code
+            ftype = provider.fund_type(code)
     else:
         name = dossier.get("name", code)
+        ftype = provider.fund_type(code)
     nav = nav.set_index("date")
     ret = nav["ret"]
     adj = (1 + ret.fillna(0)).cumprod()
 
-    out = {"code": code, "name": name, "ftype": provider.fund_type(code),
+    out = {"code": code, "name": name, "ftype": ftype,
            "n_days": len(nav), "last_date": str(nav.index[-1].date() if len(nav) else None)}
 
     min_days = 800 if bt else 200        # 回测要求≥3年alpha窗口+缓冲
     if len(nav) < min_days:
         out["error"] = f"净值历史不足({len(nav)}d)"
+        return out
+    # 历史快照即使误收录了已停止披露的份额，也不能把很久以前的净值当作当日可交易价格。
+    if bt and as_of is not None and nav.index[-1] < pd.Timestamp(as_of) - pd.Timedelta(days=7):
+        out["error"] = f"截至回测日净值过期({nav.index[-1].date()})"
         return out
 
     # --- RBSA 穿透 (V3.3: 海外基金"借壳"修正) ---
@@ -67,7 +82,7 @@ def score_fund(code: str, as_of: str = None, bt: bool = False, indices=None) -> 
     w = rbsa.rbsa_weights(ret, idx_ret)
     panel_mode = "unified"
     # 海外类型基金: 母市场就是其法定benchmark → 直接切纯境外面板(无条件)
-    if not bt and is_overseas_fund(code, name):
+    if not bt and is_overseas_fund(code, name, ftype):
         ov_idx = [x for x in RBSA_INDICES if x[0] in OVERSEAS_SRCS]
         ov_ret = rbsa.index_return_matrix(nav.index, indices=ov_idx)
         w_ov = rbsa.rbsa_weights(ret, ov_ret)
@@ -112,7 +127,9 @@ def score_fund(code: str, as_of: str = None, bt: bool = False, indices=None) -> 
 
     # --- 风控 ---
     cur_scale = bonus_dt.get("cur_scale")
-    is_passive = provider.is_passive_fund(code, name)
+    # 历史类型进入严格 PiT 回测时，不能调用 provider.is_passive_fund（其读取今日名录）。
+    is_passive = (("指数" in ftype) or ("指数" in name) or ("ETF" in name) or ("联接" in name)) \
+        if (bt and pit_meta is not None) else provider.is_passive_fund(code, name)
     pens, pdt = risk.build_penalties(
         tenure_days=tenure_max, is_passive=is_passive,
         fund_ret=ret, bench_ret=bench, weights=w,

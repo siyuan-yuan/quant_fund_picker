@@ -17,16 +17,17 @@
     bt_equity_<tag>.png   净值与回撤图(vs 沪深300)
 
 评分面板缓存 output/bt_scores_cache/: 每个季点打一次分永久缓存, 二次运行秒级
-诚实边界: 默认使用全市场池（scan_market.py 生成的 rank_all.csv）; 回测豁免任期惩罚
+严格口径: 默认必须提供历史可投池快照（含清盘基金），每月动态建池；信号 T+2 真实交易日成交；回测豁免无法获得历史档案的任期/AUM 惩罚。
 =================================================================
 """
-import os, sys, argparse, hashlib, time
+import os, sys, argparse, time
 import numpy as np
 import pandas as pd
 
 import provider
 import rbsa, factors
 from engine import score_fund, finalize
+from pit_universe import PITUniverseStore, PITUniverseError
 from config import (STRAT_BUY_TH, STRAT_SELL_TH, STRAT_SLOTS, STRAT_VERSION,
                     STRAT_CASH_YIELD, STRAT_REBALANCE, STRAT_TRAIL_STOP,
                     STRAT_CRISIS_MA, STRAT_CRISIS_VOL_WINDOW, STRAT_CRISIS_VOL_Q,
@@ -36,7 +37,6 @@ from config import (STRAT_BUY_TH, STRAT_SELL_TH, STRAT_SLOTS, STRAT_VERSION,
                     STRAT_HI_WATER, STRAT_HI_WATER_SLOTS)
 
 CACHE_DIR = "output/bt_scores_cache"
-FACTOR_ROWS = "output/factor_rows"
 
 
 # ============ 1. 打分面板: 每个季点一份(优先复用已有, 缺失则现打现存) ============
@@ -73,13 +73,14 @@ def score_from_raw(g):
     return g
 
 
-def harvest_date(d, codes):
-    """对一个季点现打分(慢, 打一次即缓存)"""
+def harvest_date(d, universe):
+    """仅对该日历史快照的成员打分；pit_meta 阻断今天元数据泄漏。"""
     t0 = time.time()
     rows = []
+    meta = universe.set_index("code")[["name", "fund_type"]].to_dict("index")
     from concurrent.futures import ThreadPoolExecutor, as_completed
     with ThreadPoolExecutor(max_workers=10) as ex:
-        futs = {ex.submit(score_fund, c, as_of=d, bt=True): c for c in codes}
+        futs = {ex.submit(score_fund, c, as_of=d, bt=True, pit_meta=meta[c]): c for c in meta}
         for fut in as_completed(futs):
             try:
                 r = fut.result()
@@ -100,34 +101,33 @@ def harvest_date(d, codes):
             trend_ok=bool(h.trend_ok), wr=h.ir_winrate, dc=h.down_capture,
             r4=h.mom_4m1m, r7=h.mom_7m1m, R_MDD=pdt.get("R_MDD"), other_pen=op))
     df = pd.DataFrame(recs)
-    print(f"  [harvest] {d} 打分 {len(df)} 只 ({time.time()-t0:.0f}s)", flush=True)
+    print(f"  [PiT harvest] {d} 快照成员 {len(universe)}，有效评分 {len(df)} ({time.time()-t0:.0f}s)", flush=True)
     return df
 
 
-def build_panel(dates, codes, default_universe, rebuild=False):
-    """返回 DataFrame: date × code 的原始量+S; 逐季点缓存"""
-    os.makedirs(CACHE_DIR, exist_ok=True)
-    uid = "" if default_universe else "_" + hashlib.md5(",".join(sorted(codes)).encode()).hexdigest()[:8]
-    parts = []
+def build_panel(dates, universe_store, rebuild=False):
+    """严格动态可投池：每个信号日独立取历史快照，不复用旧研究池原料。"""
+    root = os.path.join(CACHE_DIR, "strict_" + universe_store.manifest_hash())
+    os.makedirs(root, exist_ok=True)
+    parts, audits = [], []
     for d in dates:
-        fr = f"{FACTOR_ROWS}/{d}.csv"
-        ck = f"{CACHE_DIR}/{d}{uid}.csv"
-        if default_universe and os.path.exists(fr):          # 研究池已有原料行
-            g = pd.read_csv(fr, dtype={"code": str})
-            g = g[g.code.isin(codes)].copy()
-        elif (not rebuild) and os.path.exists(ck):
+        universe, audit = universe_store.universe(d)
+        ck = f"{root}/{d}.csv"
+        if (not rebuild) and os.path.exists(ck):
             g = pd.read_csv(ck, dtype={"code": str})
         else:
-            g = harvest_date(d, codes)
+            g = harvest_date(d, universe)
             if not g.empty:
                 g.to_csv(ck, index=False, encoding="utf-8-sig")
+        audit.update(scored_members=int(len(g)), cache_file=ck)
+        audits.append(audit)
         if g.empty:
-            print(f"  [warn] {d} 无评分数据, 跳过")
+            print(f"  [warn] {d} 没有可用的 PiT 评分，跳过")
             continue
         g = score_from_raw(g)
         g["date"] = d
         parts.append(g[["date", "code", "S", "water", "R_MDD"]])
-    return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+    return (pd.concat(parts, ignore_index=True) if parts else pd.DataFrame(), audits)
 
 
 # ============ 2. 数据 ============
@@ -524,7 +524,7 @@ def report(ec, tr, bench, args, dates, names, tag):
         S.append("### 最差 5 笔")
         S.append(tr.nsmallest(5, "net_ret")[["code", "entry_date", "exit_date", "entry_S",
               "net_ret", "pnl_yuan", "hold_days"]].round(3).to_markdown(index=False) + "\n")
-    S.append("> 仅量化研究用途，不构成投资建议。默认池含幸存者偏差(收益上偏); 回测豁免任期惩罚。\n")
+    S.append("> 严格 PiT 口径：每月只使用当时已知的历史可投池快照，信号日后延迟成交；快照审计见 `bt_pit_audit.json`。历史经理任期/AUM未有逐日档案，评分中已豁免，不能解释为该两项通过验证。仅量化研究用途，不构成投资建议。\n")
     txt = "\n".join(S)
     open(f"output/bt_summary_{tag}.md", "w", encoding="utf-8").write(txt)
     # 控制台精简版
@@ -574,7 +574,11 @@ def main():
     ap.add_argument("--capital", type=float, default=100000)
     ap.add_argument("--cost-in", dest="cost_in", type=float, default=0.0015)
     ap.add_argument("--cost-out", dest="cost_out", type=float, default=0.005)
-    ap.add_argument("--codes", default=None)
+    ap.add_argument("--codes", default=None, help="严格模式禁用：请把历史成分写入 --universe-dir 快照")
+    ap.add_argument("--universe-dir", default="data/pit_universe",
+                    help="历史可投池快照目录（严格模式必需，含清盘基金）")
+    ap.add_argument("--execution-lag", type=int, default=2,
+                    help="信号日后延迟的基准交易日数；默认2：T+1披露净值后按下一日净值成交")
     ap.add_argument("--rebuild", action="store_true")
     ap.add_argument("--legacy", action="store_true", help="关闭V3.8执行层，回到旧版纯S阈值回测")
     ap.add_argument("--cash-yield", type=float, default=STRAT_CASH_YIELD, help="V3.8闲置现金年化收益")
@@ -589,43 +593,55 @@ def main():
     ap.add_argument("--crisis-vol-q", type=float, default=STRAT_CRISIS_VOL_Q)
     args = ap.parse_args()
 
-    # 读取基金池
     if args.codes:
-        codes = [l.strip().zfill(6) for l in open(args.codes, encoding="utf-8")
-                 if l.strip() and l.strip()[0].isdigit()]
-        default_universe = False
-        print(f"[池] 自定义 {len(codes)} 只: {args.codes}")
-    else:
-        codes = sorted(set(pd.concat([pd.read_csv(f"{FACTOR_ROWS}/{f}", dtype={"code": str})["code"]
-                                      for f in os.listdir(FACTOR_ROWS) if f.endswith(".csv")]).tolist()))
-        default_universe = True
-        print(f"[池] 全市场池 {len(codes)} 只")
+        ap.error("--codes 是静态自选池，会破坏动态可投池；严格 PiT 回测请提供历史快照。")
+    if args.execution_lag < 1:
+        ap.error("--execution-lag 必须至少为 1，禁止信号日同价成交。")
+    try:
+        universe_store = PITUniverseStore(args.universe_dir)
+    except PITUniverseError as exc:
+        ap.error(str(exc))
 
-    # ========== 关键修改：每月末打分 ==========
+    # 每月末仅使用截至该日已知的信息打分；交易在净值披露后的后续交易日执行。
     end = args.end or str((pd.Timestamp.today() - pd.offsets.MonthEnd(1)).date())
-    qs = [str(d.date()) for d in pd.date_range(args.start, end, freq="ME")]
-    print(f"[打分区间] {qs[0]} → {qs[-1]} 共 {len(qs)} 个月末")
+    signal_dates = [str(d.date()) for d in pd.date_range(args.start, end, freq="ME")]
+    if not signal_dates:
+        ap.error("回测区间内没有月末信号日。")
+    print(f"[严格 PiT] 信号 {signal_dates[0]} → {signal_dates[-1]}，共 {len(signal_dates)} 个；"
+          f"快照指纹 {universe_store.manifest_hash()}")
 
-    panel = build_panel(qs, codes, default_universe, args.rebuild)
-    print(f"[面板] 评分行 {len(panel)} | S>{args.buy:.0f} 信号 {int((panel.S > args.buy).sum())} 个")
-
-    # 过滤掉没有打分数据的月份
-    available_dates = set(panel["date"].unique())
-    qs = [d for d in qs if d in available_dates]
-    print(f"[有效打分月] 实际可用 {len(qs)} 个月")
-
-    if not qs:
-        print("❌ 没有任何可用打分月份，程序退出")
+    panel, audits = build_panel(signal_dates, universe_store, args.rebuild)
+    if panel.empty:
+        print("❌ 没有任何可用 PiT 评分月份，程序退出")
         return
+    bench = provider.get_close_by_src("sina", "sh000300").dropna().sort_index()
+    # 防止月末节假日和同日成交：每个信号映射到至少 T+1，默认 T+2 的真实基准交易日。
+    trade_map = {}
+    for d in sorted(panel.date.unique()):
+        pos = bench.index.searchsorted(pd.Timestamp(d), side="right") + args.execution_lag - 1
+        if pos < len(bench.index):
+            trade_map[d] = str(bench.index[pos].date())
+    panel["signal_date"] = panel["date"]
+    panel["date"] = panel["date"].map(trade_map)
+    panel = panel.dropna(subset=["date"])
+    if panel.empty:
+        print("❌ 信号日之后没有可用于成交的基准交易日，程序退出")
+        return
+    pd.DataFrame(audits).to_csv("output/bt_pit_universe_audit.csv", index=False, encoding="utf-8-sig")
+    import json
+    with open("output/bt_pit_audit.json", "w", encoding="utf-8") as fh:
+        json.dump({"mode": "strict_point_in_time_dynamic_universe", "execution_lag_sessions": args.execution_lag,
+                   "manifest": universe_store.manifest_hash(), "snapshots": audits}, fh,
+                  ensure_ascii=False, indent=2)
+    print(f"[面板] 严格动态评分行 {len(panel)} | S>{args.buy:.0f} 信号 {int((panel.S > args.buy).sum())} 个")
 
+    qs = sorted(panel["date"].unique())
+    print(f"[有效执行月] {len(qs)} 个（信号日后 T+{args.execution_lag} 交易日成交）")
     navs = load_navs(list(set(panel.code)))
     print(f"[净值] 可用 {len(navs)}/{panel.code.nunique()}")
 
-    bench = provider.get_close_by_src("sina", "sh000300").dropna().sort_index()
-
     model_tag = "legacy" if args.legacy else "v38"
-    tag = (f"{model_tag}_b{args.buy:.0f}s{args.sell:.0f}n{args.slots}k{int(args.capital/10000)}w" +
-           ("_monthly" if not default_universe else ""))
+    tag = f"pit_{model_tag}_b{args.buy:.0f}s{args.sell:.0f}n{args.slots}k{int(args.capital/10000)}w"
 
     ec, tr = simulate(panel, navs, bench, qs, args)
     names = load_names()
