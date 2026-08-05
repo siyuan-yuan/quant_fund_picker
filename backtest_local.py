@@ -4,6 +4,7 @@
 =================================================================
 用法(在 quant_fund_picker 目录下):
     python backtest_local.py                          # 默认: V3.8 最优执行层, 70买45卖
+    python backtest_local.py --pool-mode pit-top --pit-top-n 100 --score-suffix auto  # 严格历史动态池复盘(PiT)
     python backtest_local.py --legacy                 # 旧版纯S阈值回测
     python backtest_local.py --sell 50                # 改动一条线对比
     python backtest_local.py --capital 200000 --slots 8
@@ -20,7 +21,7 @@
 诚实边界: 默认使用全市场池（scan_market.py 生成的 rank_all.csv）; 回测豁免任期惩罚
 =================================================================
 """
-import os, sys, argparse, hashlib, time
+import os, sys, argparse, hashlib, time, re
 import numpy as np
 import pandas as pd
 
@@ -37,6 +38,40 @@ from config import (STRAT_BUY_TH, STRAT_SELL_TH, STRAT_SLOTS, STRAT_VERSION,
 
 CACHE_DIR = "output/bt_scores_cache"
 FACTOR_ROWS = "output/factor_rows"
+
+
+def get_best_score_suffix(cache_dir=CACHE_DIR):
+    """自动选择覆盖行数最多的评分缓存后缀"""
+    if not os.path.exists(cache_dir):
+        return ""
+    suffix_rows = {}
+    pattern = re.compile(r'^\d{4}-\d{2}-\d{2}(.*)\.csv$')
+    for fname in os.listdir(cache_dir):
+        m = pattern.match(fname)
+        if not m:
+            continue
+        suf = m.group(1)
+        fpath = os.path.join(cache_dir, fname)
+        try:
+            with open(fpath, "r", encoding="utf-8") as fp:
+                rows = sum(1 for _ in fp) - 1
+                suffix_rows[suf] = suffix_rows.get(suf, 0) + max(rows, 0)
+        except Exception:
+            pass
+    if not suffix_rows:
+        return ""
+    return max(suffix_rows.items(), key=lambda x: x[1])[0]
+
+
+def resolve_score_suffix(suffix_arg, cache_dir=CACHE_DIR):
+    if suffix_arg == "auto" or not suffix_arg:
+        best_suf = get_best_score_suffix(cache_dir)
+        return best_suf
+    else:
+        suf = suffix_arg.lstrip("*")
+        if suf and not suf.startswith("_"):
+            suf = "_" + suf
+        return suf
 
 
 # ============ 1. 打分面板: 每个季点一份(优先复用已有, 缺失则现打现存) ============
@@ -104,11 +139,26 @@ def harvest_date(d, codes):
     return df
 
 
-def build_panel(dates, codes, default_universe, rebuild=False):
+def build_panel(dates, codes, default_universe, rebuild=False, pool_mode="default", score_suffix="auto"):
     """返回 DataFrame: date × code 的原始量+S; 逐季点缓存"""
     os.makedirs(CACHE_DIR, exist_ok=True)
-    uid = "" if default_universe else "_" + hashlib.md5(",".join(sorted(codes)).encode()).hexdigest()[:8]
     parts = []
+    if pool_mode == "pit-top":
+        suf = resolve_score_suffix(score_suffix, CACHE_DIR)
+        print(f"  [PiT] 使用评分缓存后缀: '{suf or '(无后缀)'}'")
+        for d in dates:
+            ck = f"{CACHE_DIR}/{d}{suf}.csv"
+            if os.path.exists(ck):
+                g = pd.read_csv(ck, dtype={"code": str})
+                if not g.empty:
+                    g = score_from_raw(g)
+                    g["date"] = d
+                    parts.append(g[["date", "code", "S", "water", "R_MDD"]])
+            else:
+                print(f"  [warn] {d} 无评分缓存数据 ({ck}), 跳过")
+        return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
+
+    uid = "" if default_universe else "_" + hashlib.md5(",".join(sorted(codes)).encode()).hexdigest()[:8]
     for d in dates:
         fr = f"{FACTOR_ROWS}/{d}.csv"
         ck = f"{CACHE_DIR}/{d}{uid}.csv"
@@ -188,6 +238,12 @@ def simulate(panel, navs, bench, dates, args):
     用 `--legacy` 可退回旧的 S>buy / S<sell / fixed-slot 逻辑。
     """
     by_date = {d: g.set_index("code") for d, g in panel.groupby("date")}
+    eligible_by_date = {}
+    if getattr(args, "pool_mode", "default") == "pit-top":
+        pit_top_n = getattr(args, "pit_top_n", 100)
+        for d, g in by_date.items():
+            eligible_by_date[d] = set(g.nlargest(pit_top_n, "S").index)
+
     T0, T1 = pd.Timestamp(dates[0]), pd.Timestamp(dates[-1])
     day_grid = bench.loc[T0:T1].index
 
@@ -385,7 +441,11 @@ def simulate(panel, navs, bench, dates, args):
         if day_str in by_date:
             g = by_date[day_str]
             last_scores = g
-            candidates = g[g.S > args.buy].sort_values("S", ascending=False)
+            if getattr(args, "pool_mode", "default") == "pit-top":
+                eligible = eligible_by_date.get(day_str, set())
+                candidates = g[(g.S > args.buy) & (g.index.isin(eligible))].sort_values("S", ascending=False)
+            else:
+                candidates = g[g.S > args.buy].sort_values("S", ascending=False)
 
             # 熔断后：仅在右侧信号出现且非危机时复活，并重置HWM为当前净值
             if cppi_on and cppi_locked:
@@ -417,6 +477,9 @@ def simulate(panel, navs, bench, dates, args):
                 crisis_blocked += len(candidates)
             elif daily_cap > 0:
                 for c, row in candidates.iterrows():
+                    if getattr(args, "pool_mode", "default") == "pit-top":
+                        if c not in eligible_by_date.get(day_str, set()):
+                            continue
                     if c in positions or len(positions) >= min(args.slots, daily_cap) or c not in navs:
                         continue
                     price = px(navs[c], day)
@@ -468,6 +531,10 @@ def report(ec, tr, bench, args, dates, names, tag):
     model_name = ec.attrs.get("model", "legacy")
     S.append(f"# 本地回测报告  区间 {dates[0]} → {dates[-1]}  tag={tag}\n")
     S.append(f"模型: **{model_name}**\n")
+    if getattr(args, "pool_mode", "default") == "pit-top":
+        S.append(f"候选池模式: **严格历史动态池复盘 (PiT Top{getattr(args, 'pit_top_n', 100)})**\n")
+    else:
+        S.append("候选池模式: **默认/自选池 (非严格PiT)**\n")
     v38_on = not getattr(args, 'legacy', False)
     S.append(f"参数: 买 S>{args.buy:.0f} / 卖 S<{args.sell:.0f} / 槽位 {args.slots} / 本金 {args.capital:,.0f} 元 / "
              f"成本 申购{args.cost_in:.2%}+赎回{args.cost_out:.2%} / "
@@ -524,7 +591,10 @@ def report(ec, tr, bench, args, dates, names, tag):
         S.append("### 最差 5 笔")
         S.append(tr.nsmallest(5, "net_ret")[["code", "entry_date", "exit_date", "entry_S",
               "net_ret", "pnl_yuan", "hold_days"]].round(3).to_markdown(index=False) + "\n")
-    S.append("> 仅量化研究用途，不构成投资建议。默认池含幸存者偏差(收益上偏); 回测豁免任期惩罚。\n")
+    if getattr(args, "pool_mode", "default") == "pit-top":
+        S.append("> 仅量化研究用途，不构成投资建议。严格历史动态池复盘：买入仅限当日评分 TopN 基金，避免未来函数的幸存者偏差；卖出仍按照当日全市场评分执行。\n")
+    else:
+        S.append("> 仅量化研究用途，不构成投资建议。默认池含幸存者偏差(收益上偏); 回测豁免任期惩罚。\n")
     txt = "\n".join(S)
     open(f"output/bt_summary_{tag}.md", "w", encoding="utf-8").write(txt)
     # 控制台精简版
@@ -587,10 +657,25 @@ def main():
     ap.add_argument("--crisis-ma", type=int, default=STRAT_CRISIS_MA)
     ap.add_argument("--crisis-vol-window", type=int, default=STRAT_CRISIS_VOL_WINDOW)
     ap.add_argument("--crisis-vol-q", type=float, default=STRAT_CRISIS_VOL_Q)
+    ap.add_argument("--pool-mode", choices=["default", "pit-top"], default="default",
+                    help="候选池模式: default 为普通模式, pit-top 为严格历史动态池复盘")
+    ap.add_argument("--pit-top-n", dest="pit_top_n", type=int, default=100,
+                    help="严格历史复盘模式下，每个决策日买入仅限当日 S 分排名前 N 的基金")
+    ap.add_argument("--score-suffix", dest="score_suffix", default="auto",
+                    help="评分缓存后缀，如 _2e4ec0f5，或者 auto 自动选择覆盖行数最多的后缀")
     args = ap.parse_args()
 
     # 读取基金池
-    if args.codes:
+    if args.pool_mode == "pit-top":
+        suf = resolve_score_suffix(args.score_suffix, CACHE_DIR)
+        print(f"[PiT] 启用严格历史动态池复盘 (买入限当日 Top{args.pit_top_n})")
+        print(f"[PiT] 读取缓存后缀: '{suf or '(无后缀)'}' (无需静态代码池，避免历史并集池未来函数)")
+        codes = []
+        default_universe = False
+    elif args.codes:
+        if "top100" in str(args.codes):
+            print("⚠️ 提醒：top100_history_pool.txt 是历史并集池，会提前暴露未来入榜基金。")
+            print("   严格回测请使用 --pool-mode pit-top --pit-top-n 100")
         codes = [l.strip().zfill(6) for l in open(args.codes, encoding="utf-8")
                  if l.strip() and l.strip()[0].isdigit()]
         default_universe = False
@@ -606,7 +691,8 @@ def main():
     qs = [str(d.date()) for d in pd.date_range(args.start, end, freq="ME")]
     print(f"[打分区间] {qs[0]} → {qs[-1]} 共 {len(qs)} 个月末")
 
-    panel = build_panel(qs, codes, default_universe, args.rebuild)
+    panel = build_panel(qs, codes, default_universe, args.rebuild,
+                        pool_mode=args.pool_mode, score_suffix=args.score_suffix)
     print(f"[面板] 评分行 {len(panel)} | S>{args.buy:.0f} 信号 {int((panel.S > args.buy).sum())} 个")
 
     # 过滤掉没有打分数据的月份
@@ -624,8 +710,11 @@ def main():
     bench = provider.get_close_by_src("sina", "sh000300").dropna().sort_index()
 
     model_tag = "legacy" if args.legacy else "v38"
-    tag = (f"{model_tag}_b{args.buy:.0f}s{args.sell:.0f}n{args.slots}k{int(args.capital/10000)}w" +
-           ("_monthly" if not default_universe else ""))
+    if args.pool_mode == "pit-top":
+        pool_suffix = f"_pittop{args.pit_top_n}"
+    else:
+        pool_suffix = "_monthly" if not default_universe else ""
+    tag = (f"{model_tag}_b{args.buy:.0f}s{args.sell:.0f}n{args.slots}k{int(args.capital/10000)}w" + pool_suffix)
 
     ec, tr = simulate(panel, navs, bench, qs, args)
     names = load_names()

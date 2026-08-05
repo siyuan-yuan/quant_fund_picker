@@ -156,6 +156,7 @@ python backtest_local.py --legacy             # 旧版纯S阈值回测
 
 ```bash
 python backtest_local.py                      # 默认: V3.8执行层, 70买45卖, 10槽, 10万本金
+python backtest_local.py --pool-mode pit-top --pit-top-n 100 --score-suffix auto  # 严格历史动态池复盘(PiT TopN)
 python backtest_local.py --legacy             # 旧版纯S阈值回测
 python backtest_local.py --sell 50            # 改平仓线对比
 python backtest_local.py --no-cppi            # 关闭CPPI风险预算做消融
@@ -164,6 +165,25 @@ python backtest_local.py --capital 200000 --slots 8
 python backtest_local.py --codes mypool.txt   # 自定义池(每行一个6位代码)
 python backtest_local.py --rebuild            # 换模型参数后强制重打分
 ```
+
+### 严格历史动态池复盘 (Point-in-Time)
+
+实现真正的 Point-in-Time 动态候选池：**每个决策日只允许买入当日 S 分排名 TopN 的基金**；持仓卖出与季度再平衡仍使用完整当日评分面板。
+
+```bash
+python backtest_local.py \
+  --pool-mode pit-top \
+  --pit-top-n 100 \
+  --start 2006-09-30 \
+  --end 2026-03-31 \
+  --score-suffix *2e4ec0f5
+```
+
+> **注意**：
+> 不要用 `--codes top100_history_pool.txt` 来宣称严格历史复盘；
+> 它是历史并集池，会提前暴露未来入榜基金。
+> 严格历史复盘请用 `--pool-mode pit-top`（无需传入静态 `--codes`，自动从 `output/bt_scores_cache/` 历史缓存面板中选出每个决策日当日的 TopN 可买池）。
+
 - **全自动续期**: 新季度首次自动 PiT 打分(~20s)并永久缓存 `output/bt_scores_cache/`, 二次秒跑
 - **三本账**: `bt_trades_<tag>.csv`(逐笔买卖: 价/分/持有天数/净收益/年化/盈亏元) + `bt_daily_<tag>.csv`(逐日净值/回撤/现金/CPPI状态) + `bt_summary_<tag>.md`(汇总报告) + `bt_equity_<tag>.png`(净值图 vs 沪深300)
 - 默认输出 tag 前缀为 `v38_`; 旧版回测为 `legacy_`。
