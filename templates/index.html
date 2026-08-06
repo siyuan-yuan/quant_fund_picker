@@ -327,7 +327,13 @@
         <div class="regime" id="regime">—</div>
       </div>
       <div class="status" id="reversal"></div>
-      <div class="hint">水位由 6 个风格指数（上证50/沪深300/中证500/1000/创业板50/红利）等权计算；≤20% 进入左侧低估区，估值因子权重上调至 0.55。</div>
+      <div id="water-slot-info" style="margin-top:12px;padding:10px 14px;border-radius:8px;border:1px dashed var(--line);background:var(--well);display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:12.5px;line-height:1.7">
+        <span style="color:var(--dim)">当前策略允许最大权益槽位</span>
+        <b id="water-slots" style="font-family:var(--disp);font-size:20px;color:var(--gold)">— / 10 槽</b>
+        <span id="water-slots-sub" style="color:var(--dim)"></span>
+        <span class="tag" style="margin-left:auto">现金底仓 2.5% 年化兜底</span>
+      </div>
+      <div class="hint">水位由 6 个风格指数（上证50/沪深300/中证500/1000/创业板50/红利）等权计算；≤20% 进入左侧低估区，估值因子权重上调至 0.55。<b style="color:var(--txt)">水位≠直接定槽位数</b>，槽位由下方「危机熔断+CPPI回撤」实时裁决，水位只决定因子权重与防守心态。</div>
     </div>
   </section>
 
@@ -601,13 +607,31 @@ async function loadStrategyState(){
       decEl.style.border='1px solid rgba(246,70,93,.35)';
       decEl.innerHTML=`<span style="color:var(--red)">✗ ${dc.message}</span>`;
     }
-    // 同步到调仓纪律快照
+    // 同步到调仓纪律快照 + 水位旁的槽位卡
     const rbD=document.getElementById('rb-discipline');
     if(rbD){
       rbD.innerHTML=
         `S&gt;${sg.buy_th} 候选买入 · S&lt;${sg.sell_th} 纪律卖出 · 槽位 ${sg.slots} · 每槽 ≈ 总资金/10<br>`+
         `危机：${cs.active?'<b style="color:var(--red)">红灯禁新买</b>':'<b style="color:var(--green)">绿灯可买</b>'}${cs.reason?' · '+cs.reason:''}<br>`+
         `现金底仓 ${(csh.annual_yield*100).toFixed(1)}% 年化 · 单基 20% 移动止损 · CPPI ${rules.map(r=>r.drawdown_lte*100+'%→'+(r.max_slots===0?'清仓':r.max_slots+'槽')).join(' / ')}`;
+    }
+    // 水位旁的「当前可建仓槽位」大字
+    const ws=document.getElementById('water-slots');
+    const wss=document.getElementById('water-slots-sub');
+    if(ws){
+      const max=dc.max_slots_by_macro ?? sg.slots;
+      const isCrisis=cs.active;
+      ws.textContent=`${max} / ${sg.slots} 槽`;
+      ws.style.color=isCrisis?'var(--red)':(max===0?'var(--red)':'var(--gold)');
+      if(wss){
+        if(isCrisis) wss.innerHTML=`<span style="color:var(--red)">危机红灯：禁新开仓，仅按S卖出</span> · 剩余现金吃 2.5% 年化`;
+        else if(max < sg.slots) wss.innerHTML=`<span style="color:var(--amber)">CPPI限仓：最多 ${max} 槽</span>`;
+        else wss.innerHTML=`<span style="color:var(--green)">满槽开放</span> · 空槽可按S>70建仓，每槽=总资金/10`;
+      }
+      // 给整个水位槽位卡加颜色
+      const card=document.getElementById('water-slot-info');
+      if(card) card.style.borderColor=isCrisis?'rgba(246,70,93,.35)':(max<sg.slots?'rgba(240,185,11,.3)':'var(--line)');
+      card.style.background=isCrisis?'rgba(246,70,93,.07)':(max<sg.slots?'rgba(240,185,11,.06)':'var(--well)');
     }
   }catch(e){
     document.getElementById('st-signal').innerHTML='加载失败 — 服务未启动';
