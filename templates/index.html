@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>量化选基系统 V3.5 — 全市场扫描控制台</title>
+<title>量化选基系统 V3.8 — 全市场扫描控制台</title>
 <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/space-grotesk@5/index.min.css">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@fontsource/jetbrains-mono@5/index.min.css">
@@ -167,6 +167,9 @@
   .empty ol{display:inline-block;text-align:left;margin-top:10px;line-height:2}
 
   footer{color:var(--faint);font-size:11px;text-align:center;padding:34px 0 18px;line-height:1.9}
+  .st-ok{background:rgba(46,189,133,.08);border-color:rgba(46,189,133,.3);color:var(--green)}
+  .st-danger{background:rgba(246,70,93,.10);border-color:rgba(246,70,93,.35);color:var(--red)}
+  .st-warn{background:rgba(240,185,11,.10);border-color:rgba(240,185,11,.3);color:var(--amber)}
   .hide{display:none}
 </style>
 </head>
@@ -174,9 +177,35 @@
 <div class="wrap">
   <header>
     <h1><b>量化选基系统</b> · 全市场扫描控制台</h1>
-    <span class="ver">V3.5 证据裁决</span>
+    <span class="ver">V3.8 crisis_cppi_15_20_25</span>
     <span class="hd-status"><span class="dot" id="hd-dot"></span><span id="hd-date">引擎就绪 — 点击按钮手动爬取并计算</span></span>
   </header>
+
+  <!-- V3.8 交易纪律卡片 -->
+  <section id="sec-strategy">
+    <h2>V3.8 交易纪律<span class="note">组合执行层 · 评分S只是候选信号，最终买入需经执行层裁决</span></h2>
+    <div class="panel" id="strategy-card">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 28px;font-size:12.5px;line-height:1.85">
+        <div>
+          <div style="font-weight:700;margin-bottom:4px">信号与槽位</div>
+          <div id="st-signal">加载中…</div>
+        </div>
+        <div>
+          <div style="font-weight:700;margin-bottom:4px">风控层</div>
+          <div id="st-risk">加载中…</div>
+        </div>
+      </div>
+      <div style="margin-top:14px;padding:10px 14px;border-radius:8px;border:1px solid var(--line)" id="st-crisis-box">
+        <div style="font-weight:700;margin-bottom:3px">危机过滤</div>
+        <div id="st-crisis">加载中…</div>
+      </div>
+      <div style="margin-top:10px;padding:10px 14px;border-radius:8px;border:1px solid var(--line)" id="st-cppi-box">
+        <div style="font-weight:700;margin-bottom:3px">CPPI 组合级风险预算</div>
+        <div id="st-cppi">加载中…</div>
+      </div>
+      <div style="margin-top:12px;font-weight:700;font-size:13px;padding:9px 14px;border-radius:8px" id="st-decision">加载中…</div>
+    </div>
+  </section>
 
   <!-- 大盘水位计 · regime判决 -->
   <section>
@@ -284,8 +313,11 @@
     </div>
   </section>
 
-  <footer>量化模型研究工具 · 输出不构成投资建议 · 战略仓: 买S&gt;70/卖S&lt;45(迟滞带45~70, 禁价格类止损·两度数据否决) · 战术仓: ≤15%, MA20或−10% · 新星观察仓≤5%<br>
-  数据源：天天基金 / 乐咕乐股 / 中证指数公司 / 新浪财经</footer>
+  <footer>量化模型研究工具 · 输出不构成投资建议<br>
+  <b>S_total 是评分模型</b>；V3.8 是组合交易执行层；S&gt;70 只是候选买入信号，不等于无条件买入。<br>
+  <b>S&gt;70 = 候选买入信号</b>；最终是否买入还需满足：①非危机模式 ②未超过CPPI允许槽位 ③组合未满10槽 ④未触发个基20%移动止损黑名单/观察。<br>
+  <b>S&lt;45 = 评分卖出信号</b>；此外，单基金从入场后高点回撤20%也触发卖出；组合CPPI触发时可能强制降仓。<br>
+  危机模式和CPPI会覆盖买入决策。 · 数据源：天天基金 / 乐咕乐股 / 中证指数公司 / 新浪财经</footer>
 </div>
 
 <script>
@@ -303,6 +335,75 @@ const G={
 function setStatus(dotId, txtId, kind, txt){
   const d=document.getElementById(dotId); if(d) d.className='dot '+(kind||'');
   const el=document.getElementById(txtId); if(el) el.textContent=txt;
+}
+
+/* ---------- V3.8 交易纪律卡片 ---------- */
+async function loadStrategyState(){
+  try{
+    const j=await (await fetch('/api/strategy_state')).json();
+    const sg=j.signal||{}, cs=j.crisis||{}, cp=j.cppi||{}, dc=j.decision||{},
+          csh=j.cash||{}, mr=j.micro_risk||{};
+    // 信号与槽位
+    document.getElementById('st-signal').innerHTML=
+      `模型版本：<b>${j.version}</b><br>`+
+      `买入线：<b style="color:var(--green)">S &gt; ${sg.buy_th}</b>（候选信号，非无条件买入）<br>`+
+      `卖出线：<b style="color:var(--red)">S &lt; ${sg.sell_th}</b><br>`+
+      `持有带：${sg.hold_band?sg.hold_band[0]+'~'+sg.hold_band[1]:'—'}<br>`+
+      `战略槽位：<b>${sg.slots}</b><br>`+
+      `再平衡：${j.rebalance||'季度'}`;
+    // 风控层
+    document.getElementById('st-risk').innerHTML=
+      `现金底仓：${((csh.annual_yield||0)*100).toFixed(1)}% 年化<br>`+
+      `单基止损：${((mr.trail_stop||0)*100).toFixed(0)}% 移动止损<br>`+
+      `<span style="color:var(--dim);font-size:11px">S&gt;70 只是候选买入信号；最终买入还需：①非危机 ②未超CPPI槽位 ③未满10槽 ④未触发个基20%止损</span>`;
+    // 危机过滤
+    const crisisBox=document.getElementById('st-crisis-box');
+    if(cs.active){
+      crisisBox.className='panel st-danger';
+      document.getElementById('st-crisis').innerHTML=
+        `<span style="color:var(--red);font-weight:700">⚠ 危机模式已激活</span><br>`+
+        `触发条件：沪深300 &lt; MA${cs.ma_window} 且 Vol${cs.vol_window} &gt; 历史${Math.round((cs.vol_quantile||0)*100)}%分位<br>`+
+        (cs.reason?`原因：${cs.reason}<br>`:'')+
+        (cs.hs300_close!=null?`沪深300收盘：${cs.hs300_close} · MA${cs.ma_window}：${cs.ma} · Vol${cs.vol_window}：${(cs.vol20*100).toFixed(2)}% · 阈值：${(cs.vol_threshold*100).toFixed(2)}%<br>`:'')+
+        `<b style="color:var(--red)">危机模式：禁止新开权益仓，仅允许持仓按S卖出或止损退出</b>`;
+    } else if(cs.data_insufficient){
+      crisisBox.className='panel st-warn';
+      document.getElementById('st-crisis').innerHTML=
+        `<span style="color:var(--amber)">⚠ 数据不足，无法判断危机状态</span><br>`+
+        (cs.reason||'');
+    } else {
+      crisisBox.className='panel st-ok';
+      document.getElementById('st-crisis').innerHTML=
+        `<span style="color:var(--green);font-weight:700">✓ 非危机</span> — 可按S信号和槽位规则买入<br>`+
+        (cs.hs300_close!=null?`沪深300收盘：${cs.hs300_close} · MA${cs.ma_window}：${cs.ma} · Vol${cs.vol_window}：${(cs.vol20*100).toFixed(2)}% · 阈值：${(cs.vol_threshold*100).toFixed(2)}%<br>`:'')+
+        (cs.reason?`条件检查：${cs.reason}`:'');
+    }
+    // CPPI
+    const rules=cp.rules||[];
+    document.getElementById('st-cppi').innerHTML=
+      (cp.enabled?'<span style="color:var(--green)">已启用</span>':'未启用')+
+      (rules.length?'<br>'+rules.map(r=>
+        `回撤 ≤ ${(r.drawdown_lte*100).toFixed(0)}%：最多 <b>${r.max_slots===0?'清仓':r.max_slots+'槽'}</b>`
+      ).join('<br>'):'')+
+      `<br><span style="color:var(--dim);font-size:11px">${cp.note||''}</span>`;
+    // 综合决策
+    const decEl=document.getElementById('st-decision');
+    if(dc.new_buy_allowed){
+      decEl.className='st-ok';
+      decEl.style.border='1px solid rgba(46,189,133,.3)';
+      decEl.innerHTML=`<span style="color:var(--green)">✓ ${dc.message}</span> — 最多 ${dc.max_slots_by_macro} 槽`;
+    } else {
+      decEl.className='st-danger';
+      decEl.style.border='1px solid rgba(246,70,93,.35)';
+      decEl.innerHTML=`<span style="color:var(--red)">✗ ${dc.message}</span>`;
+    }
+  }catch(e){
+    document.getElementById('st-signal').innerHTML='加载失败 — 服务未启动';
+    document.getElementById('st-risk').innerHTML='';
+    document.getElementById('st-crisis').innerHTML='';
+    document.getElementById('st-cppi').innerHTML='';
+    document.getElementById('st-decision').innerHTML='';
+  }
 }
 
 /* ---------- 估值地形 + 水位计 ---------- */
@@ -382,12 +483,13 @@ function sigOf(r){
   if(r.channel==='新星') return r.S_total>=50
     ? `<span class="badge b-blue">${G.dia}观察仓</span>`
     : `<span class="badge b-mute">${G.dia}不达标</span>`;
-  if((r.rating||'').includes('封顶')) return `<span class="badge b-green">${G.dot}Buy·任期帽</span>`;
-  if(r.S_total>=85) return `<span class="badge b-green">${G.dot}价值重仓</span>`;
-  if(r.S_total>=70) return `<span class="badge b-green">${G.dot}价值建仓</span>`;
+  if((r.rating||'').includes('封顶')) return `<span class="badge b-green">${G.dot}候选买入·任期帽</span>`;
+  if(r.S_total>=85) return `<span class="badge b-green">${G.dot}候选重仓</span>`;
+  if(r.S_total>=70) return `<span class="badge b-green">${G.dot}候选买入</span>`;
   if(r.S_total>=50 && (r.pool_pct??0)>=0.95 && r.F_momentum>=100)
     return `<span class="badge b-amber">${G.bolt}动量战术</span>`;
   if(r.S_total>=50) return `<span class="badge b-amber">${G.ring}分批观望</span>`;
+  if(r.S_total<45) return `<span class="badge b-red">${G.veto}评分卖出</span>`;
   return `<span class="badge b-mute">${G.ring}回避</span>`;
 }
 
@@ -401,7 +503,7 @@ async function loadResults(){
   document.getElementById('bd-n').innerHTML = ROWS.length?
     `共 ${j.n} 只 · 扫描于 ${j.stamp} · 净值截至 ${j.asof||'—'}` +
     (j.asof_stale?` <span style="color:var(--red);font-weight:700">⚠数据陈旧(应≥${j.asof_expected})</span>`:'') +
-    ` · 战略仓: S>70买/S<45卖 · 战术仓: 池分位≥95%+S≥50+动量双前30%, MA20或−10%` : '';
+    ` · S>70=候选买入(需经执行层裁决) / S<45=评分卖出` : '';
   renderBoard();
 }
 function setFlt(f){flt=f;
@@ -498,14 +600,14 @@ function renderWaterfall(f, mount){
 }
 
 /* ---------- 自选手表 ---------- */
-let WROWS=[], WD_OPEN=[], WPORT=null;
+let WROWS=[], WD_OPEN=[], WPORT=null, WDISCIPLINE=null;
 async function runWatch(){
   const codes=document.getElementById('watch').value.split(/[\s,，、]+/).filter(Boolean);
   if(!codes.length)return;
   // V3.7: 分批请求(每批6只) — 进度可见 + 单批失败不拖死全局 + 不会长时间悬挂
   const CH=6, chunks=[];
   for(let i=0;i<codes.length;i+=CH) chunks.push(codes.slice(i,i+CH));
-  WROWS=[]; WD_OPEN=[]; WPORT=null;
+  WROWS=[]; WD_OPEN=[]; WPORT=null; WDISCIPLINE=null;
   for(let ci=0; ci<chunks.length; ci++){
     setStatus('w-dot','wst','busy',`计算中… 第 ${ci+1}/${chunks.length} 批 (已完成 ${Math.min(ci*CH,codes.length)}/${codes.length} 只)`);
     try{
@@ -531,6 +633,19 @@ async function runWatch(){
       chunks[ci].forEach(c=>WROWS.push({code:c,name:c,error:em}));
     }
   }
+  // V3.8: 获取策略状态填充组合纪律
+  try{
+    const sj=await (await fetch('/api/strategy_state')).json();
+    WDISCIPLINE = {
+      max_slots: sj.signal?.slots,
+      buy_threshold: sj.signal?.buy_th,
+      sell_threshold: sj.signal?.sell_th,
+      crisis_active: sj.crisis?.active,
+      new_buy_allowed: sj.decision?.new_buy_allowed,
+      cppi_rules: sj.cppi?.rules || [],
+      note: "CPPI需要用户组合净值/HWM，当前网页仅展示规则，不自动判断个人账户是否触发。",
+    };
+  }catch(e){}
   const nerr=WROWS.filter(r=>r.error).length;
   if(nerr) setStatus('w-dot','wst','err',`完成(含 ${nerr} 只失败) — 点击行展开透视`);
   else setStatus('w-dot','wst','ok','完成 — 点击行展开/收起透视详情');
@@ -564,8 +679,13 @@ function renderWatch(){
   document.getElementById('wout').innerHTML=`
     <div class="toolbar" style="margin-top:12px">
       <button class="btn-ghost" onclick="toggleAllWd()">${WD_OPEN.every(x=>x)&&WD_OPEN.length?'全部收起':'全部展开'}</button>
-      <span class="bd-n">批内 ${WROWS.length} 只 · 战术仓分位按本批次计算${ptxt}</span>
+      <span class="bd-n">批内 ${WROWS.length} 只 · S>70=候选买入(需经执行层裁决) / S<45=评分卖出${ptxt}</span>
     </div>
+    ${WDISCIPLINE?`<div style="margin:6px 0 10px;font-size:11.5px;color:var(--dim);line-height:1.7;padding:8px 12px;background:var(--well);border:1px solid var(--line);border-radius:8px">
+      <b style="color:var(--txt)">V3.8 组合纪律</b>：槽位上限 ${WDISCIPLINE.max_slots} · 买入线 S>${WDISCIPLINE.buy_threshold} · 卖机状态 ${WDISCIPLINE.crisis_active!=null?(WDISCIPLINE.crisis_active?'<span style="color:var(--red)">开启</span>':'<span style="color:var(--green)">关闭</span>'):'<span style="color:var(--amber)">待查</span>'} · 新买入 ${WDISCIPLINE.new_buy_allowed!=null?(WDISCIPLINE.new_buy_allowed?'<span style="color:var(--green)">允许</span>':'<span style="color:var(--red)">禁止</span>'):'<span style="color:var(--amber)">待查</span>'}
+      · CPPI：${(WDISCIPLINE.cppi_rules||[]).map(r=>'回撤≤'+(r.drawdown_lte*100).toFixed(0)+'%→最多'+(r.max_slots===0?'清仓':r.max_slots+'槽')).join(' / ')}
+      <br><span style="color:var(--faint)">${WDISCIPLINE.note||''}</span>
+    </div>`:''}
     <div class="tbl-wrap"><table><thead><tr>
     <th></th><th>代码</th><th>名称</th><th>总分</th><th>评级</th><th>作战信号</th><th>估值分</th><th>Alpha</th><th>动量</th><th>PE分位</th><th>风控</th></tr></thead>
     <tbody>${rowsHtml}</tbody></table></div>`;
@@ -588,6 +708,7 @@ function toggleAllWd(){
 }
 
 /* ---------- 启动 ---------- */
+loadStrategyState();
 loadTerrain();
 loadResults();
 (async()=>{const s=await (await fetch('/api/scan/status')).json();
