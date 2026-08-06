@@ -521,16 +521,19 @@ async function runRebalance(){
 function renderRebalance(j){
   const s=j.summary||{}, holdings=j.holdings||[], orders=j.orders||[], alloc=j.allocation||[];
   const totalCap=s.total_capital||0, perSlot=s.per_slot||0;
-  const nErr=holdings.filter(h=>h.is_error).length;
   const kpis=`<div class="kpis">
     <div class="kpi"><label>总资金</label><b>${fmtYuanFull(totalCap)}</b><small>每槽 ${fmtYuanFull(perSlot)}</small></div>
     <div class="kpi"><label>持仓 / 现金</label><b>${fmtYuan(s.holdings_value_before)}</b><small>/ ${fmtYuan(s.cash_before)}</small></div>
     <div class="kpi"><label>操作</label><b>${s.num_sells? s.num_sells+' 卖出':'—'}</b><small>保留 ${s.num_keeps||0}</small></div>
     <div class="kpi"><label>现金余额</label><b>${fmtYuan(s.cash_after)}</b><small>${s.cash_pct_after||0}%</small></div>
   </div>`;
-  const errBanner=nErr? `<div style="margin-top:12px;padding:10px 12px;border:1px solid #fde68a;background:#fffbeb;border-radius:8px;font:12px var(--mono);display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span>${nErr} 只待重试</span><button class="btn btn-ghost" style="padding:4px 10px;font-size:12px" onclick="retryFailedHoldings()">重试</button></div>`:'';
+  const nRetry=holdings.filter(h=>h.is_error && h.retryable!==false).length;
+  const errBanner=nErr? `<div style="margin-top:12px;padding:10px 12px;border:1px solid #fde68a;background:#fffbeb;border-radius:8px;font:12px var(--mono);display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span>${nErr} 只待复核${nRetry? ` · ${nRetry} 只可重试`:``}</span>${nRetry? `<button class="btn btn-ghost" style="padding:4px 10px;font-size:12px" onclick="retryFailedHoldings()">重试可重试项</button>`:``}<span style="color:var(--faint)">新基历史不足无需重试</span></div>`:'';
   const hRows=holdings.map(h=>{
-    if(h.is_error) return `<tr style="background:#fffbeb"><td>${h.code}</td><td class="name">${h.name}</td><td style="text-align:right">${fmtYuanFull(h.amount)}</td><td>—</td><td><span class="badge b-amber">待重试</span></td><td><span class="badge b-mute">—</span></td><td>${h.error||''}</td><td><button class="btn btn-ghost" style="padding:4px 8px;font-size:11px" onclick="retryRebalanceSingle('${h.code}')">重试</button></td></tr>`;
+    if(h.is_error){
+      const canRetry=h.retryable!==false;
+      return `<tr style="background:${canRetry?'#fffbeb':'#f5f5f4'}"><td>${h.code}</td><td class="name">${h.name}</td><td style="text-align:right">${fmtYuanFull(h.amount)}</td><td>—</td><td><span class="badge ${canRetry?'b-amber':'b-mute'}">${canRetry?'待重试':'观察仓'}</span></td><td><span class="badge b-mute">—</span></td><td style="max-width:260px;white-space:normal;font:12px var(--sans);color:var(--muted)">${h.error||''}</td><td>${canRetry?`<button class="btn btn-ghost" style="padding:4px 8px;font-size:11px" onclick="retryRebalanceSingle('${h.code}')">重试</button>`:`<span class="mono faint">—</span>`}</td></tr>`;
+    }
     const act=h.action==='sell'?'卖出':'持有';
     return `<tr><td>${h.code}</td><td class="name">${h.name}</td><td style="text-align:right">${fmtYuanFull(h.amount)}</td><td class="score">${h.S_total??'—'}</td><td>${ratingCell(h)}</td><td>${sigOf(h)}</td><td>${h.action_label||act}</td><td style="text-align:right">${fmtYuanFull(h.target_amount)}</td></tr>`;
   }).join('');
@@ -545,7 +548,7 @@ function downloadOrders(){const j=window._lastRebalance; if(!j) return; const ro
 async function retryRebalanceSingle(code){
   try{const j=await (await fetch('/api/fund/'+String(code).padStart(6,'0'),{method:'POST'})).json(); if(!j.ok) return; const last=window._lastRebalance; if(!last) return; const i=last.holdings.findIndex(h=>h.code===code); if(i>=0){const f=j.fund; last.holdings[i]={...last.holdings[i], name:f.name, S_total:f.S_total, rating:f.rating, is_error:false, error:null, action:f.S_total<45?'sell':'hold', action_label:f.S_total<45?'卖出':'持有'}; renderRebalance(last)}}catch(e){}
 }
-async function retryFailedHoldings(){const last=window._lastRebalance; if(!last) return; for(const h of last.holdings.filter(x=>x.is_error)){await retryRebalanceSingle(h.code); await new Promise(r=>setTimeout(r,600))}}
+async function retryFailedHoldings(){const last=window._lastRebalance; if(!last) return; const list=last.holdings.filter(x=>x.is_error && x.retryable!==false); if(!list.length){alert("无可重试项（新基历史不足无需重试）");return} for(const h of list){await retryRebalanceSingle(h.code); await new Promise(r=>setTimeout(r,600))}}
 
 updateRbPreview();
 loadStrategyState(); loadTerrain(); loadResults();

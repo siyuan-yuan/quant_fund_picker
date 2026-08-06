@@ -571,6 +571,21 @@ def rebalance():
         c = str(r.get("code")).zfill(6)
         if c not in row_by_code:
             row_by_code[c] = r
+    # —— 统一口径：若有全市场扫描，则用扫描池的动量分布重算 S_total，确保与单基透视一致（批内排名会虚高） ——
+    scan_df = None
+    scan_p4 = scan_p7 = None
+    try:
+        sf = _latest_scan()
+        if sf and os.path.exists(sf):
+            scan_df = pd.read_csv(sf, dtype={"code": str})
+            scan_p4 = pd.to_numeric(scan_df.get("mom_4m1m"), errors="coerce").dropna()
+            scan_p7 = pd.to_numeric(scan_df.get("mom_7m1m"), errors="coerce").dropna()
+            # 扫描过小则回退批内排名
+            if len(scan_p4) < 30 or len(scan_p7) < 30:
+                scan_df = None
+    except Exception:
+        scan_df = None
+
     # 计算组合级 RBSA
     rb_list = [r["rbsa"] for r in rows if isinstance(r.get("rbsa"), dict) and r["rbsa"]]
     portfolio_rbsa = None
@@ -598,14 +613,70 @@ def rebalance():
         if raw_err is None or (isinstance(raw_err, float) and pd.isna(raw_err)) or str(raw_err).strip().lower() in ("", "nan", "none"):
             is_err = False
             err_msg = None
+            is_retryable = False
         else:
             is_err = True
             err_msg = str(raw_err)[:180]
             # 二次友好化（兜底）
             if "RemoteDisconnected" in err_msg or "Connection aborted" in err_msg:
                 err_msg = "数据源繁忙（天天基金限流/远端断开），请稍后重试或分批重试（建议≤5只/次）"
+            # 新基历史不足不提供重试（重试也不会成功）
+            is_retryable = not any(k in err_msg for k in ["成立仅", "历史不足", "200天", "观察仓"])
         # 统一字段
-        s_total = rec.get("S_total")
+        # 若有扫描池，用扫描池重算 F_momentum 与 S_total（与单基透视同口径），否则沿用批内排名的 finalize 结果
+        s_total_raw = rec.get("S_total")
+        # 尝试扫描重算
+        recomputed = False
+        if not is_err and scan_df is not None and rec.get("mom_4m1m") is not None and rec.get("mom_7m1m") is not None:
+            try:
+                rk4 = float((scan_p4 <= rec["mom_4m1m"]).mean()) if len(scan_p4) else None
+                rk7 = float((scan_p7 <= rec["mom_7m1m"]).mean()) if len(scan_p7) else None
+                fm_scan = factors.momentum_score_smooth_m1(rk4, rk7) if rk4 is not None else None
+                if fm_scan is not None:
+                    water = market_water(None)
+                    (wv, wa, wm), mode = resolve_weights(water)
+                    num2, den2 = 0.0, 0.0
+                    fv = rec.get("F_value")
+                    if fv is not None and not (isinstance(fv, float) and pd.isna(fv)) and not (isinstance(fv, float) and not __import__('numpy').isfinite(fv)):
+                        try:
+                            fv_f=float(fv)
+                            if __import__('numpy').isfinite(fv_f):
+                                num2 += wv * min(fv_f, 100); den2 += wv
+                        except: pass
+                    fa = rec.get("F_alpha")
+                    if fa is not None and not (isinstance(fa, float) and pd.isna(fa)):
+                        try:
+                            fa_f=float(fa)
+                            if __import__('numpy').isfinite(fa_f):
+                                num2 += wa * fa_f; den2 += wa
+                        except: pass
+                    num2 += wm * fm_scan; den2 += wm
+                    st_scan = risk.apply_penalties(num2 / den2 if den2 > 1e-9 else 0.0, rec.get("penalties") or [])
+                    # DEBUG
+                    #
+                    # 用扫描重算的结果覆盖
+                    rec["F_momentum"] = round(fm_scan, 1)
+                    rec["rank4"] = rk4; rec["rank7"] = rk7
+                    rec["S_total"] = round(st_scan, 1)
+                    # 评级也同步（与 finalize 同逻辑，含新星/任期帽）
+                    from config import YOUNG_MAX_DAYS, TENURE_CAP_DAYS
+                    nd = rec.get("n_days"); td = rec.get("tenure_days")
+                    def _rate(s):
+                        from config import RATING_BANDS
+                        for th, lab in RATING_BANDS:
+                            if s >= th: return lab
+                        return RATING_BANDS[-1][1]
+                    if isinstance(nd, (int,float)) and nd==nd and nd < YOUNG_MAX_DAYS and st_scan >=50:
+                        rec["rating"] = "🌱观察仓"
+                    elif td and st_scan >=85 and td < TENURE_CAP_DAYS:
+                        rec["rating"] = "Buy 浅绿(任期<2年封顶)"
+                    else:
+                        rec["rating"] = _rate(st_scan)
+                    s_total_raw = rec["S_total"]
+                    recomputed = True
+            except Exception:
+                pass
+        s_total = s_total_raw
         try:
             if s_total is None or (isinstance(s_total, float) and pd.isna(s_total)):
                 s_val = None
@@ -640,6 +711,7 @@ def rebalance():
             "error": err_msg,
             "is_veto": veto,
             "is_error": is_err,
+            "retryable": is_retryable if is_err else False,
         })
         scored_holdings.append({
             "code": code, "s": s_val, "veto": veto, "err": is_err, "amt": amt, "rec": rec
