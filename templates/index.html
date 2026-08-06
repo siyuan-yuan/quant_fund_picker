@@ -459,11 +459,12 @@ function renderWaterfall(f,mount){
   const we=Object.entries(f.rbsa||{}).sort((a,b)=>b[1]-a[1]).filter(x=>x[1]>0.03).map(x=>`<span>${x[0]} ${(x[1]*100).toFixed(0)}%</span>`).join('');
   const pens=(f.penalties&&f.penalties.length)? f.penalties.map(p=>`<li><span>×</span>${p[0]} ${p[1]}</li>`).join('') : '<li class="ok">无风控</li>';
   const pd=f.penalty_detail||{};
+  const scoreBadge=f.S_total!=null? `<span class="badge ${f.S_total>=70?'b-green':(f.S_total>=50?'b-amber':'b-red')}" style="font-size:13px;padding:5px 10px">总分 ${f.S_total}</span>` : `<span class="badge b-mute">总分 —</span>`;
   document.getElementById(mount).innerHTML=`<div class="wf">
-    <div><div class="wf-title">${f.code} ${f.name}</div><div class="wf-meta">${f.ftype} · 数据 ${f.last_date}</div>
+    <div><div class="wf-title">${f.code} ${f.name}</div><div style="display:flex;gap:8px;align-items:center;margin:8px 0;flex-wrap:wrap">${scoreBadge}${sigOf(f)}${ratingCell(f)}</div><div class="wf-meta">${f.ftype} · ${f.is_passive?'被动':'主动'} · ${f.panel_mode==='overseas'?'境外面板':'A股面板'} · 数据 ${f.last_date}</div>
       ${bar('F_value',f.F_value,'#15803d')}${bar('F_alpha',f.F_alpha,'#1d4ed8')}${bar('F_momentum',f.F_momentum,'#a16207')}
-      <div class="facts">分位 ${f.val_pct!=null?(f.val_pct*100).toFixed(1)+'%':'—'} · IR ${f.ir_winrate!=null?(f.ir_winrate*100).toFixed(0)+'%':'—'}</div>
-    </div><div><div class="eyebrow">穿透</div><div class="chips">${we}</div><div class="eyebrow" style="margin-top:12px">风控</div><ul class="plist">${pens}</ul><div class="facts">R_MDD ${pd.R_MDD??'—'} · 任职 ${f.tenure_days?Math.round(f.tenure_days/365)+'年':'—'}</div></div></div>`;
+      <div class="facts">分位 ${f.val_pct!=null?(f.val_pct*100).toFixed(1)+'%':'—'} · 趋势 ${f.trend_ok?'是':'否'} · IR ${f.ir_winrate!=null?(f.ir_winrate*100).toFixed(0)+'%':'—'} · 下行捕获 ${f.down_capture??'—'}</div>
+    </div><div><div class="eyebrow">穿透</div><div class="chips">${we||'<span style="color:var(--faint)">—</span>'}</div><div class="eyebrow" style="margin-top:12px">风控</div><ul class="plist">${pens}</ul><div class="facts">R_MDD ${pd.R_MDD??'—'}（回撤 ${pd.mdd_fund??'—'}/${pd.mdd_bench??'—'}） · 任职 ${f.tenure_days?Math.round(f.tenure_days/365)+'年':'—'} · 规模 ${f.scale??'—'}亿</div></div></div>`;
 }
 let WROWS=[], WD_OPEN=[];
 async function runWatch(){
