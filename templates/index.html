@@ -12,17 +12,20 @@
     --bg:#0a0d12; --panel:#10141d; --raised:#151b28; --well:#0c111b;
     --line:#1f2940; --line-soft:#171e2e;
     --txt:#dfe5f1; --dim:#93a0b8; --faint:#6d7890;
-    --gold:#e8b64c; --green:#2ebd85; --red:#f6465d; --amber:#f0b90b; --blue:#4c9aff;
+    --gold:#e8b64c; --gold-soft:rgba(232,182,76,.12); --gold-line:rgba(232,182,76,.30);
+    --green:#2ebd85; --red:#f6465d; --amber:#f0b90b; --blue:#4c9aff;
     --serif-ui:-apple-system,"PingFang SC","Microsoft YaHei","Segoe UI",sans-serif;
     --disp:"Space Grotesk",var(--serif-ui);
     --mono:"JetBrains Mono",ui-monospace,"Cascadia Mono",Consolas,monospace;
   }
   *{box-sizing:border-box;margin:0;padding:0}
-  html{color-scheme:dark}
+  html{color-scheme:dark; scroll-behavior:smooth}
   body{background:var(--bg);color:var(--txt);font:13.5px/1.65 var(--serif-ui);
        -webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
   .wrap{max-width:1280px;margin:0 auto;padding:22px 24px 0}
   ::placeholder{color:var(--faint)}
+  a{color:var(--blue); text-decoration:none}
+  a:hover{text-decoration:underline}
 
   /* ---------- 页眉 ---------- */
   header{display:flex;align-items:center;gap:12px;flex-wrap:wrap;
@@ -38,11 +41,35 @@
   .dot.err{background:var(--red);box-shadow:0 0 0 3px rgba(246,70,93,.14)}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
 
+  /* 顶部导航 */
+  .top-nav{display:flex;gap:6px;flex-wrap:wrap;margin:14px 0 0}
+  .top-nav a{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:999px;
+             background:var(--well);border:1px solid var(--line);color:var(--dim);font:12px var(--serif-ui);white-space:nowrap}
+  .top-nav a:hover{color:var(--txt);border-color:var(--gold-line);text-decoration:none}
+  .top-nav a em{font-style:normal;color:var(--gold)}
+
   /* ---------- 版式节奏 ---------- */
   section{margin:28px 0}
-  h2{font-size:15.5px;font-weight:650;margin:0 0 10px;letter-spacing:-0.01em;color:#c6cfdf}
+  h2{font-size:15.5px;font-weight:650;margin:0 0 10px;letter-spacing:-0.01em;color:#c6cfdf;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
   h2 .note{font-weight:400;color:var(--dim);font-size:12px;margin-left:8px}
-  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:18px;position:relative}
+  .panel.gold-ring{border-color:var(--gold-line);box-shadow:0 0 0 1px rgba(232,182,76,.08) inset}
+  .hint{font-size:11px;color:var(--faint);line-height:1.6;margin-top:6px}
+  .tip{display:inline-flex;align-items:center;justify-content:center;width:15px;height:15px;border-radius:50%;
+       background:var(--well);border:1px solid var(--line);color:var(--dim);font:10px var(--mono);cursor:help;margin-left:6px}
+  .callout{background:rgba(76,154,255,.08);border:1px solid rgba(76,154,255,.22);border-radius:10px;padding:12px 14px;font-size:12.5px;line-height:1.7;color:#c2d6ff}
+  .callout.gold{background:var(--gold-soft);border-color:var(--gold-line);color:#ffe9b3}
+  .callout.green{background:rgba(46,189,133,.08);border-color:rgba(46,189,133,.24);color:#b8f0d8}
+  .callout.red{background:rgba(246,70,93,.08);border-color:rgba(246,70,93,.26);color:#ffb8c2}
+
+  /* ---------- 指引卡 ---------- */
+  .onboard{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:14px}
+  @media(max-width:900px){.onboard{grid-template-columns:1fr}}
+  .step{background:var(--raised);border:1px solid var(--line);border-radius:12px;padding:14px 14px 12px;position:relative;overflow:hidden}
+  .step::after{content:"";position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,var(--gold),transparent)}
+  .step b{font-family:var(--disp);color:var(--gold)}
+  .step p{color:var(--dim);font-size:12px;margin-top:4px;line-height:1.7}
+  .step code{font:11px var(--mono);background:var(--well);border:1px solid var(--line);padding:2px 6px;border-radius:6px;color:var(--txt)}
 
   /* ---------- 水位计 ---------- */
   .gauge{display:flex;align-items:center;gap:20px;flex-wrap:wrap}
@@ -54,7 +81,7 @@
            transition:width .6s cubic-bezier(.2,.8,.2,1);max-width:100%}
   .track em{position:absolute;top:-4px;bottom:-4px;width:1px;background:var(--line)}
   .scale{display:flex;justify-content:space-between;font:10px var(--mono);color:var(--faint);margin-top:7px}
-  .regime{font-size:13px;font-weight:600;border-radius:8px;padding:8px 14px;border:1px solid var(--line)}
+  .regime{font-size:13px;font-weight:600;border-radius:8px;padding:8px 14px;border:1px solid var(--line);min-width:260px}
   .regime b{font-family:var(--disp)}
 
   /* ---------- 估值地形 ---------- */
@@ -74,11 +101,12 @@
   /* ---------- 控制台/表单 ---------- */
   .console{display:flex;gap:14px;align-items:end;flex-wrap:wrap}
   .console label{font-size:11.5px;color:var(--dim);display:block;margin-bottom:5px}
-  input,textarea{background:var(--well);border:1px solid var(--line);color:var(--txt);
+  input,textarea,select{background:var(--well);border:1px solid var(--line);color:var(--txt);
                  border-radius:8px;padding:9px 11px;font:13px var(--mono);outline:none;
                  transition:border-color .18s ease-out,box-shadow .18s ease-out}
-  input:focus-visible,textarea:focus-visible{border-color:var(--blue);box-shadow:0 0 0 3px rgba(76,154,255,.16)}
-  input.num{width:108px}
+  input:focus-visible,textarea:focus-visible,select:focus-visible{border-color:var(--blue);box-shadow:0 0 0 3px rgba(76,154,255,.16)}
+  input.num{width:132px}
+  input.wide{width:220px}
   button{background:var(--gold);color:#241a02;border:none;border-radius:8px;padding:10px 22px;
          font:600 13px var(--serif-ui);cursor:pointer;
          transition:filter .18s ease-out,opacity .18s ease-out}
@@ -87,10 +115,12 @@
   button:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
   button:disabled{opacity:.45;cursor:not-allowed}
   .btn-ghost{background:var(--raised);color:var(--txt);border:1px solid var(--line)}
+  .btn-small{padding:7px 14px;font-size:12px;border-radius:7px}
+  .btn-soft{background:var(--well);color:var(--dim);border:1px dashed var(--line)}
   .progress{height:8px;background:var(--well);border-radius:5px;overflow:hidden;margin-top:15px}
   .progress i{display:block;height:100%;background:var(--gold);width:0;border-radius:5px;
               transition:width .35s ease-out}
-  .status{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--dim);margin-top:9px;min-height:18px}
+  .status{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--dim);margin-top:9px;min-height:18px;flex-wrap:wrap}
 
   /* ---------- 分段筛选 ---------- */
   .toolbar{display:flex;gap:10px;margin-bottom:12px;flex-wrap:wrap;align-items:center}
@@ -166,11 +196,62 @@
   .empty b{color:var(--txt)}
   .empty ol{display:inline-block;text-align:left;margin-top:10px;line-height:2}
 
+  /* ---------- 智能调仓引擎 ---------- */
+  .rb-grid{display:grid;grid-template-columns:1.05fr .95fr;gap:16px}
+  @media(max-width:980px){.rb-grid{grid-template-columns:1fr}}
+  .rb-inputs{display:grid;gap:14px}
+  .form-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  @media(max-width:600px){.form-grid{grid-template-columns:1fr}}
+  .field label{font-size:11.5px;color:var(--dim);display:flex;align-items:center;margin-bottom:6px;font-weight:600}
+  .field input{width:100%}
+  .field .unit{position:relative}
+  .field .unit i{position:absolute;right:10px;top:50%;transform:translateY(-50%);color:var(--faint);font:11px var(--mono);pointer-events:none}
+  .field .unit input{padding-right:28px}
+  .rb-quick{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+  .rb-preview{background:var(--well);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font:11.5px var(--mono);color:var(--dim);line-height:1.7;min-height:54px;white-space:pre-wrap}
+  .rb-preview b{color:var(--txt)}
+  .kpi-row{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+  @media(max-width:700px){.kpi-row{grid-template-columns:repeat(2,1fr)}}
+  .kpi{background:var(--raised);border:1px solid var(--line);border-radius:10px;padding:11px 12px}
+  .kpi label{font-size:10.5px;color:var(--faint);letter-spacing:.04em;text-transform:uppercase}
+  .kpi b{font-family:var(--disp);font-size:18px;font-variant-numeric:tabular-nums}
+  .kpi sub{font:11px var(--mono);color:var(--dim)}
+  .order-list{display:grid;gap:8px}
+  .order{display:flex;align-items:center;gap:12px;background:var(--raised);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+  .order.sell{border-left:3px solid var(--red)}
+  .order.buy{border-left:3px solid var(--green)}
+  .order .side{font:700 11px var(--mono);padding:3px 8px;border-radius:999px;flex:none}
+  .order.sell .side{background:rgba(246,70,93,.14);color:var(--red);border:1px solid rgba(246,70,93,.3)}
+  .order.buy .side{background:rgba(46,189,133,.14);color:var(--green);border:1px solid rgba(46,189,133,.28)}
+  .order .meta{flex:1;min-width:0}
+  .order .meta b{font-size:13px}
+  .order .meta div{font-size:11.5px;color:var(--dim)}
+  .order .amt{font-family:var(--disp);font-weight:700;font-variant-numeric:tabular-nums;text-align:right}
+  .order .amt small{font:11px var(--mono);color:var(--dim);display:block}
+  .alloc-bar{height:8px;background:var(--well);border-radius:5px;overflow:hidden;display:flex;margin:6px 0 4px}
+  .alloc-bar i{display:block;height:100%}
+  .alloc-legend{display:flex;gap:10px;flex-wrap:wrap;font-size:11px;color:var(--dim)}
+  .alloc-legend span{display:inline-flex;align-items:center;gap:5px}
+  .alloc-legend em{width:8px;height:8px;border-radius:2px;display:inline-block}
+  .rb-table-wrap{border:1px solid var(--line-soft);border-radius:10px;overflow:auto;max-height:520px}
+  .rb-table-wrap table{font-size:12px}
+  .rb-table-wrap th{font-size:11px}
+  .warn-list{display:grid;gap:8px;margin-top:10px}
+  .warn{border-radius:8px;padding:8px 12px;font-size:12px;line-height:1.7;border:1px solid var(--line)}
+  .warn.red{background:rgba(246,70,93,.07);border-color:rgba(246,70,93,.22);color:#ffb8c2}
+  .warn.amber{background:rgba(240,185,11,.07);border-color:rgba(240,185,11,.22);color:#ffe08a}
+  .warn.blue{background:rgba(76,154,255,.07);border-color:rgba(76,154,255,.22);color:#c2d6ff}
+  .tag{display:inline-flex;align-items:center;padding:2px 8px;border-radius:999px;font:600 10.5px var(--mono);border:1px solid var(--line);background:var(--well);color:var(--dim)}
+
   footer{color:var(--faint);font-size:11px;text-align:center;padding:34px 0 18px;line-height:1.9}
   .st-ok{background:rgba(46,189,133,.08);border-color:rgba(46,189,133,.3);color:var(--green)}
   .st-danger{background:rgba(246,70,93,.10);border-color:rgba(246,70,93,.35);color:var(--red)}
   .st-warn{background:rgba(240,185,11,.10);border-color:rgba(240,185,11,.3);color:var(--amber)}
   .hide{display:none}
+  details{border:1px solid var(--line);border-radius:10px;padding:12px 14px;background:var(--raised)}
+  details summary{cursor:pointer;color:var(--txt);font-weight:650;list-style:none}
+  details summary::-webkit-details-marker{display:none}
+  details[open] summary{margin-bottom:10px}
 </style>
 </head>
 <body>
@@ -180,10 +261,34 @@
     <span class="ver">V3.8 crisis_cppi_15_20_25</span>
     <span class="hd-status"><span class="dot" id="hd-dot"></span><span id="hd-date">引擎就绪 — 点击按钮手动爬取并计算</span></span>
   </header>
+  <nav class="top-nav">
+    <a href="#sec-strategy"><em>①</em> 交易纪律</a>
+    <a href="#sec-water"><em>②</em> 水位·地形</a>
+    <a href="#sec-scan"><em>③</em> 全市场扫描</a>
+    <a href="#sec-board"><em>④</em> 评分榜单</a>
+    <a href="#sec-rebalance" style="border-color:var(--gold-line);color:var(--gold)">💼 智能调仓引擎</a>
+    <a href="#sec-single">单基透视</a>
+    <a href="#sec-watch">批量评分</a>
+  </nav>
+
+  <!-- 新手引导 -->
+  <section style="margin-bottom:18px">
+    <div class="callout gold" style="display:flex;gap:12px;align-items:start">
+      <div style="font-size:18px;line-height:1">💡</div>
+      <div style="flex:1">
+        <b>3 步上手（华尔街投顾流程）</b>：<b>定仓位 → 挑强基 → 出指令</b>。<span style="color:var(--dim)">先看<b style="color:var(--txt)">大盘水位</b>定总仓位，再扫<b style="color:var(--txt)">全市场榜单</b>找 S&gt;70 强基，最后到 <b style="color:var(--txt)">💼 智能调仓引擎</b> 输入你的持仓+金额+总资金，一键生成带金额的买卖清单（已接入 V3.8 危机熔断与 10 槽等权纪律）。</span>
+        <div class="onboard">
+          <div class="step"><b>Step 1 · 定总仓位</b><p>水位 ≤20% 左侧重估值，≥90% 防守。危机灯红时<b>禁新买</b>，只按 S 卖出。</p><code>水位 6风格等权 PE 5年分位</code></div>
+          <div class="step"><b>Step 2 · 挑强基</b><p>榜单 S=40%估值+35%Alpha+25%动量×风控。S&gt;70 候选买入，S&lt;45 纪律卖出。</p><code>过滤：经理任期·R_MDD·集中度</code></div>
+          <div class="step"><b>Step 3 · 出指令</b><p>填 <code>代码 金额</code> + 总资金+现金，引擎算每槽目标、卖谁、买谁、买多少。</p><code>10槽等权 · 现金2.5%底仓</code></div>
+        </div>
+      </div>
+    </div>
+  </section>
 
   <!-- V3.8 交易纪律卡片 -->
   <section id="sec-strategy">
-    <h2>V3.8 交易纪律<span class="note">组合执行层 · 评分S只是候选信号，最终买入需经执行层裁决</span></h2>
+    <h2>V3.8 交易纪律<span class="note">组合执行层 · 评分 S 只是候选信号，最终买入需经执行层裁决</span></h2>
     <div class="panel" id="strategy-card">
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px 28px;font-size:12.5px;line-height:1.85">
         <div>
@@ -196,7 +301,7 @@
         </div>
       </div>
       <div style="margin-top:14px;padding:10px 14px;border-radius:8px;border:1px solid var(--line)" id="st-crisis-box">
-        <div style="font-weight:700;margin-bottom:3px">危机过滤</div>
+        <div style="font-weight:700;margin-bottom:3px">危机过滤 <span class="hint" style="margin:0 0 0 8px">沪深300 &lt; MA200 且 Vol20&gt;历史80%分位 → 禁新买</span></div>
         <div id="st-crisis">加载中…</div>
       </div>
       <div style="margin-top:10px;padding:10px 14px;border-radius:8px;border:1px solid var(--line)" id="st-cppi-box">
@@ -208,8 +313,8 @@
   </section>
 
   <!-- 大盘水位计 · regime判决 -->
-  <section>
-    <h2>大盘水位计<span class="note">6风格等权 PE 5年分位 · 低于20%切换左侧权重</span></h2>
+  <section id="sec-water">
+    <h2>大盘水位计<span class="note">6风格等权 PE 5年分位 · 低于 20% 切换左侧权重（估值0.55/动量0.10）</span></h2>
     <div class="panel">
       <div class="gauge">
         <div class="num" id="water-num">—</div>
@@ -222,12 +327,13 @@
         <div class="regime" id="regime">—</div>
       </div>
       <div class="status" id="reversal"></div>
+      <div class="hint">水位由 6 个风格指数（上证50/沪深300/中证500/1000/创业板50/红利）等权计算；≤20% 进入左侧低估区，估值因子权重上调至 0.55。</div>
     </div>
   </section>
 
   <!-- 估值地形 -->
   <section>
-    <h2>底层资产估值地形<span class="note">5年 PE-TTM 分位 · 自动加载最新爬取</span></h2>
+    <h2>底层资产估值地形<span class="note">5年 PE-TTM 分位 · 自动加载最新爬取 · 绿洼地/红高估</span></h2>
     <div class="terrain" id="terrain">
       <div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>
       <div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>
@@ -235,14 +341,16 @@
   </section>
 
   <!-- 扫描控制台 -->
-  <section>
-    <h2>全市场扫描<span class="note">手动触发爬取+深算 · 漏斗: 右侧优胜 / 左侧深跌 / 新星观察</span></h2>
+  <section id="sec-scan">
+    <h2>全市场扫描<span class="note">手动触发爬取+深算 · 漏斗: 右侧优胜 / 左侧深跌 / 新星观察 · 首次 4-6 分钟、命中缓存 40 秒</span></h2>
     <div class="panel">
+      <div class="callout" style="margin-bottom:14px">漏斗不会扫“全部 27,000 只”——仅扫描近 3 年优胜与近 1 年深跌的候选池（默认 400+150），两池用同一把尺子打分，防追高也防价值陷阱。展开前请先看水位。</div>
       <div class="console">
         <div><label>右侧池（近三年优胜）</label><input class="num" id="in-right" type="number" value="400"></div>
         <div><label>左侧池（深跌候选）</label><input class="num" id="in-left" type="number" value="150"></div>
         <button id="btn-scan" onclick="startScan()">开始全市场扫描</button>
         <button class="btn-ghost" onclick="loadResults()">加载最近榜单</button>
+        <span class="hint" style="align-self:center">已爬数据当日缓存，重复扫描秒级完成</span>
       </div>
       <div class="progress"><i id="pg"></i></div>
       <div class="status"><span class="dot" id="st-dot"></span><span id="st">空闲 — 点击按钮启动</span></div>
@@ -251,7 +359,7 @@
 
   <!-- 榜单 -->
   <section id="sec-board">
-    <h2>评分榜单<span class="note">点击行进入单基金透视 · 点击表头排序</span></h2>
+    <h2>评分榜单<span class="note">点击行进入单基金透视 · 点击表头排序 · 右侧“加入调仓”可一键带入引擎</span></h2>
     <div class="panel">
       <div class="toolbar">
         <input id="kw" placeholder="搜索 名称 / 代码" oninput="renderBoard()">
@@ -275,24 +383,99 @@
           <th onclick="sortBy('F_momentum')" data-k="F_momentum">动量</th>
           <th onclick="sortBy('val_pct')" data-k="val_pct">PE分位</th>
           <th onclick="sortBy('ir_winrate')" data-k="ir_winrate">IR胜率</th>
-          <th>通道</th><th>风控触发</th>
+          <th>通道</th><th>风控触发</th><th style="text-align:center">操作</th>
         </tr></thead><tbody></tbody></table>
       </div>
       <div class="empty" id="bd-empty">暂无榜单。<br><b>上手只需三步：</b>
         <ol><li>点上方「开始全市场扫描」（热缓存约 1 分钟）</li>
         <li>等待进度条走完，榜单自动浮现</li>
-        <li>点任意一行，看 RBSA 穿透与风控乘数</li></ol>
+        <li>点任意一行，看 RBSA 穿透与风控乘数；满意的点“加入调仓”</li></ol>
       </div>
     </div>
   </section>
 
+  <!-- 智能调仓引擎（新增核心） -->
+  <section id="sec-rebalance">
+    <h2>💼 智能持仓诊断与调仓引擎<span class="note">投行级执行层 · 输入“代码+金额”与总资金，一键生成带金额的买卖清单</span></h2>
+    <div class="panel gold-ring" id="rb-panel">
+      <div class="callout gold" style="margin-bottom:14px;display:flex;gap:10px;align-items:start">
+        <div style="font-size:16px">🎯</div>
+        <div><b>你只管告诉我“你有什么、多少钱能用”，剩下的交给策略。</b><br>
+        <span style="color:var(--dim)">引擎已接入 V3.8 全部纪律：S&gt;70 候选买入 / S&lt;45 纪律卖出、10 槽等权（每槽 = 总资金/10）、危机熔断禁新买、CPPI 回撤限仓、单基 20% 移动止损提示与 RBSA 赛道 35% 集中度告警。金额支持 <code>2.5万</code> <code>15,000</code> <code>1.2w</code>。</span></div>
+      </div>
+
+      <div class="rb-grid">
+        <!-- 左：输入 -->
+        <div class="rb-inputs">
+          <div class="form-grid">
+            <div class="field">
+              <label>总可支配金额 <span class="tip" title="你愿意为这个组合投入的总资金（含已持仓市值+现金）。不填则自动=持仓合计+现金">?</span></label>
+              <div class="unit"><input id="rb-total" class="wide" placeholder="如 100000 或 10万" inputmode="decimal"><i>元</i></div>
+              <div class="hint">每槽目标 = 总资金 ÷ 10。例 10万→每槽1万</div>
+            </div>
+            <div class="field">
+              <label>可用现金 <span class="tip" title="当前账上能直接用来买的现金，不含已持仓市值">?</span></label>
+              <div class="unit"><input id="rb-cash" class="wide" placeholder="如 20000 或 2万" inputmode="decimal"><i>元</i></div>
+              <div class="hint">卖出会先回笼现金，再按空槽买入</div>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>我的持仓（每行一只） <span class="tag">格式：代码 金额</span> <span class="hint" style="margin-left:6px">支持逗号/空格分隔，金额可写 2.5万</span></label>
+            <textarea id="rb-holdings" rows="7" placeholder="110011 2.5万&#10;161725 18000&#10;003096 1.2万&#10;—— 仅填代码也行，金额留空则按等权估算"></textarea>
+            <div class="rb-quick">
+              <button class="btn-ghost btn-small" onclick="rbFillExample()">填入示例</button>
+              <button class="btn-ghost btn-small" onclick="rbFromWatchlist()">从批量评分导入</button>
+              <button class="btn-ghost btn-small" onclick="rbFromBoardTop()">从榜单 Top5 导入</button>
+              <button class="btn-soft btn-small" onclick="rbClear()">清空</button>
+              <span class="hint" style="align-self:center">已输入 <b id="rb-count" style="color:var(--txt)">0</b> 只 · 持仓合计 <b id="rb-sum" style="color:var(--txt)">—</b></span>
+            </div>
+            <div class="rb-preview" id="rb-preview">解析预览：等待输入…</div>
+          </div>
+
+          <div class="console" style="margin-top:2px">
+            <button onclick="runRebalance()" id="rb-btn" style="padding:12px 26px;font-size:14px">🚀 一键生成调仓方案</button>
+            <button class="btn-ghost" onclick="rbSave()">记忆</button>
+            <button class="btn-ghost" onclick="rbLoad()">恢复</button>
+            <span class="hint" style="align-self:center">接口约 10-30 秒（含实时打分），失败单只不影响其余</span>
+          </div>
+          <div class="status"><span class="dot" id="rb-dot"></span><span id="rb-st">就绪 — 输入后点击生成</span></div>
+        </div>
+
+        <!-- 右：说明/纪律 -->
+        <div>
+          <details open style="margin-bottom:12px">
+            <summary>📐 本次调仓怎么算？（给非量化用户的一句话版）</summary>
+            <div style="font-size:12.5px;line-height:1.9;color:var(--dim)">
+              <b style="color:var(--txt)">1) 先卖后买</b>：持仓中 <code>S&lt;45</code> 或进入否决池 → 纪律卖出，回笼现金。<br>
+              <b style="color:var(--txt)">2) 再看能买几只</b>：10 槽已用 <code>N</code> 只 → 空槽 = 10−N；危机红灯时空槽=0 禁新买。<br>
+              <b style="color:var(--txt)">3) 从榜单挑强基</b>：按 <code>S&gt;70</code> 从高到低挑空槽数量的候选。<br>
+              <b style="color:var(--txt)">4) 定买多少</b>：每只建议买 <code>总资金/10</code>，现金不够则均分；剩余现金吃 2.5% 年化。<br>
+              <b style="color:var(--txt)">5) 风控复核</b>：赛道&gt;35% 告警、R_MDD&gt;2 提示、20% 移动止损需自查。
+              <div class="callout green" style="margin-top:10px">💡 小白提示：如果你只想“看看持仓好不好”，不填总资金也行——引擎会自动把“持仓+现金”当总资金，照样给出卖谁、留谁、是否过度集中。</div>
+            </div>
+          </details>
+          <div class="panel" style="background:var(--well);padding:14px">
+            <div style="font-weight:700;margin-bottom:6px">当前纪律快照</div>
+            <div id="rb-discipline" style="font-size:12px;line-height:1.8;color:var(--dim)">加载中…</div>
+          </div>
+          <div class="hint" style="margin-top:10px">数据口径：评分截至最新交易日净值；榜单候选来自最近一次全市场扫描（若无扫描，仅诊断持仓不推买入）。</div>
+        </div>
+      </div>
+
+      <!-- 输出区 -->
+      <div id="rb-out" style="margin-top:18px"></div>
+    </div>
+  </section>
+
   <!-- 单基透视 -->
-  <section>
-    <h2>单基金透视<span class="note">实时爬取该基金全数据并打分</span></h2>
+  <section id="sec-single">
+    <h2>单基金透视<span class="note">实时爬取该基金全数据并打分（AUM/经理任期/RBSA/风控瀑布）</span></h2>
     <div class="panel">
       <div class="console">
         <div><label>基金代码</label><input id="in-code" placeholder="如 161725" style="width:150px"></div>
         <button onclick="queryFund(document.getElementById('in-code').value)">爬取并解剖</button>
+        <button class="btn-ghost" onclick="addToRebalance(document.getElementById('in-code').value)">加入调仓</button>
       </div>
       <div class="status"><span class="dot" id="q-dot"></span><span id="qst"></span></div>
       <div id="wf-grid-anchor"></div>
@@ -300,13 +483,15 @@
     </div>
   </section>
 
-  <!-- 自选手表 -->
-  <section>
-    <h2>支付宝持仓批算<span class="note">每行或逗号分隔一个代码 · ≤50 只</span></h2>
+  <!-- 自选手表（保留极简批量） -->
+  <section id="sec-watch">
+    <h2>批量评分（极简）<span class="note">每行或逗号分隔一个代码 · ≤50 只 · 仅评分，不算金额</span></h2>
     <div class="panel">
+      <div class="callout" style="margin-bottom:12px">如果你只想快速看分数，用这里；要算“买多少、卖多少”，请用上方<b>💼 智能调仓引擎</b>（支持金额）。</div>
       <textarea id="watch" rows="4" style="width:100%" placeholder="110011&#10;161725&#10;003096"></textarea>
       <div class="console" style="margin-top:12px;align-items:center">
         <button onclick="runWatch()">批量评分</button>
+        <button class="btn-ghost btn-small" onclick="watchToRebalance()">→ 导入到调仓引擎</button>
       </div>
       <div class="status"><span class="dot" id="w-dot"></span><span id="wst"></span></div>
       <div id="wout"></div>
@@ -331,10 +516,34 @@ const G={
   veto:'<svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="5" cy="5" r="3.6"/><path d="M2.5 2.5l5 5"/></svg>',
   ring:'<svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="5" cy="5" r="3.4"/></svg>'};
 
-/* ---------- 状态行 ---------- */
+/* ---------- 通用 ---------- */
 function setStatus(dotId, txtId, kind, txt){
   const d=document.getElementById(dotId); if(d) d.className='dot '+(kind||'');
   const el=document.getElementById(txtId); if(el) el.textContent=txt;
+}
+function fmtYuan(n){
+  if(n==null||isNaN(n)) return '—';
+  n=Number(n);
+  if(Math.abs(n)>=10000) return (n/10000).toFixed(n%10000===0?0:2)+'万';
+  return n.toLocaleString('zh-CN');
+}
+function fmtYuanFull(n){
+  if(n==null||isNaN(n)) return '—';
+  return Number(n).toLocaleString('zh-CN',{minimumFractionDigits:0, maximumFractionDigits:0})+' 元';
+}
+function parseYuan(s){
+  if(s==null||s==='') return 0;
+  if(typeof s==='number') return s;
+  let t=String(s).trim().replace(/,/g,'').replace(/，/g,'').replace(/\s+/g,'');
+  if(!t) return 0;
+  let m=1;
+  const low=t.toLowerCase();
+  if(low.endsWith('万元')||low.endsWith('万')){ t=t.replace(/万元?$/,'').replace(/万$/,''); m=10000; }
+  else if(low.endsWith('w')){ t=t.slice(0,-1); m=10000; }
+  else if(low.endsWith('k')){ t=t.slice(0,-1); m=1000; }
+  t=t.replace(/[¥￥元]/g,'');
+  const v=parseFloat(t);
+  return isNaN(v)?0: v*m;
 }
 
 /* ---------- V3.8 交易纪律卡片 ---------- */
@@ -343,7 +552,6 @@ async function loadStrategyState(){
     const j=await (await fetch('/api/strategy_state')).json();
     const sg=j.signal||{}, cs=j.crisis||{}, cp=j.cppi||{}, dc=j.decision||{},
           csh=j.cash||{}, mr=j.micro_risk||{};
-    // 信号与槽位
     document.getElementById('st-signal').innerHTML=
       `模型版本：<b>${j.version}</b><br>`+
       `买入线：<b style="color:var(--green)">S &gt; ${sg.buy_th}</b>（候选信号，非无条件买入）<br>`+
@@ -351,12 +559,10 @@ async function loadStrategyState(){
       `持有带：${sg.hold_band?sg.hold_band[0]+'~'+sg.hold_band[1]:'—'}<br>`+
       `战略槽位：<b>${sg.slots}</b><br>`+
       `再平衡：${j.rebalance||'季度'}`;
-    // 风控层
     document.getElementById('st-risk').innerHTML=
       `现金底仓：${((csh.annual_yield||0)*100).toFixed(1)}% 年化<br>`+
       `单基止损：${((mr.trail_stop||0)*100).toFixed(0)}% 移动止损<br>`+
       `<span style="color:var(--dim);font-size:11px">S&gt;70 只是候选买入信号；最终买入还需：①非危机 ②未超CPPI槽位 ③未满10槽 ④未触发个基20%止损</span>`;
-    // 危机过滤
     const crisisBox=document.getElementById('st-crisis-box');
     if(cs.active){
       crisisBox.className='panel st-danger';
@@ -378,7 +584,6 @@ async function loadStrategyState(){
         (cs.hs300_close!=null?`沪深300收盘：${cs.hs300_close} · MA${cs.ma_window}：${cs.ma} · Vol${cs.vol_window}：${(cs.vol20*100).toFixed(2)}% · 阈值：${(cs.vol_threshold*100).toFixed(2)}%<br>`:'')+
         (cs.reason?`条件检查：${cs.reason}`:'');
     }
-    // CPPI
     const rules=cp.rules||[];
     document.getElementById('st-cppi').innerHTML=
       (cp.enabled?'<span style="color:var(--green)">已启用</span>':'未启用')+
@@ -386,7 +591,6 @@ async function loadStrategyState(){
         `回撤 ≤ ${(r.drawdown_lte*100).toFixed(0)}%：最多 <b>${r.max_slots===0?'清仓':r.max_slots+'槽'}</b>`
       ).join('<br>'):'')+
       `<br><span style="color:var(--dim);font-size:11px">${cp.note||''}</span>`;
-    // 综合决策
     const decEl=document.getElementById('st-decision');
     if(dc.new_buy_allowed){
       decEl.className='st-ok';
@@ -396,6 +600,14 @@ async function loadStrategyState(){
       decEl.className='st-danger';
       decEl.style.border='1px solid rgba(246,70,93,.35)';
       decEl.innerHTML=`<span style="color:var(--red)">✗ ${dc.message}</span>`;
+    }
+    // 同步到调仓纪律快照
+    const rbD=document.getElementById('rb-discipline');
+    if(rbD){
+      rbD.innerHTML=
+        `S&gt;${sg.buy_th} 候选买入 · S&lt;${sg.sell_th} 纪律卖出 · 槽位 ${sg.slots} · 每槽 ≈ 总资金/10<br>`+
+        `危机：${cs.active?'<b style="color:var(--red)">红灯禁新买</b>':'<b style="color:var(--green)">绿灯可买</b>'}${cs.reason?' · '+cs.reason:''}<br>`+
+        `现金底仓 ${(csh.annual_yield*100).toFixed(1)}% 年化 · 单基 20% 移动止损 · CPPI ${rules.map(r=>r.drawdown_lte*100+'%→'+(r.max_slots===0?'清仓':r.max_slots+'槽')).join(' / ')}`;
     }
   }catch(e){
     document.getElementById('st-signal').innerHTML='加载失败 — 服务未启动';
@@ -541,7 +753,8 @@ function renderBoard(){
     <td>${r.F_value??''}</td><td>${r.F_alpha??''}</td><td>${r.F_momentum??''}</td>
     <td>${r.val_pct!=null?(r.val_pct*100).toFixed(0)+'%':''}</td>
     <td>${r.ir_winrate!=null?(r.ir_winrate*100).toFixed(0)+'%':''}</td>
-    <td>${r.channel||''}</td><td class="pen" title="${r.penalty_str||''}">${r.penalty_str||''}</td></tr>`).join('');
+    <td>${r.channel||''}</td><td class="pen" title="${r.penalty_str||''}">${r.penalty_str||''}</td>
+    <td style="text-align:center"><button class="btn-ghost btn-small" onclick="event.stopPropagation();addToRebalance('${r.code}')">＋调仓</button></td></tr>`).join('');
 }
 
 /* ---------- 单基瀑布 ---------- */
@@ -604,7 +817,6 @@ let WROWS=[], WD_OPEN=[], WPORT=null, WDISCIPLINE=null;
 async function runWatch(){
   const codes=document.getElementById('watch').value.split(/[\s,，、]+/).filter(Boolean);
   if(!codes.length)return;
-  // V3.7: 分批请求(每批6只) — 进度可见 + 单批失败不拖死全局 + 不会长时间悬挂
   const CH=6, chunks=[];
   for(let i=0;i<codes.length;i+=CH) chunks.push(codes.slice(i,i+CH));
   WROWS=[]; WD_OPEN=[]; WPORT=null; WDISCIPLINE=null;
@@ -617,7 +829,6 @@ async function runWatch(){
       clearTimeout(to);
       if(j.ok){
         WROWS=WROWS.concat(j.rows||[]);
-        // V3.7.2: 组合级RBSA穿透跨批加权合并 (批判清单⑧)
         if(j.portfolio&&j.portfolio.n&&j.portfolio.exposure){
           if(!WPORT) WPORT={n:0,cap:j.portfolio.cap,exp:{}};
           Object.entries(j.portfolio.exposure).forEach(([k,v])=>{
@@ -633,7 +844,6 @@ async function runWatch(){
       chunks[ci].forEach(c=>WROWS.push({code:c,name:c,error:em}));
     }
   }
-  // V3.8: 获取策略状态填充组合纪律
   try{
     const sj=await (await fetch('/api/strategy_state')).json();
     WDISCIPLINE = {
@@ -649,8 +859,8 @@ async function runWatch(){
   const nerr=WROWS.filter(r=>r.error).length;
   if(nerr) setStatus('w-dot','wst','err',`完成(含 ${nerr} 只失败) — 点击行展开透视`);
   else setStatus('w-dot','wst','ok','完成 — 点击行展开/收起透视详情');
-  WROWS.forEach(r=>r.pool_pct=poolPct(r, WROWS));   // 战术分位以本批次为池
-  WD_OPEN=WROWS.map(()=>WROWS.length<=10);          // ≤10只: 默认全展开, 透视详情直接输出; 大批次默认收起(可一键全展)
+  WROWS.forEach(r=>r.pool_pct=poolPct(r, WROWS));
+  WD_OPEN=WROWS.map(()=>WROWS.length<=10);
   renderWatch();
 }
 function renderWatch(){
@@ -667,7 +877,6 @@ function renderWatch(){
       <td class="pen">${r.penalty_str||''}</td></tr>
     <tr class="wdet ${open}" id="wd-${i}"><td colspan="11"><div id="wfm-${i}"></div></td></tr>`;
   }).join('');
-  // V3.7.2: 组合级赛道暴露横幅 — ≥35% 红色告警, 否则展示前三穿透
   let ptxt='';
   if(WPORT&&WPORT.n>=2){
     const ent=Object.entries(WPORT.exp).sort((a,b)=>b[1]-a[1]);
@@ -682,7 +891,7 @@ function renderWatch(){
       <span class="bd-n">批内 ${WROWS.length} 只 · S>70=候选买入(需经执行层裁决) / S<45=评分卖出${ptxt}</span>
     </div>
     ${WDISCIPLINE?`<div style="margin:6px 0 10px;font-size:11.5px;color:var(--dim);line-height:1.7;padding:8px 12px;background:var(--well);border:1px solid var(--line);border-radius:8px">
-      <b style="color:var(--txt)">V3.8 组合纪律</b>：槽位上限 ${WDISCIPLINE.max_slots} · 买入线 S>${WDISCIPLINE.buy_threshold} · 卖机状态 ${WDISCIPLINE.crisis_active!=null?(WDISCIPLINE.crisis_active?'<span style="color:var(--red)">开启</span>':'<span style="color:var(--green)">关闭</span>'):'<span style="color:var(--amber)">待查</span>'} · 新买入 ${WDISCIPLINE.new_buy_allowed!=null?(WDISCIPLINE.new_buy_allowed?'<span style="color:var(--green)">允许</span>':'<span style="color:var(--red)">禁止</span>'):'<span style="color:var(--amber)">待查</span>'}
+      <b style="color:var(--txt)">V3.8 组合纪律</b>：槽位上限 ${WDISCIPLINE.max_slots} · 买入线 S>${WDISCIPLINE.buy_threshold} · 买机状态 ${WDISCIPLINE.crisis_active!=null?(WDISCIPLINE.crisis_active?'<span style="color:var(--red)">开启</span>':'<span style="color:var(--green)">关闭</span>'):'<span style="color:var(--amber)">待查</span>'} · 新买入 ${WDISCIPLINE.new_buy_allowed!=null?(WDISCIPLINE.new_buy_allowed?'<span style="color:var(--green)">允许</span>':'<span style="color:var(--red)">禁止</span>'):'<span style="color:var(--amber)">待查</span>'}
       · CPPI：${(WDISCIPLINE.cppi_rules||[]).map(r=>'回撤≤'+(r.drawdown_lte*100).toFixed(0)+'%→最多'+(r.max_slots===0?'清仓':r.max_slots+'槽')).join(' / ')}
       <br><span style="color:var(--faint)">${WDISCIPLINE.note||''}</span>
     </div>`:''}
@@ -706,13 +915,313 @@ function toggleAllWd(){
   document.querySelectorAll('.caret').forEach(el=>el.classList.toggle('dn',all));
   if(all) WROWS.forEach((r,i)=>{ if(!r.error) renderWaterfall(r,'wfm-'+i); });
 }
+function watchToRebalance(){
+  const codes=document.getElementById('watch').value.trim();
+  if(!codes){ alert('批量评分框为空'); return; }
+  // 转换为 持仓引擎格式（无金额，仅代码）
+  const lines=codes.split(/[\s,，、]+/).filter(Boolean).map(c=>c.trim().padStart(6,'0')+' 1万');
+  document.getElementById('rb-holdings').value=lines.join('\n');
+  document.getElementById('sec-rebalance').scrollIntoView({behavior:'smooth'});
+  updateRbPreview();
+}
+
+/* ---------- 智能调仓引擎 ---------- */
+function parseHoldingsText(txt){
+  const lines=String(txt||'').split(/[\n;；]+/);
+  const out=[];
+  for(let line of lines){
+    line=line.trim();
+    if(!line) continue;
+    // 支持逗号分隔的多只在同一行也拆
+    const segs=line.split(/[,，]+/).map(s=>s.trim()).filter(Boolean);
+    for(let seg of segs){
+      // 用空白/冒号切代码与金额
+      const parts=seg.split(/[\s:：]+/).filter(Boolean);
+      if(!parts.length) continue;
+      const codeRaw=parts[0].replace(/[^0-9]/g,'');
+      if(!/^\d{1,6}$/.test(codeRaw)) continue;
+      const code=codeRaw.padStart(6,'0');
+      let amt=null;
+      if(parts.length>1){
+        // 后面所有部分拼起来可能是 "2.5万" 含单位
+        const amtStr=parts.slice(1).join(' ');
+        const v=parseYuan(amtStr);
+        if(v>0) amt=v;
+      }
+      out.push({code, amount:amt});
+      if(out.length>=50) break;
+    }
+  }
+  return out;
+}
+function updateRbPreview(){
+  const txt=document.getElementById('rb-holdings').value;
+  const total=parseYuan(document.getElementById('rb-total').value);
+  const cash=parseYuan(document.getElementById('rb-cash').value);
+  const holdings=parseHoldingsText(txt);
+  const n=holdings.length;
+  const sum=holdings.reduce((s,h)=>s+(h.amount||0),0);
+  document.getElementById('rb-count').textContent=n;
+  document.getElementById('rb-sum').textContent=sum? fmtYuanFull(sum): '—';
+  const per= total? (total/10) : 0;
+  let msg=`已识别 ${n} 只`;
+  if(n){
+    msg+=` · 持仓合计 ${sum? fmtYuanFull(sum):'未填金额（将按等权估算）'} · 现金 ${cash? fmtYuanFull(cash):'0 元'}`;
+    if(total) msg+=` · 总资金 ${fmtYuanFull(total)} · 每槽目标 ${fmtYuanFull(per)}`;
+    else if(sum||cash) msg+=` · 总资金≈ ${fmtYuanFull(sum+cash)}（自动）· 每槽目标 ${fmtYuanFull((sum+cash)/10)}`;
+    msg+=`\n`+holdings.slice(0,6).map(h=>`  ${h.code}  ${h.amount? fmtYuanFull(h.amount):'金额未填'}`).join('\n');
+    if(n>6) msg+=`\n  … 还有 ${n-6} 只`;
+  } else {
+    msg='等待输入…\n示例：\n  110011 2.5万\n  161725 18000\n  003096 1.2万';
+  }
+  document.getElementById('rb-preview').textContent='解析预览：\n'+msg;
+}
+['rb-total','rb-cash','rb-holdings'].forEach(id=>{
+  const el=document.getElementById(id);
+  if(el) el.addEventListener('input', updateRbPreview);
+});
+function rbFillExample(){
+  document.getElementById('rb-total').value='100000';
+  document.getElementById('rb-cash').value='20000';
+  document.getElementById('rb-holdings').value='110011 2.5万\n161725 1.8万\n003096 1.2万\n110022 9000\n519674 1.5万';
+  updateRbPreview();
+}
+function rbFromWatchlist(){
+  const txt=document.getElementById('watch').value.trim();
+  if(!txt){ alert('请先在“批量评分”里粘贴代码'); return; }
+  const codes=txt.split(/[\s,，、]+/).filter(Boolean).map(c=>c.trim().padStart(6,'0'));
+  document.getElementById('rb-holdings').value=codes.map(c=>c+' 1万').join('\n');
+  if(!document.getElementById('rb-total').value) document.getElementById('rb-total').value='100000';
+  updateRbPreview();
+  document.getElementById('rb-holdings').scrollIntoView({behavior:'smooth',block:'center'});
+}
+function rbFromBoardTop(){
+  if(!ROWS.length){ alert('请先执行“全市场扫描”或“加载最近榜单”'); return; }
+  const top=ROWS.filter(r=>r.S_total>=70).slice(0,5).map(r=>r.code+' 1万');
+  if(!top.length){ alert('榜单暂无 S>70 候选'); return; }
+  document.getElementById('rb-holdings').value=top.join('\n');
+  if(!document.getElementById('rb-total').value) document.getElementById('rb-total').value='100000';
+  if(!document.getElementById('rb-cash').value) document.getElementById('rb-cash').value='20000';
+  updateRbPreview();
+}
+function rbClear(){
+  document.getElementById('rb-holdings').value='';
+  updateRbPreview();
+  document.getElementById('rb-out').innerHTML='';
+  setStatus('rb-dot','rb-st','','就绪 — 输入后点击生成');
+}
+function addToRebalance(code){
+  code=String(code||'').trim().padStart(6,'0');
+  if(!/^\d{6}$/.test(code)) return;
+  const ta=document.getElementById('rb-holdings');
+  const cur=ta.value.trim();
+  const exists=parseHoldingsText(cur).some(h=>h.code===code);
+  if(exists){ alert(code+' 已在持仓列表中'); return; }
+  ta.value=(cur? cur+'\n':'')+code+' 1万';
+  updateRbPreview();
+  document.getElementById('sec-rebalance').scrollIntoView({behavior:'smooth'});
+}
+function rbSave(){
+  const data={
+    total: document.getElementById('rb-total').value,
+    cash: document.getElementById('rb-cash').value,
+    holdings: document.getElementById('rb-holdings').value
+  };
+  localStorage.setItem('rb_data', JSON.stringify(data));
+  setStatus('rb-dot','rb-st','ok','已记忆到本地浏览器（下次恢复可用）');
+}
+function rbLoad(){
+  try{
+    const d=JSON.parse(localStorage.getItem('rb_data')||'null');
+    if(!d){ alert('无记忆数据'); return; }
+    document.getElementById('rb-total').value=d.total||'';
+    document.getElementById('rb-cash').value=d.cash||'';
+    document.getElementById('rb-holdings').value=d.holdings||'';
+    updateRbPreview();
+    setStatus('rb-dot','rb-st','ok','已恢复记忆');
+  }catch(e){ alert('恢复失败'); }
+}
+async function runRebalance(){
+  const totalRaw=document.getElementById('rb-total').value.trim();
+  const cashRaw=document.getElementById('rb-cash').value.trim();
+  const txt=document.getElementById('rb-holdings').value.trim();
+  if(!txt){ alert('请先输入持仓（每行 代码 金额）'); return; }
+  const holdings=parseHoldingsText(txt);
+  if(!holdings.length){ alert('未识别到有效基金代码'); return; }
+  const total=parseYuan(totalRaw);
+  const cash=parseYuan(cashRaw);
+  // 若用户没填总资金但填了现金+持仓，自动合并在后端；前端也给提示
+  document.getElementById('rb-btn').disabled=true;
+  setStatus('rb-dot','rb-st','busy',`诊断中… 正在对 ${holdings.length} 只持仓实时打分（约15-30秒）…`);
+  document.getElementById('rb-out').innerHTML='<div class="callout" style="margin-top:14px">⏳ 正在爬取净值/档案→RBSA穿透→风控评分，请稍候… 单只失败不影响其余。</div>';
+  try{
+    const ctl=new AbortController();
+    const to=setTimeout(()=>ctl.abort(), 180000);
+    const r=await fetch('/api/rebalance',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({total_capital: total||0, cash: cash||0, holdings}), signal:ctl.signal});
+    clearTimeout(to);
+    const j=await r.json();
+    if(!j.ok){ setStatus('rb-dot','rb-st','err', j.message||'计算失败'); document.getElementById('rb-out').innerHTML=`<div class="callout red">${j.message||'计算失败'}</div>`; return; }
+    setStatus('rb-dot','rb-st','ok',`完成 — 已生成 ${j.orders?.length||0} 条指令`);
+    renderRebalance(j);
+    // 记忆
+    try{ localStorage.setItem('rb_last_result', JSON.stringify(j)); }catch(e){}
+  }catch(e){
+    const msg=e.name==='AbortError'?'请求超时(180秒) — 试试减少持仓至 10 只以内或稍后重试' : (e.message||'网络错误');
+    setStatus('rb-dot','rb-st','err', msg);
+    document.getElementById('rb-out').innerHTML=`<div class="callout red">请求失败：${msg}</div>`;
+  }finally{
+    document.getElementById('rb-btn').disabled=false;
+  }
+}
+function renderRebalance(j){
+  const s=j.summary||{}, strat=j.strategy||{}, crisis=strat.crisis||{};
+  const holdings=j.holdings||[], sells=j.sells||[], keeps=j.keeps||[], buys=j.buys||[], orders=j.orders||[], alloc=j.allocation||[], warns=j.warnings||[];
+  const totalCap=s.total_capital||0;
+  const perSlot=s.per_slot||0;
+  // KPI
+  const kpiHtml=`<div class="kpi-row">
+    <div class="kpi"><label>总可支配</label><b>${fmtYuanFull(totalCap)}</b><sub> · 每槽 ${fmtYuanFull(perSlot)}</sub></div>
+    <div class="kpi"><label>持仓市值 / 现金</label><b>${fmtYuan(s.holdings_value_before)}</b><sub> / ${fmtYuan(s.cash_before)}</sub></div>
+    <div class="kpi"><label>诊断结果</label><b style="color:${sells.length?'var(--red)':'var(--green)'}">${sells.length? sells.length+'只卖出' : '无需卖出'}</b><sub> · 保留 ${keeps.length} 只</sub></div>
+    <div class="kpi"><label>${crisis.active?'危机禁买':'可新买'}</label><b style="color:${crisis.active?'var(--red)':'var(--green)'}">${crisis.active?'禁新买':'可买 '+buys.length+'只'}</b><sub> · 现金余额 ${fmtYuan(s.cash_after)}</sub></div>
+  </div>`;
+  // 危机横幅
+  const crisisBanner= crisis.active
+    ? `<div class="callout red" style="margin-top:12px">⚠ 危机模式已激活：${crisis.reason||''} — <b>已禁止新开权益仓</b>，现有持仓仅按 S&lt;45 或 20%移动止损退出。本次不推荐任何买入。</div>`
+    : `<div class="callout green" style="margin-top:12px">✓ 非危机 · 可按 S 信号与槽位规则建仓。空槽 ${s.free_slots_before} 个 · 候选池：${j.scan_msg||''}</div>`;
+  // 持仓诊断表
+  const hRows=holdings.map(h=>{
+    const act=h.action==='sell'?'卖出':'持有';
+    const actCls=h.action==='sell'?'b-red':'b-green';
+    const sig=sigOf(h);
+    return `<tr>
+      <td>${h.code}</td><td class="name">${h.name}</td>
+      <td style="text-align:right">${fmtYuanFull(h.amount)}</td>
+      <td class="score">${h.S_total??'—'}</td><td>${ratingCell(h)}</td><td>${sig}</td>
+      <td><span class="badge ${actCls}">${act}</span><div style="font:11px var(--serif-ui);color:var(--dim)">${h.action_label||''}</div></td>
+      <td style="text-align:left;font:11px var(--serif-ui);color:var(--dim);white-space:normal;max-width:220px">${h.action_reason||''}${h.rebalance_hint?' · '+h.rebalance_hint:''}<br><span class="pen">${h.penalty_str||''}</span></td>
+      <td style="text-align:right">${fmtYuanFull(h.target_amount)}${h.action==='sell'?' <span style="color:var(--red)">→清仓</span>':''}</td>
+    </tr>`;
+  }).join('');
+  const hTable=`<div style="margin-top:14px">
+    <div style="font-weight:700;margin-bottom:8px">持仓诊断 <span class="hint">S&lt;45 或否决池 → 纪律卖出；其余保留并提示是否需向目标权重对齐</span></div>
+    <div class="rb-table-wrap"><table><thead><tr>
+      <th>代码</th><th>名称</th><th>当前金额</th><th>总分</th><th>评级</th><th>信号</th><th>操作</th><th>原因/提示</th><th>目标金额</th>
+    </tr></thead><tbody>${hRows}</tbody></table></div>
+  </div>`;
+  // 买卖指令时间线
+  let orderHtml='';
+  if(orders.length){
+    orderHtml=`<div style="margin-top:16px"><div style="font-weight:700;margin-bottom:8px">📋 一键执行清单 <span class="hint">先卖后买 · 卖出回笼 ${fmtYuanFull(s.sell_proceeds)} → 现金池 ${fmtYuanFull(s.cash_after_sells)} → 再买入</span></div>
+      <div class="order-list">`+orders.map(o=>{
+        const isSell=o.side==='SELL';
+        return `<div class="order ${isSell?'sell':'buy'}">
+          <span class="side">${isSell?'卖出':'买入'}</span>
+          <div class="meta"><b>${o.code} ${o.name}</b><div>${o.reason||''} · S ${o.S??'—'}</div></div>
+          <div class="amt">${fmtYuanFull(o.amount)}<small>${isSell?'回笼现金':'占用现金'}</small></div>
+        </div>`;
+      }).join('')+`</div>
+      <div style="display:flex;gap:8px;margin-top:10px;flex-wrap:wrap">
+        <button class="btn-ghost btn-small" onclick="copyOrders()">复制指令</button>
+        <button class="btn-ghost btn-small" onclick="downloadOrders()">导出 CSV</button>
+        <span class="hint" style="align-self:center">买入均按“总资金/10”即 ${fmtYuanFull(perSlot)}/只 均分，现金不足已自动均分；剩余现金 ${fmtYuanFull(s.cash_after)}（${s.cash_pct_after}%）留作底仓吃 2.5% 年化。</span>
+      </div>
+    </div>`;
+  } else {
+    orderHtml=`<div class="callout" style="margin-top:14px">暂无买卖指令：${j.scan_msg||'持仓无需调整'}</div>`;
+  }
+  // 目标配置
+  let allocHtml='';
+  if(alloc.length||s.cash_after>0){
+    // 生成占比条
+    const colors=['#e8b64c','#2ebd85','#4c9aff','#f6465d','#a78bfa','#f0b90b','#38bdf8','#fb7185','#34d399','#f59e0b'];
+    let cur=0;
+    let barSegs=alloc.map((a,i)=>`<i style="width:${a.pct}%;background:${colors[i%colors.length]}" title="${a.code} ${a.pct}%"></i>`).join('');
+    if(s.cash_after>0){
+      const cashPct=s.cash_pct_after||0;
+      barSegs+=`<i style="width:${cashPct}%;background:var(--well);border:1px dashed var(--line)" title="现金 ${cashPct}%"></i>`;
+    }
+    const legend=alloc.map((a,i)=>`<span><em style="background:${colors[i%colors.length]}"></em>${a.code} ${a.name?.slice(0,6)||''} ${a.pct}%</span>`).join('') + (s.cash_after>0? `<span><em style="background:var(--well);border:1px solid var(--line)"></em>现金 ${s.cash_pct_after}%</span>`:'');
+    allocHtml=`<div style="margin-top:16px">
+      <div style="font-weight:700;margin-bottom:8px">目标配置 <span class="hint">按“卖后+买后”目标金额占总资金比例</span></div>
+      <div class="alloc-bar">${barSegs}</div>
+      <div class="alloc-legend">${legend}</div>
+      <div class="rb-table-wrap" style="margin-top:10px;max-height:260px"><table><thead><tr>
+        <th>代码</th><th>名称</th><th>类型</th><th>金额</th><th>占比</th><th>S</th>
+      </tr></thead><tbody>`+
+      alloc.map(a=>`<tr><td>${a.code}</td><td class="name">${a.name}</td><td>${a.type==='buy'?'<span class="badge b-green">新买</span>':'<span class="badge b-mute">保留</span>'}</td><td style="text-align:right">${fmtYuanFull(a.amount)}</td><td style="text-align:right">${a.pct}%</td><td class="score">${a.S??'—'}</td></tr>`).join('')+
+      (s.cash_after>0? `<tr><td>—</td><td class="name">现金底仓</td><td><span class="badge b-blue">现金</span></td><td style="text-align:right">${fmtYuanFull(s.cash_after)}</td><td style="text-align:right">${s.cash_pct_after}%</td><td>2.5%年化</td></tr>`:'')+
+      `</tbody></table></div>
+    </div>`;
+  }
+  // 买入候选详情
+  let buyHtml='';
+  if(buys.length){
+    buyHtml=`<div style="margin-top:16px">
+      <div style="font-weight:700;margin-bottom:8px">候选买入详情 <span class="hint">来自最近扫描榜单 S&gt;70 Top，按总分降序；点击行可查看透视</span></div>
+      <div class="rb-table-wrap"><table><thead><tr>
+        <th>代码</th><th>名称</th><th>总分</th><th>评级</th><th>信号</th><th>建议买入</th><th>估值分</th><th>Alpha</th><th>动量</th><th>PE分位</th>
+      </tr></thead><tbody>`+
+      buys.map(b=>`<tr onclick="queryFund('${b.code}')" style="cursor:pointer"><td>${b.code}</td><td class="name">${b.name}</td><td class="score">${b.S_total??''}</td><td>${ratingCell(b)}</td><td>${sigOf(b)}</td><td style="text-align:right;color:var(--green);font-weight:700">${fmtYuanFull(b.suggested_amount)}</td><td>${b.F_value??''}</td><td>${b.F_alpha??''}</td><td>${b.F_momentum??''}</td><td>${b.val_pct!=null?(b.val_pct*100).toFixed(0)+'%':''}</td></tr>`).join('')+
+      `</tbody></table></div>
+    </div>`;
+  }
+  // 风控提示
+  const warnHtml=warns.length? `<div style="margin-top:16px"><div style="font-weight:700;margin-bottom:8px">⚠ 风控与纪律提示</div><div class="warn-list">`+
+    warns.map(w=>{
+      const isRed=w.includes('告警')||w.includes('危机');
+      const isAmber=w.includes('回撤')||w.includes('现金不足');
+      const cls=isRed?'red':(isAmber?'amber':'blue');
+      return `<div class="warn ${cls}">• ${w}</div>`;
+    }).join('')+`</div></div>`:'';
+  // 组合穿透
+  const port=j.portfolio;
+  let portHtml='';
+  if(port&&port.n){
+    const ent=Object.entries(port.exposure||{}).sort((a,b)=>b[1]-a[1]);
+    const fl=ent.filter(([k,v])=>v>=port.cap);
+    const top=ent.slice(0,5);
+    portHtml=`<div class="callout ${fl.length?'red':'blue'}" style="margin-top:12px">`+
+      (fl.length? `⚠ 组合隐形仓位集中告警（${fl.map(([k,v])=>k+' '+(v*100).toFixed(0)+'%').join(' / ')} ≥${(port.cap*100).toFixed(0)}%）— 建议分散`
+                : `组合穿透（等权聚合 ${port.n} 只）：${top.map(([k,v])=>k+' '+(v*100).toFixed(0)+'%').join(' · ')}`) +
+      `</div>`;
+  }
+  document.getElementById('rb-out').innerHTML=
+    kpiHtml + crisisBanner + portHtml + hTable + buyHtml + orderHtml + allocHtml + warnHtml +
+    `<div class="hint" style="margin-top:12px">纪律说明：单基 20% 移动止损需你自查“自入场高点回撤是否≥20%”；CPPI 需跟踪你组合自高点回撤，当前仅提示规则未自动熔断。数据截至 ${holdings[0]?.last_date||'最新交易日'}。</div>`;
+  window._lastRebalance=j;
+}
+function copyOrders(){
+  const j=window._lastRebalance; if(!j) return;
+  const lines=(j.orders||[]).map(o=>`${o.side==='SELL'?'卖出':'买入'} ${o.code} ${o.name} ${o.amount}元  ${o.reason}`);
+  navigator.clipboard.writeText(lines.join('\n')).then(()=>alert('已复制 '+lines.length+' 条')).catch(()=>alert(lines.join('\n')));
+}
+function downloadOrders(){
+  const j=window._lastRebalance; if(!j) return;
+  const rows=[['side','code','name','amount','reason','S']].concat((j.orders||[]).map(o=>[o.side,o.code,o.name,o.amount,o.reason,o.S]));
+  const csv=rows.map(r=>r.map(x=>`"${String(x??'').replace(/"/g,'""')}"`).join(',')).join('\n');
+  const blob=new Blob(["\uFEFF"+csv],{type:'text/csv'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='rebalance_orders.csv'; a.click();
+}
 
 /* ---------- 启动 ---------- */
+updateRbPreview();
 loadStrategyState();
 loadTerrain();
 loadResults();
 (async()=>{const s=await (await fetch('/api/scan/status')).json();
   if(s.phase==='universe'||s.phase==='scoring'){document.getElementById('btn-scan').disabled=true;startPoll();}})();
+// 恢复记忆
+try{
+  const d=JSON.parse(localStorage.getItem('rb_data')||'null');
+  if(d){
+    if(d.total) document.getElementById('rb-total').value=d.total;
+    if(d.cash) document.getElementById('rb-cash').value=d.cash;
+    if(d.holdings) document.getElementById('rb-holdings').value=d.holdings;
+    updateRbPreview();
+  }
+}catch(e){}
 </script>
 </body>
 </html>
