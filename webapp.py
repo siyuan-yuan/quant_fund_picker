@@ -511,12 +511,43 @@ def rebalance():
     # 去重 codes
     uniq_codes = list(dict.fromkeys(codes))
     rows = []
+
+    def _friendly_err(e: str) -> str:
+        s = str(e)
+        if "RemoteDisconnected" in s or "Connection aborted" in s or "ConnectionAborted" in s:
+            return "数据源繁忙（天天基金限流/远端断开），请稍后重试或分批重试（建议≤5只/次）"
+        if "净值历史不足" in s:
+            return s
+        if "timeout" in s.lower() or "timed out" in s.lower():
+            return "数据源超时，请稍后重试"
+        return s[:120]
+
     def _one(c):
-        try:
-            return score_fund(c)
-        except Exception as e:
-            return {"code": c, "name": c, "error": str(e)[:100]}
-    with ThreadPoolExecutor(max_workers=4) as ex:
+        # 轻量重试：首次并发易触发限流，失败后退避 1.5s 再试一次；仍失败则返回友好错误
+        last_e = None
+        for attempt in range(2):
+            try:
+                r = score_fund(c)
+                # score_fund 内已返回 error 字段的视为业务错误，不重试
+                if r.get("error"):
+                    # 净值不足等直接返回，但把限流类错误转友好
+                    if "RemoteDisconnected" in str(r.get("error")) or "Connection aborted" in str(r.get("error")):
+                        r["error"] = _friendly_err(r.get("error"))
+                    return r
+                return r
+            except Exception as e:
+                last_e = e
+                msg = str(e)
+                is_retryable = ("RemoteDisconnected" in msg or "Connection aborted" in msg or "timeout" in msg.lower())
+                if is_retryable and attempt == 0:
+                    time.sleep(1.8)
+                    continue
+                return {"code": c, "name": c, "error": _friendly_err(msg)}
+        return {"code": c, "name": c, "error": _friendly_err(last_e) if last_e else "未知错误"}
+
+    # 降低并发以避开东财限流：2 线程最稳，5只以内几乎不触发限流
+    workers = 2 if len(uniq_codes) > 4 else 3
+    with ThreadPoolExecutor(max_workers=workers) as ex:
         futs = {ex.submit(_one, c): c for c in uniq_codes}
         for fut in as_completed(futs):
             rows.append(fut.result())
@@ -561,13 +592,28 @@ def rebalance():
         code = h["code"]
         amt = code_to_amount.get(code, 0.0) or 0.0
         rec = row_by_code.get(code, {"code": code, "name": code})
+        # ---- 关键修复：pandas 的 NaN 误判为真错误 ----
+        raw_err = rec.get("error")
+        # pandas 的 NaN、None、空串、字符串 "nan" 均视为无错
+        if raw_err is None or (isinstance(raw_err, float) and pd.isna(raw_err)) or str(raw_err).strip().lower() in ("", "nan", "none"):
+            is_err = False
+            err_msg = None
+        else:
+            is_err = True
+            err_msg = str(raw_err)[:180]
+            # 二次友好化（兜底）
+            if "RemoteDisconnected" in err_msg or "Connection aborted" in err_msg:
+                err_msg = "数据源繁忙（天天基金限流/远端断开），请稍后重试或分批重试（建议≤5只/次）"
         # 统一字段
         s_total = rec.get("S_total")
         try:
-            s_val = float(s_total) if s_total is not None and not pd.isna(s_total) else None
+            if s_total is None or (isinstance(s_total, float) and pd.isna(s_total)):
+                s_val = None
+            else:
+                fv = float(s_total)
+                s_val = None if not np.isfinite(fv) else fv
         except:
             s_val = None
-        is_err = bool(rec.get("error"))
         veto = _is_veto_row(rec) if not is_err else False
         rating = rec.get("rating") or ""
         ftype = rec.get("ftype") or ""
@@ -591,7 +637,7 @@ def rebalance():
             "scale": rec.get("scale"),
             "tenure_days": rec.get("tenure_days"),
             "last_date": rec.get("last_date"),
-            "error": rec.get("error"),
+            "error": err_msg,
             "is_veto": veto,
             "is_error": is_err,
         })

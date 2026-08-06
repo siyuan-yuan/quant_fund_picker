@@ -1114,23 +1114,45 @@ function renderRebalance(j){
   const crisisBanner= crisis.active
     ? `<div class="callout red" style="margin-top:12px">⚠ 危机模式已激活：${crisis.reason||''} — <b>已禁止新开权益仓</b>，现有持仓仅按 S&lt;45 或 20%移动止损退出。本次不推荐任何买入。</div>`
     : `<div class="callout green" style="margin-top:12px">✓ 非危机 · 可按 S 信号与槽位规则建仓。空槽 ${s.free_slots_before} 个 · 候选池：${j.scan_msg||''}</div>`;
-  // 持仓诊断表
+  // 持仓诊断表 — 失败项友好化 + 单只重试
+  const nErr=holdings.filter(h=>h.is_error).length;
+  const errBanner=nErr? `<div class="callout amber" style="margin-top:12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <span>⚠ 有 <b>${nErr} 只</b>评分失败（数据源繁忙/限流，已标为“待复核”，不影响其余 ${holdings.length-nErr} 只诊断）</span>
+    <button class="btn-ghost btn-small" onclick="retryFailedHoldings()">一键重试失败项</button>
+    <span class="hint">提示：东财接口并发限流常见于一次查 >5只；已自动降并发至2线程，仍失败可分2批（每次≤5只）或等30秒再试，缓存命中后秒级</span>
+  </div>`:'';
   const hRows=holdings.map(h=>{
+    if(h.is_error){
+      return `<tr style="background:rgba(240,185,11,.06)">
+        <td>${h.code}</td><td class="name">${h.name||h.code}</td>
+        <td style="text-align:right">${fmtYuanFull(h.amount)}</td>
+        <td class="score" style="color:var(--amber)">—</td>
+        <td><span class="badge b-amber">待复核</span></td><td><span class="badge b-mute">—</span></td>
+        <td><span class="badge b-amber">待重试</span><div style="font:11px var(--serif-ui);color:var(--dim)">数据源繁忙</div></td>
+        <td style="text-align:left;font:11px var(--serif-ui);color:var(--amber);white-space:normal;max-width:240px">
+          ${h.error||'评分失败，请重试'}<br>
+          <span style="color:var(--dim)">已按“持有不动”处理，不会误卖；<b style="color:var(--txt)">点右侧重试</b>可单只刷新</span>
+        </td>
+        <td style="text-align:right"><button class="btn-ghost btn-small" onclick="retryRebalanceSingle('${h.code}')">重试</button></td>
+      </tr>`;
+    }
     const act=h.action==='sell'?'卖出':'持有';
     const actCls=h.action==='sell'?'b-red':'b-green';
     const sig=sigOf(h);
+    const scoreCell=(h.S_total==null||isNaN(h.S_total))?'—':h.S_total;
     return `<tr>
       <td>${h.code}</td><td class="name">${h.name}</td>
       <td style="text-align:right">${fmtYuanFull(h.amount)}</td>
-      <td class="score">${h.S_total??'—'}</td><td>${ratingCell(h)}</td><td>${sig}</td>
+      <td class="score">${scoreCell}</td><td>${ratingCell(h)}</td><td>${sig}</td>
       <td><span class="badge ${actCls}">${act}</span><div style="font:11px var(--serif-ui);color:var(--dim)">${h.action_label||''}</div></td>
       <td style="text-align:left;font:11px var(--serif-ui);color:var(--dim);white-space:normal;max-width:220px">${h.action_reason||''}${h.rebalance_hint?' · '+h.rebalance_hint:''}<br><span class="pen">${h.penalty_str||''}</span></td>
       <td style="text-align:right">${fmtYuanFull(h.target_amount)}${h.action==='sell'?' <span style="color:var(--red)">→清仓</span>':''}</td>
     </tr>`;
   }).join('');
   const hTable=`<div style="margin-top:14px">
-    <div style="font-weight:700;margin-bottom:8px">持仓诊断 <span class="hint">S&lt;45 或否决池 → 纪律卖出；其余保留并提示是否需向目标权重对齐</span></div>
-    <div class="rb-table-wrap"><table><thead><tr>
+    <div style="font-weight:700;margin-bottom:8px">持仓诊断 <span class="hint">S&lt;45 或否决池 → 纪律卖出；“待复核”为数据源限流/网络波动，已不纳入买卖，不会误操作</span></div>
+    ${errBanner}
+    <div class="rb-table-wrap" style="margin-top:10px"><table><thead><tr>
       <th>代码</th><th>名称</th><th>当前金额</th><th>总分</th><th>评级</th><th>信号</th><th>操作</th><th>原因/提示</th><th>目标金额</th>
     </tr></thead><tbody>${hRows}</tbody></table></div>
   </div>`;
@@ -1227,6 +1249,65 @@ function downloadOrders(){
   const csv=rows.map(r=>r.map(x=>`"${String(x??'').replace(/"/g,'""')}"`).join(',')).join('\n');
   const blob=new Blob(["\uFEFF"+csv],{type:'text/csv'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(blob); a.download='rebalance_orders.csv'; a.click();
+}
+async function retryRebalanceSingle(code){
+  code=String(code||'').trim().padStart(6,'0');
+  if(!code) return;
+  setStatus('rb-dot','rb-st','busy',`正在重试 ${code} …`);
+  try{
+    const j=await (await fetch('/api/fund/'+code,{method:'POST'})).json();
+    if(!j.ok){ setStatus('rb-dot','rb-st','err', `${code} 重试失败：${j.message||'未知'}`); alert(`${code} 重试失败：${j.message||'未知错误'}\n建议：稍后分批重试或减少并发`); return; }
+    const f=j.fund;
+    // 合并到当前持仓结果中，更新对应行
+    const last=window._lastRebalance;
+    if(!last) return;
+    const idx=(last.holdings||[]).findIndex(h=>h.code===code);
+    if(idx>=0){
+      // 用单基透视的 S_total 等更新原持仓
+      const amt=last.holdings[idx].amount;
+      // 重新计算 action（复用后端逻辑简化版：S<45卖，否则持有）
+      const S=f.S_total;
+      const isVeto=(f.penalties||[]).some(p=>p[1]>=0.999) || /-100%/.test(f.penalty_str||'');
+      let action='hold', label='持有', reason='';
+      if(isVeto){ action='sell'; label='纪律卖出·否决池'; reason=f.penalty_str||'否决池'; }
+      else if(S!=null && S < 45){ action='sell'; label=`纪律卖出·S<45`; reason=`S=${S} 低于卖出线 45`; }
+      else if(S!=null && S >=70){ label='持有·强'; reason=`S=${S}≥70，保留至目标权重`; }
+      else if(S!=null && S >=50){ label='持有·观望'; reason=`S=${S} 在持有带 [45,70]，保留`; }
+      else reason=`S=${S} 未触发卖出，保留`;
+      last.holdings[idx]={...last.holdings[idx],
+        name:f.name||last.holdings[idx].name, ftype:f.ftype, S_total:S, rating:f.rating,
+        F_value:f.F_value, F_alpha:f.F_alpha, F_momentum:f.F_momentum, val_pct:f.val_pct,
+        ir_winrate:f.ir_winrate, penalty_str:f.penalty_str||'', penalties:f.penalties||[],
+        penalty_detail:f.penalty_detail||{}, rbsa:f.rbsa||{}, is_passive:f.is_passive,
+        scale:f.scale, tenure_days:f.tenure_days, last_date:f.last_date,
+        error:null, is_error:false, is_veto:isVeto, action, action_label:label, action_reason:reason,
+        target_amount: action==='sell'?0: amt, sell_amount: action==='sell'?amt:undefined
+      };
+      // 粗略重算汇总（不重新跑买入候选，仅刷新该持仓行）
+      setStatus('rb-dot','rb-st','ok',`${code} 重试成功 S=${S}`);
+      renderRebalance(last);
+    }
+  }catch(e){
+    setStatus('rb-dot','rb-st','err', `${code} 重试异常：`+(e.message||'网络错误'));
+  }
+}
+async function retryFailedHoldings(){
+  const last=window._lastRebalance;
+  if(!last) return;
+  const fails=(last.holdings||[]).filter(h=>h.is_error).map(h=>h.code);
+  if(!fails.length){ alert('暂无失败项'); return; }
+  if(fails.length>5 && !confirm(`失败 ${fails.length} 只，一次重试全部可能再次触发限流。是否分2批重试？\n点“确定”分批（每次≤5只），点“取消”一次性重试全部`)){
+    // 一次性
+  } else if(fails.length>5){
+    // 分批：先重试前5
+    for(let i=0;i<Math.min(5,fails.length);i++) await retryRebalanceSingle(fails[i]);
+    alert(`已重试前5只，剩余 ${fails.length-5} 只请稍后再次点击重试`);
+    return;
+  }
+  for(const c of fails) {
+    await retryRebalanceSingle(c);
+    await new Promise(r=>setTimeout(r, 800));
+  }
 }
 
 /* ---------- 启动 ---------- */
