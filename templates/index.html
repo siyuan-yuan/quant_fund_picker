@@ -516,7 +516,7 @@ async function runRebalance(){
     const r=await fetch('/api/rebalance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({total_capital:total||0,cash:cash||0,holdings})});
     const j=await r.json(); if(!j.ok){setStatus('rb-dot','rb-st','err',j.message); document.getElementById('rb-out').innerHTML=`<div class="empty" style="color:var(--danger)">${j.message}</div>`; return}
     setStatus('rb-dot','rb-st','ok','完成'); renderRebalance(j);
-  }catch(e){setStatus('rb-dot','rb-st','err','网络错误')}finally{document.getElementById('rb-btn').disabled=false}
+  }catch(e){const msg=e.name==='AbortError'?'请求超时（180秒），请减少至3只以内或稍后重试':(e.message||'网络错误'); setStatus('rb-dot','rb-st','err',msg); document.getElementById('rb-out').innerHTML=`<div class="empty" style="color:var(--danger);border-color:#fecdd3;background:var(--danger-soft)">请求失败：${msg}<br><span style="color:var(--muted)">单基可用说明服务正常；持仓批量对并发更敏感，建议分2批（每次≤3只）或稍后重试。已自动降并发至2线程。</span><br><button class="btn btn-ghost" style="margin-top:8px;padding:6px 12px;font-size:12px" onclick="runRebalance()">重试</button></div>`}finally{document.getElementById('rb-btn').disabled=false}
 }
 function renderRebalance(j){
   const s=j.summary||{}, holdings=j.holdings||[], orders=j.orders||[], alloc=j.allocation||[];
@@ -527,6 +527,7 @@ function renderRebalance(j){
     <div class="kpi"><label>操作</label><b>${s.num_sells? s.num_sells+' 卖出':'—'}</b><small>保留 ${s.num_keeps||0}</small></div>
     <div class="kpi"><label>现金余额</label><b>${fmtYuan(s.cash_after)}</b><small>${s.cash_pct_after||0}%</small></div>
   </div>`;
+  const nErr=holdings.filter(h=>h.is_error).length;
   const nRetry=holdings.filter(h=>h.is_error && h.retryable!==false).length;
   const errBanner=nErr? `<div style="margin-top:12px;padding:10px 12px;border:1px solid #fde68a;background:#fffbeb;border-radius:8px;font:12px var(--mono);display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span>${nErr} 只待复核${nRetry? ` · ${nRetry} 只可重试`:``}</span>${nRetry? `<button class="btn btn-ghost" style="padding:4px 10px;font-size:12px" onclick="retryFailedHoldings()">重试可重试项</button>`:``}<span style="color:var(--faint)">新基历史不足无需重试</span></div>`:'';
   const hRows=holdings.map(h=>{
