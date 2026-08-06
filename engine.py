@@ -45,7 +45,14 @@ def score_fund(code: str, as_of: str = None, bt: bool = False, indices=None,
     if as_of is not None:
         as_of_ts = pd.Timestamp(as_of)
         nav = nav[nav["date"] <= as_of_ts]
-    dossier = {} if bt else provider.get_fund_dossier(code)
+    # 档案拉取失败不阻断评分：降级为空档案，后续因子与风控按缺失处理
+    if bt:
+        dossier = {}
+    else:
+        try:
+            dossier = provider.get_fund_dossier(code)
+        except Exception as e:
+            dossier = {"code": code, "name": code, "scale_hist": [], "asset_alloc": {}, "managers": [], "_err": str(e)[:80]}
     if bt:
         # pit_meta 是严格回测的唯一元数据来源；缺失时保留旧兼容路径，调用方须披露。
         if pit_meta is not None:
@@ -59,6 +66,12 @@ def score_fund(code: str, as_of: str = None, bt: bool = False, indices=None,
             ftype = provider.fund_type(code)
     else:
         name = dossier.get("name", code)
+        # 档案降级为空时（_stale），尝试从全市场名录补全名称
+        if not name or name == code:
+            try:
+                name = str(provider.get_fund_meta().loc[code, "基金简称"])
+            except Exception:
+                name = dossier.get("name", code)
         ftype = provider.fund_type(code)
     nav = nav.set_index("date")
     ret = nav["ret"]
@@ -69,7 +82,11 @@ def score_fund(code: str, as_of: str = None, bt: bool = False, indices=None,
 
     min_days = 800 if bt else 200        # 回测要求≥3年alpha窗口+缓冲
     if len(nav) < min_days:
-        out["error"] = f"净值历史不足({len(nav)}d)"
+        # 新基友好提示：区分成立不足200天的新基与异常短历史
+        if len(nav) < 200:
+            out["error"] = f"成立仅{len(nav)}天，历史不足200天暂无法按V3完整评分（需≥200日）；建议作为观察仓≤5%或等满200日后再评"
+        else:
+            out["error"] = f"净值历史不足({len(nav)}d)"
         return out
     # 历史快照即使误收录了已停止披露的份额，也不能把很久以前的净值当作当日可交易价格。
     if bt and as_of is not None and nav.index[-1] < pd.Timestamp(as_of) - pd.Timedelta(days=7):
