@@ -121,7 +121,7 @@ def get_fund_nav(code: str) -> pd.DataFrame:
 
 # ---------------- 基金档案 (pingzhongdata) ----------------
 def get_fund_dossier(code: str) -> dict:
-    """规模变动史 / 股债现金仓位 / 现任经理任期 / 基金名称"""
+    """规模变动史 / 股债现金仓位 / 现任经理任期 / 基金名称 — 增加重试与降级容错，档案拉取失败不阻断评分"""
     key = f"dossier_{code}"
     if key in _memo:
         return _memo[key]
@@ -134,8 +134,29 @@ def get_fund_dossier(code: str) -> dict:
             d = None      # 缓存损坏或旧GBK编码(Windows) → 扔掉自动重爬
     if d is None:
         url = f"http://fund.eastmoney.com/pingzhongdata/{code}.js"
-        r = requests.get(url, headers={"Referer": "http://fund.eastmoney.com/"}, timeout=20)
-        r.encoding = "utf-8"
+        # 带重试的档案拉取：东财 pingzhongdata 偶发 RemoteDisconnected，退避重试3次
+        def _fetch():
+            r = requests.get(url, headers={"Referer": "http://fund.eastmoney.com/"}, timeout=20)
+            r.encoding = "utf-8"
+            if r.status_code != 200 or not r.text or "fS_name" not in r.text:
+                raise RuntimeError(f"档案空响应 {r.status_code}")
+            return r
+        try:
+            r = _retry(_fetch, n=3, sleep=1.2)
+        except Exception as e:
+            # 降级：若本地有旧缓存（即使过期）则复用，避免单只档案失败拖垮整批
+            if os.path.exists(path):
+                try:
+                    d = json.load(open(path, encoding="utf-8"))
+                    _memo[key] = d
+                    STALE_SERVED.append((os.path.basename(path), d.get("name",""), f"档案回退旧缓存: {str(e)[:50]}"))
+                    return d
+                except Exception:
+                    pass
+            # 彻底失败则返回空档案，评分以降级模式继续（不抛异常）
+            d = {"code": code, "name": code, "scale_hist": [], "asset_alloc": {}, "managers": [], "_stale": True, "_err": str(e)[:80]}
+            _memo[key] = d
+            return d
         t = r.text
 
         def grab(var):
