@@ -14,7 +14,15 @@ from flask import Flask, jsonify, request, render_template
 import provider, rbsa, factors, risk
 from engine import score_fund, finalize, market_water, resolve_weights
 from scan_market import build_universe
-from config import RBSA_INDICES, OUTPUT_DIR
+from config import (
+    RBSA_INDICES, OUTPUT_DIR,
+    STRAT_VERSION, STRAT_BUY_TH, STRAT_SELL_TH, STRAT_SLOTS,
+    STRAT_CASH_YIELD, STRAT_REBALANCE, STRAT_TRAIL_STOP,
+    STRAT_CRISIS_MA, STRAT_CRISIS_VOL_WINDOW, STRAT_CRISIS_VOL_Q,
+    STRAT_CPPI, STRAT_CPPI_DD1, STRAT_CPPI_SLOTS1,
+    STRAT_CPPI_DD2, STRAT_CPPI_SLOTS2,
+    STRAT_CPPI_DD3, STRAT_CPPI_SLOTS3,
+)
 
 app = Flask(__name__)
 STATE = {"phase": "idle", "done": 0, "total": 0, "started": None,
@@ -81,6 +89,115 @@ def terrain():
                     "asof_expected": provider.expected_last_td(),
                     "stale": provider.stale_warnings(),
                     "reversal": provider.market_reversal_signal("sh000300")})
+
+
+# ---------------- V3.8 执行层策略状态 ----------------
+@app.get("/api/strategy_state")
+def strategy_state():
+    """返回 V3.8 组合执行层实时状态: 信号阈值 / 危机过滤 / CPPI / 买入决策"""
+    from math import sqrt
+
+    # ---- 信号 & 现金 & 微观风控 ----
+    signal = dict(
+        buy_th=STRAT_BUY_TH,
+        sell_th=STRAT_SELL_TH,
+        hold_band=[STRAT_SELL_TH, STRAT_BUY_TH],
+        slots=STRAT_SLOTS,
+    )
+    cash = dict(annual_yield=STRAT_CASH_YIELD)
+    micro_risk = dict(trail_stop=STRAT_TRAIL_STOP)
+
+    # ---- CPPI 规则 ----
+    cppi_rules = [
+        dict(drawdown_lte=STRAT_CPPI_DD1, max_slots=STRAT_CPPI_SLOTS1),
+        dict(drawdown_lte=STRAT_CPPI_DD2, max_slots=STRAT_CPPI_SLOTS2),
+        dict(drawdown_lte=STRAT_CPPI_DD3, max_slots=STRAT_CPPI_SLOTS3),
+    ]
+    cppi = dict(
+        enabled=STRAT_CPPI,
+        rules=cppi_rules,
+        requires_portfolio_equity=True,
+        note="网页版如果没有用户组合净值曲线，则只能展示规则，不能自动判断用户是否触发CPPI。",
+    )
+
+    # ---- 危机过滤计算 (沪深300) ----
+    crisis = dict(
+        enabled=True,
+        index="沪深300",
+        ma_window=STRAT_CRISIS_MA,
+        vol_window=STRAT_CRISIS_VOL_WINDOW,
+        vol_quantile=STRAT_CRISIS_VOL_Q,
+        hs300_close=None,
+        ma=None,
+        vol20=None,
+        vol_threshold=None,
+        active=False,
+        reason="",
+        data_insufficient=False,
+    )
+
+    try:
+        bench = provider.get_close_by_src("sina", "sh000300").dropna().sort_index()
+        if len(bench) < STRAT_CRISIS_MA + STRAT_CRISIS_VOL_WINDOW + 1:
+            crisis["data_insufficient"] = True
+            crisis["reason"] = f"沪深300数据不足({len(bench)}行)，无法计算MA{STRAT_CRISIS_MA}或Vol{STRAT_CRISIS_VOL_WINDOW}"
+        else:
+            ma_series = bench.rolling(STRAT_CRISIS_MA).mean()
+            ret = bench.pct_change()
+            vol20_series = ret.rolling(STRAT_CRISIS_VOL_WINDOW).std() * sqrt(252)
+            # 用截至当日的全部历史(非未来函数)计算分位数阈值
+            vol_threshold_series = vol20_series.expanding().quantile(STRAT_CRISIS_VOL_Q)
+
+            last_close = float(bench.iloc[-1])
+            last_ma = float(ma_series.iloc[-1])
+            last_vol20 = float(vol20_series.iloc[-1])
+            last_vol_th = float(vol_threshold_series.iloc[-1])
+
+            crisis["hs300_close"] = round(last_close, 2)
+            crisis["ma"] = round(last_ma, 2)
+            crisis["vol20"] = round(last_vol20, 4)
+            crisis["vol_threshold"] = round(last_vol_th, 4)
+
+            below_ma = last_close < last_ma
+            vol_extreme = last_vol20 > last_vol_th
+            crisis_active = below_ma and vol_extreme
+            crisis["active"] = crisis_active
+
+            parts = []
+            if below_ma:
+                parts.append(f"沪深300({last_close:.0f}) < MA{STRAT_CRISIS_MA}({last_ma:.0f})")
+            if vol_extreme:
+                parts.append(f"Vol20({last_vol20:.2%}) > 历史{int(STRAT_CRISIS_VOL_Q*100)}%分位({last_vol_th:.2%})")
+            crisis["reason"] = " 且 ".join(parts) if crisis_active else "不满足危机条件"
+    except Exception as e:
+        crisis["data_insufficient"] = True
+        crisis["reason"] = f"沪深300数据获取失败: {str(e)[:80]}"
+
+    # ---- 综合买入决策 ----
+    crisis_active = crisis["active"] or crisis["data_insufficient"]
+    new_buy_allowed = not crisis_active
+    # 危机模式: 0槽; 非危机: 满槽
+    max_slots_by_macro = 0 if crisis_active else STRAT_SLOTS
+    if crisis_active:
+        msg = "危机模式：禁止新开权益仓，仅允许持仓按S卖出或止损退出"
+    else:
+        msg = "当前非危机，可按S信号买入"
+
+    decision = dict(
+        new_buy_allowed=new_buy_allowed,
+        max_slots_by_macro=max_slots_by_macro,
+        message=msg,
+    )
+
+    return jsonify(clean(dict(
+        version=STRAT_VERSION,
+        signal=signal,
+        cash=cash,
+        micro_risk=micro_risk,
+        crisis=crisis,
+        cppi=cppi,
+        decision=decision,
+    )))
 
 
 # ---------------- 榜单读取 ----------------
@@ -254,10 +371,26 @@ def watchlist():
                          top=[dict(style=k, pct=round(float(v), 3))
                               for k, v in agg.head(6).items() if v > 0.01],
                          flags=flags)
-    return jsonify(dict(ok=True, portfolio=clean(portfolio), rows=clean(
-        df[[c for c in cols if c in df]].where(pd.notna(df), None).to_dict("records"))))
+    # V3.8: 组合交易纪律字段 — 展示规则但不假装判断CPPI触发
+    portfolio_discipline = clean(dict(
+        max_slots=STRAT_SLOTS,
+        buy_threshold=STRAT_BUY_TH,
+        sell_threshold=STRAT_SELL_TH,
+        crisis_active=None,       # 需要实时计算，前端自行从 /api/strategy_state 获取
+        new_buy_allowed=None,
+        cppi_rules=[
+            dict(drawdown_lte=STRAT_CPPI_DD1, max_slots=STRAT_CPPI_SLOTS1),
+            dict(drawdown_lte=STRAT_CPPI_DD2, max_slots=STRAT_CPPI_SLOTS2),
+            dict(drawdown_lte=STRAT_CPPI_DD3, max_slots=STRAT_CPPI_SLOTS3),
+        ],
+        note="CPPI需要用户组合净值/HWM，当前网页仅展示规则，不自动判断个人账户是否触发。",
+    ))
+
+    return jsonify(dict(ok=True, portfolio=clean(portfolio),
+                        portfolio_discipline=portfolio_discipline,
+                        rows=clean(df[[c for c in cols if c in df]].where(pd.notna(df), None).to_dict("records"))))
 
 
 if __name__ == "__main__":
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    app.run(host="127.0.0.1", port=8000, debug=False, threaded=True)
+    app.run(host="0.0.0.0", port=8000, debug=False, threaded=True)
