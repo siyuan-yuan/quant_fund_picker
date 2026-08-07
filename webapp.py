@@ -2,7 +2,7 @@
 """
 量化选基系统 V3.1 — Web 控制台
 手动触发爬取→计算→出榜, 本地运行
-启动: python webapp.py  然后浏览器打开 http://127.0.0.1:8000
+启动: python webapp.py  (默认运行于 0.0.0.0:8000，生产级 WSGI 服务)
 """
 import os, glob, json, time, re, threading, datetime as dt
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -274,39 +274,11 @@ def status():
     return jsonify(STATE)
 
 
-# ---------------- 手动触发: 单基透视(以最近扫描池为动量参照系) ----------------
+# ---------------- 手动触发: 单基透视(以全市场动量作为参照系) ----------------
 def _final_single(r: dict) -> dict:
-    """给单基金补上截面动量排名 → F_momentum → S_total → 评级"""
-    f = _latest_scan()
-    rk4 = rk7 = None
-    if f and r.get("mom_4m1m") is not None:
-        df = pd.read_csv(f, dtype={"code": str})
-        p4 = pd.to_numeric(df.get("mom_4m1m"), errors="coerce").dropna()
-        p7 = pd.to_numeric(df.get("mom_7m1m"), errors="coerce").dropna()
-        if len(p4) > 10:
-            rk4 = float((p4 <= r["mom_4m1m"]).mean())
-            rk7 = float((p7 <= r["mom_7m1m"]).mean())
-    fm = factors.momentum_score_smooth_m1(rk4, rk7) if rk4 is not None else None
-    water = market_water(None)
-    (wv, wa, wm), mode = resolve_weights(water)
-    num, den = 0.0, 0.0
-    if r.get("F_value") is not None:
-        num += wv * min(r["F_value"], 100); den += wv
-    if r.get("F_alpha") is not None:
-        num += wa * r["F_alpha"]; den += wa
-    if fm is not None:
-        num += wm * fm; den += wm
-    st = risk.apply_penalties(num / den if den > 1e-9 else 0.0, r.get("penalties") or [])
-    r["water"] = None if water != water else round(water, 4)
-    r["weights_mode"] = mode
-    band = next((lab for th, lab in
-                 [(85, "Strong Buy 绿灯"), (70, "Buy 浅绿"),
-                  (50, "Hold 黄灯"), (0, "Sell/Avoid 红灯")] if st >= th),
-                "Sell/Avoid 红灯")
-    r.update(rank4=rk4, rank7=rk7,
-             F_momentum=None if fm is None else round(fm, 1),
-             S_total=round(st, 1), rating=band)
-    return r
+    """给单基金补上截面动量排名 → F_momentum → S_total → 评级 (统一采用 engine.finalize 全域标尺)"""
+    df = finalize([r], use_global_ref=True)
+    return df.iloc[0].to_dict()
 
 
 @app.post("/api/fund/<code>")
@@ -340,7 +312,7 @@ def watchlist():
         futs = [ex.submit(_one, c) for c in codes]
         for fut in as_completed(futs):
             rows.append(fut.result())
-    df = finalize(rows)
+    df = finalize(rows, use_global_ref=True)
     # V3.6+: 与单基金透视同源的全量字段(摘要表+展开透视复用)
     cols = ["code", "name", "ftype", "S_total", "rating", "F_value", "val_pct",
             "val_coverage", "valuation_blind", "trend_ok", "bonus",
@@ -551,10 +523,10 @@ def rebalance():
         futs = {ex.submit(_one, c): c for c in uniq_codes}
         for fut in as_completed(futs):
             rows.append(fut.result())
-    # 用 finalize 得到 S_total（批内动量排名；与 watchlist 同口径）
+    # 统一全局评分口径：采用 use_global_ref=True 确保与单基透视、自选池完全统一
     # 保留 error 行也进入 finalize，但单独处理
     try:
-        df = finalize(rows)
+        df = finalize(rows, use_global_ref=True)
     except Exception as e:
         # finalize 异常时回退为原 rows
         df = pd.DataFrame(rows)
@@ -571,20 +543,6 @@ def rebalance():
         c = str(r.get("code")).zfill(6)
         if c not in row_by_code:
             row_by_code[c] = r
-    # —— 统一口径：若有全市场扫描，则用扫描池的动量分布重算 S_total，确保与单基透视一致（批内排名会虚高） ——
-    scan_df = None
-    scan_p4 = scan_p7 = None
-    try:
-        sf = _latest_scan()
-        if sf and os.path.exists(sf):
-            scan_df = pd.read_csv(sf, dtype={"code": str})
-            scan_p4 = pd.to_numeric(scan_df.get("mom_4m1m"), errors="coerce").dropna()
-            scan_p7 = pd.to_numeric(scan_df.get("mom_7m1m"), errors="coerce").dropna()
-            # 扫描过小则回退批内排名
-            if len(scan_p4) < 30 or len(scan_p7) < 30:
-                scan_df = None
-    except Exception:
-        scan_df = None
 
     # 计算组合级 RBSA
     rb_list = [r["rbsa"] for r in rows if isinstance(r.get("rbsa"), dict) and r["rbsa"]]
@@ -622,61 +580,8 @@ def rebalance():
                 err_msg = "数据源繁忙（天天基金限流/远端断开），请稍后重试或分批重试（建议≤5只/次）"
             # 新基历史不足不提供重试（重试也不会成功）
             is_retryable = not any(k in err_msg for k in ["成立仅", "历史不足", "200天", "观察仓"])
-        # 统一字段
-        # 若有扫描池，用扫描池重算 F_momentum 与 S_total（与单基透视同口径），否则沿用批内排名的 finalize 结果
-        s_total_raw = rec.get("S_total")
-        # 尝试扫描重算
-        recomputed = False
-        if not is_err and scan_df is not None and rec.get("mom_4m1m") is not None and rec.get("mom_7m1m") is not None:
-            try:
-                rk4 = float((scan_p4 <= rec["mom_4m1m"]).mean()) if len(scan_p4) else None
-                rk7 = float((scan_p7 <= rec["mom_7m1m"]).mean()) if len(scan_p7) else None
-                fm_scan = factors.momentum_score_smooth_m1(rk4, rk7) if rk4 is not None else None
-                if fm_scan is not None:
-                    water = market_water(None)
-                    (wv, wa, wm), mode = resolve_weights(water)
-                    num2, den2 = 0.0, 0.0
-                    fv = rec.get("F_value")
-                    if fv is not None and not (isinstance(fv, float) and pd.isna(fv)) and not (isinstance(fv, float) and not __import__('numpy').isfinite(fv)):
-                        try:
-                            fv_f=float(fv)
-                            if __import__('numpy').isfinite(fv_f):
-                                num2 += wv * min(fv_f, 100); den2 += wv
-                        except: pass
-                    fa = rec.get("F_alpha")
-                    if fa is not None and not (isinstance(fa, float) and pd.isna(fa)):
-                        try:
-                            fa_f=float(fa)
-                            if __import__('numpy').isfinite(fa_f):
-                                num2 += wa * fa_f; den2 += wa
-                        except: pass
-                    num2 += wm * fm_scan; den2 += wm
-                    st_scan = risk.apply_penalties(num2 / den2 if den2 > 1e-9 else 0.0, rec.get("penalties") or [])
-                    # DEBUG
-                    #
-                    # 用扫描重算的结果覆盖
-                    rec["F_momentum"] = round(fm_scan, 1)
-                    rec["rank4"] = rk4; rec["rank7"] = rk7
-                    rec["S_total"] = round(st_scan, 1)
-                    # 评级也同步（与 finalize 同逻辑，含新星/任期帽）
-                    from config import YOUNG_MAX_DAYS, TENURE_CAP_DAYS
-                    nd = rec.get("n_days"); td = rec.get("tenure_days")
-                    def _rate(s):
-                        from config import RATING_BANDS
-                        for th, lab in RATING_BANDS:
-                            if s >= th: return lab
-                        return RATING_BANDS[-1][1]
-                    if isinstance(nd, (int,float)) and nd==nd and nd < YOUNG_MAX_DAYS and st_scan >=50:
-                        rec["rating"] = "🌱观察仓"
-                    elif td and st_scan >=85 and td < TENURE_CAP_DAYS:
-                        rec["rating"] = "Buy 浅绿(任期<2年封顶)"
-                    else:
-                        rec["rating"] = _rate(st_scan)
-                    s_total_raw = rec["S_total"]
-                    recomputed = True
-            except Exception:
-                pass
-        s_total = s_total_raw
+        # 统一全局字段：直接采用 use_global_ref 统一打分的 finalize 结果，无需冗余重算
+        s_total = rec.get("S_total")
         try:
             if s_total is None or (isinstance(s_total, float) and pd.isna(s_total)):
                 s_val = None
@@ -996,4 +901,15 @@ def rebalance():
 
 if __name__ == "__main__":
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    app.run(host="0.0.0.0", port=8000, debug=False, threaded=True)
+    print("============================================================", flush=True)
+    print(" 量化选基系统 V3.8 — 生产级 WSGI 引擎启动 (Production WSGI Server)", flush=True)
+    print("============================================================", flush=True)
+    print(" * Running on all addresses (0.0.0.0:8000)", flush=True)
+    print("============================================================", flush=True)
+    try:
+        from waitress import serve
+        serve(app, host="0.0.0.0", port=8000, threads=8)
+    except ImportError:
+        from wsgiref.simple_server import make_server
+        server = make_server("0.0.0.0", 8000, app)
+        server.serve_forever()
