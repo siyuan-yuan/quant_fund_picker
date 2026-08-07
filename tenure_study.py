@@ -13,7 +13,7 @@ provider.STALE_OK = True
 from backtest import forward_returns
 
 TODAY = pd.Timestamp("2026-08-03")
-DATES = [str(d.date()) for d in pd.date_range("2019-03-31", "2025-12-31", freq="Q")]
+DATES = [str(d.date()) for d in pd.date_range("2006-03-31", "2026-03-31", freq="QE")]
 
 
 def tenure_now(code):

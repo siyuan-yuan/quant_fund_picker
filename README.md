@@ -2,6 +2,8 @@
 
 基于《量化选基系统核心打分模型_V3》的可执行实现，附 Web 控制台。
 
+> ⚠️ 仅供量化研究，不构成投资建议。
+
 ## 快速开始
 
 ```bash
@@ -10,7 +12,7 @@ cd quant_fund_picker
 python webapp.py
 ```
 
-浏览器打开 **http://127.0.0.1:8000**
+浏览器打开 **http://127.0.0.1:8000**。
 
 | 功能 | 操作 |
 |---|---|
@@ -25,10 +27,42 @@ python webapp.py
 
 ## 模型公式
 
+**V4（2026-08-07 起默认）— Huber 稳健回归 + V3.7 混合**
+
+冠军模型来自 `model_lab.py`～`model_lab6.py` 的 200+ 模型对决：
+* 7 个经济学正交特征：`value_z`(便宜)、`mom_pure`(4M/7M动量)、`quality`(IR胜率+低下行捕获)、`safety`(低回撤)、`macro_state`(水位)、`trend_t`(MA20趋势门)、`val×mom`(便宜×强势)
+* Huber 稳健损失 (ε=1.35, α=0.01)，对妖基/爆雷厚尾稳健
+* 训练样本权重按 2 年半衰期指数衰减（应对 A 股 regime 漂移）
+* 每季度 walk-forward 重训，模型固化到 `cache/v4_model.pkl`
+* 严格样本外验证：WF IC **0.198 vs V3.7 0.116 (+71%)**，strict hold-out IC **0.171 vs 0.093 (+85%)**
+* **默认采用 0.5·S_V4 + 0.5·S_V3.7 混合** (`config.W_V4=0.5`)：V4 IC 最高但在高水位有追涨倾向，V3.7 的估值悬崖是风险安全垫。实测 2019-03→2025-12 全样本：
+
+| 模型 | 总收益 | CAGR | MaxDD | Calmar | 交易笔数 | 胜率 |
+|---|---:|---:|---:|---:|---:|---:|
+| V3.7 单跑 | +64.3% | +7.63% | -20.1% | 0.38 | 34 | 56% |
+| **V4+V3.7 混合** | **+87.0%** | **+9.71%** | **-21.9%** | **0.44** | **61** | **61%** |
+
+（同期沪深300 +16.5%）
+
+V3.7 线性合成保留为 `S_v37` 字段供 A/B 对比；若 sklearn 缺失或模型加载失败，引擎自动回退到 V3.7。
+`config.USE_V4_MODEL=False` 可一键回滚到纯 V3.7；`config.W_V4=1.0` 可切到纯 V4。
+
+### V4.1 全域一致性修正（2026-08-07）
+
+修复"单基透视 / 批量评分 / 持仓诊断三入口同基不同分"事故：
+
+* **病灶**：V4 的 rank 输入（wr/dc/r4/r7）与 `S_v4` 的 0~100 映射此前都在**本次提交批次内** `rank(pct=True)` —— 批次就是参照系：单基透视时 `S_v4` 恒=100（模型预测值被丢弃），换一批陪跑基金得分剧烈漂移；估值盲区基金（QDII 等）单基测算时因批内中位数为 NaN 直接抛异常（接口 400）。
+* **参照宇宙快照化**：全市场扫描把 `S_v4_raw`（V4 原始 z 值）等全量因子分布落盘；三个小样本入口统一以最新快照为唯一参照尺做 **ECDF 映射**（V3.7 动量腿与 V4 全部 rank 输入、z 分位同源同尺，`engine.get_global_ref_universe` + `finalize(use_global_ref=True)`）。同一基金得分与批次大小/构成严格无关。
+* **一致性闸门**：快照缺失 V4 所需分布时（如新部署尚未扫描），小样本模式整体降级 V3.7 并以 `model_version` 标注，**绝不退回批内 rank**；动量参照缺失时动量腿关闭（按剩余因子归一化），而非批内排座次。
+* **数据缺失豁免**：档案拉取失败不再按"0 年任期"顶格罚 -30%，改为豁免并以 `data_incomplete` 打标披露（前端与诊断 warnings 可见）。
+* 每个入口响应携带 `ref_stamp`（参照快照版本）与 `model_version`，可即时核对三入口是否同尺。
+* 回归契约（离线）：`python test_finalize_consistency.py` —— V4 激活/闸门降级/纯 V3.7 三态 + 特征缺失行全部断言批次无关性。
+
+**V3.7 旧公式（作为 S_v37 保留）：**
 ```
 S_total = (0.40×min(F_value,100) + 0.35×F_alpha + 0.25×F_momentum) × Π(1−惩罚率)
-评级: 85+ StrongBuy | 70+ Buy | 50+ Hold | <50 Sell/Avoid
 ```
+评级: 85+ StrongBuy | 70+ Buy | 50+ Hold | <50 Sell/Avoid
 
 ## 结构
 
@@ -126,18 +160,47 @@ output/       scores/scan 结果 （csv/json）
 
 **复现**: `python strategy_bt.py`(策略模拟) / `python rbsa_ew_study.py`(EW变体) / 裁决证据链附 `output/strategy_bt_*.csv`
 
-## 本地自助回测 (2026-08-03) — `backtest_local.py`
+## V3.8 (2026-08-06) Calmar 优化执行层 — 最新默认模型
+
+最新执行层主候选已落地到 `config.py` 与 `backtest_local.py`，实验脚本为 `strategy_experiment.py`。
+
+**默认模型**: `fixedslot_qreb_trail20_y25_crisis_cppi_15_20_25`
+
+规则组合:
+1. **固定10槽战略仓**: S>70 买入、S<45 卖出；保留空槽，不强行用低质量信号填满权益仓位。
+2. **闲置现金收益**: 现金按年化 2.5% 货基/短债代理日度单利计提 (`STRAT_CASH_YIELD=0.025`)。
+3. **季度再平衡**: 季末把存量持仓拉回每只约10%目标权重，锁定暴涨仓利润。
+4. **单基金20%移动止损**: 自入场后高点回撤20%离场，作为微观经理/风格漂移保险。
+5. **危机禁买**: 沪深300 < MA200 且 20日实现波动率 > 历史80%分位时，禁止新开权益仓。
+6. **组合级CPPI风险预算**: 策略自身净值回撤≤-15%限6槽、≤-20%限3槽、≤-25%清仓；熔断后等待右侧买入信号且非危机状态，再重置HWM复活。
+
+实验证据（2006-09-30→2026-03-31，幸存者池上界）:
+- 原收益增强版：CAGR **8.56%** / MaxDD **-42.73%** / Calmar **0.20**
+- 最新 V3.8 主候选：CAGR **8.45%** / MaxDD **-26.07%** / Calmar **0.324**
+- 全局HWM、时间衰减HWM、部分重置HWM、主动危机降仓、阈值网格均已实验；未超过当前主候选。
+
+复现:
+```bash
+python strategy_experiment.py                 # 全部变体实验
+python backtest_local.py                      # 默认 V3.8 执行层
+python backtest_local.py --legacy             # 旧版纯S阈值回测
+```
+
+## 本地自助回测 (2026-08-06) — `backtest_local.py`
 
 ```bash
-python backtest_local.py                      # 默认: 2019Q1→最近完整季, 70买45卖, 10槽, 10万本金
+python backtest_local.py                      # 默认: V3.8执行层, 70买45卖, 10槽, 10万本金
+python backtest_local.py --legacy             # 旧版纯S阈值回测
 python backtest_local.py --sell 50            # 改平仓线对比
+python backtest_local.py --no-cppi            # 关闭CPPI风险预算做消融
+python backtest_local.py --no-crisis          # 关闭MA200&Vol80危机禁买做消融
 python backtest_local.py --capital 200000 --slots 8
 python backtest_local.py --codes mypool.txt   # 自定义池(每行一个6位代码)
 python backtest_local.py --rebuild            # 换模型参数后强制重打分
 ```
 - **全自动续期**: 新季度首次自动 PiT 打分(~20s)并永久缓存 `output/bt_scores_cache/`, 二次秒跑
-- **三本账**: `bt_trades_<tag>.csv`(逐笔买卖: 价/分/持有天数/净收益/年化/盈亏元) + `bt_daily_<tag>.csv`(逐日净值回撤) + `bt_summary_<tag>.md`(汇总报告) + `bt_equity_<tag>.png`(净值图 vs 沪深300)
-- 30 季实测 (2019Q1→2026Q2, 默认参数): **+126.2%**, CAGR +11.9%, 24笔胜率79%, 盈亏比6.17, 最大回撤-19.7% (同期沪深300 +25.3%, -45.6%)
+- **三本账**: `bt_trades_<tag>.csv`(逐笔买卖: 价/分/持有天数/净收益/年化/盈亏元) + `bt_daily_<tag>.csv`(逐日净值/回撤/现金/CPPI状态) + `bt_summary_<tag>.md`(汇总报告) + `bt_equity_<tag>.png`(净值图 vs 沪深300)
+- 默认输出 tag 前缀为 `v38_`; 旧版回测为 `legacy_`。
 
 ## V3.7.3 (2026-08-05) 数据新鲜度事故修复 — 榜单墙钟 vs 数据截至同框
 
@@ -152,3 +215,61 @@ python backtest_local.py --rebuild            # 换模型参数后强制重打�
 - `/api/terrain` 同样返回 asof + 降级账簿; 地形头部日期随真实内容走, 陈旧红点
 - 境外指数(us/hk)保鲜期望日 -1 交易日(lag), 避免误抓
 - 每文件每日至多同步一次 (`_FETCHED_TODAY`), 防节假日空转锤源
+
+
+## V3.7.4 严格历史动态池复盘 (Point-in-Time)
+
+实现真正的 Point-in-Time 动态候选池：**每个决策日只允许买入当日 S 分排名 TopN 的基金**；持仓卖出与季度再平衡仍使用完整当日评分面板。
+
+```bash
+python backtest_local.py \
+  --pool-mode pit-top \
+  --pit-top-n 100 \
+  --start 2006-09-30 \
+  --end 2026-03-31 \
+  --score-suffix *2e4ec0f5
+```
+
+> **注意**：
+> 不要用 `--codes top100_history_pool.txt` 来宣称严格历史复盘；
+> 它是历史并集池，会提前暴露未来入榜基金。
+> 严格历史复盘请用 `--pool-mode pit-top`（无需传入静态 `--codes`，自动从 `output/bt_scores_cache/` 历史缓存面板中选出每个决策日当日的 TopN 可买池）。
+
+- **全自动续期**: 新季度首次自动 PiT 打分(~20s)并永久缓存 `output/bt_scores_cache/`, 二次秒跑
+- **三本账**: `bt_trades_<tag>.csv`(逐笔买卖: 价/分/持有天数/净收益/年化/盈亏元) + `bt_daily_<tag>.csv`(逐日净值/回撤/现金/CPPI状态) + `bt_summary_<tag>.md`(汇总报告) + `bt_equity_<tag>.png`(净值图 vs 沪深300)
+- 默认输出 tag 前缀为 `v38_`; 旧版回测为 `legacy_`。
+
+
+## V4.0 Huber 稳健回归版 (2026-08-07) — 当前默认
+
+> 详见 `output/model_lab/VERDICT.md` 与 `model_v4.py`
+
+### 为什么换模型？
+站在投行 QC 视角审视 V3.7，发现三个工程问题：
+1. 因子权重 0.40/0.35/0.25 是手摆的，从未用数据估计；
+2. `val_pct>0.70→0`、`wr<0.50→0` 这些 cliff 在样本外脆弱；
+3. 缺少 Value×Momentum 交互项（A 股实证最强的"便宜+强势"甜蜜点）。
+
+在 28 季 × 217 基金 PiT 面板（n=6,067）上做了 6 个阶段、200+ 模型的严格 walk-forward 对决：
+
+| 模型 | WF IC | IC t | Strict OOS IC | Q10-Q1 多空 |
+|---|---:|---:|---:|---:|
+| **V4 Huber (7F, decay 2y)** | **+0.198** | **+2.91** | **+0.171** | **+6.96%** |
+| V3.7 现行引擎 | +0.116 | +2.40 | +0.093 | +1.58% |
+
+所有"更复杂"的模型（HistGBM / RandomForest / Stacking / Regime-conditional / IC-weighted）全部过拟合输给了线性模型——金融小样本上"正确归纳偏置 + 稳健损失"永远胜过硬核 ML。
+
+### V4 P&L 表现（V3.8 执行层，2021-03→2025-12）
+| 模型 | 总收益 | CAGR | MaxDD | Calmar | 交易笔数 | 胜率 |
+|---|---:|---:|---:|---:|---:|---:|
+| V3.7 引擎 | +11.21% | +2.26% | -16.17% | 0.14 | 35 | 49% |
+| V4 Huber | +11.16% | +2.25% | -22.45% | 0.10 | 59 | 42% |
+
+P&L 打平，但 V4 的多空价差扩大 4 倍——IC 优势在等权 10 槽系统被交易摩擦吃掉，在集中持仓/多空组合中才会兑现。V4 的换手更高（140 天 vs 373 天平均持有），需用执行层的止损/再平衡节流。
+
+### 文件
+- `model_v4.py`：V4 模型生产实现（train / predict / load）
+- `model_lab.py`～`model_lab6.py`：6 阶段实验代码，可复现
+- `backtest_v4.py`：V4 打分 + V3.8 执行层 A/B 回测
+- `cache/v4_model.pkl`：训练好的 V4 模型（截至 2025-12-31，n=6,067）
+- `output/model_lab/`：全部实验 CSV 与裁决书

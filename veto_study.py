@@ -17,7 +17,7 @@ from backtest import build_pool, forward_returns
 
 OUT = "output/veto_rows"
 os.makedirs(OUT, exist_ok=True)
-DATES = [str(d.date()) for d in pd.date_range("2019-03-31", "2025-12-31", freq="Q")]
+DATES = [str(d.date()) for d in pd.date_range("2006-03-31", "2026-03-31", freq="QE")]
 
 
 def main():
