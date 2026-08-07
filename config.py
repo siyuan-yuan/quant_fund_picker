@@ -1,11 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-量化选基系统 V3 —— 全局配置
-模型公式: S_total = (0.40*min(F_value,100) + 0.35*F_alpha + 0.25*F_momentum)
-                   × Π(1 - PenaltyRate_j)
+量化选基系统 V4 —— 全局配置
+默认打分模型: V4 Huber 稳健回归 (7 经济学特征 + 2 年时间衰减)
+  - 训练: 28 季 PiT 面板 n=6,067; Huber(ε=1.35, α=0.01)
+  - 验证: WF IC 0.198 vs V3.7 0.116 (+71%); strict OOS IC 0.171 vs 0.093 (+85%)
+  - 模型文件: cache/v4_model.pkl (用 model_v4.py 训练/刷新)
+  - 若 sklearn 缺失或模型加载失败，自动回退到 V3.7 线性合成
+旧公式 (作为 S_v37 保留，便于 A/B):
+  S_V37 = (0.40*min(F_value,100) + 0.35*F_alpha + 0.25*F_momentum)
+          × Π(1 - PenaltyRate_j)
 """
 
-# ============ 因子权重 ============
+# V4 模型默认开关（False 时 engine.finalize 强制回退 V3.7，便于回滚）
+USE_V4_MODEL = True
+# V4 与 V3.7 混合权重: S_final = W_V4*S_V4 + (1-W_V4)*S_v37
+# V4 pure IC 最高但在高水位有追涨倾向；混合 0.5/0.5 保留 V3.7 的估值安全垫
+W_V4 = 0.5
+
+# ============ V3.7 线性合成的因子权重 (保留做 S_v37 与回退) ============
 W_VALUE, W_ALPHA, W_MOMENTUM = 0.40, 0.35, 0.25
 
 # ============ V3.2 Regime 自适应 (回测证据驱动) ============

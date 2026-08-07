@@ -85,11 +85,16 @@ def mdd_factor(rm, w):
 
 
 def score_from_raw(g):
-    """原料行 → V3.7.2 分 (fv旧 + alpha平滑 + mom M1 × 惩罚链), 与引擎同源"""
+    """原料行 → 当前默认模型分 (V4 Huber if enabled, else V3.7 同引擎口径)。
+
+    保持与 engine.finalize 同口径，保证线上/回测/榜单一致。优先使用 V4，
+    若 config.USE_V4_MODEL=False / sklearn 缺失 / 模型加载失败，则回退到 V3.7。
+    同时保留 S_v37 列供 A/B 对比。
+    """
     g = g.copy()
     g["rank4"] = g["r4"].rank(pct=True)
     g["rank7"] = g["r7"].rank(pct=True)
-    out = []
+    v37 = []
     for _, r in g.iterrows():
         fv = (np.nan if (r.val_cov < 0.5 or pd.isna(r.val_pct))
               else factors.valuation_base_score(r.val_pct, r.trend_ok))
@@ -103,8 +108,52 @@ def score_from_raw(g):
             + (r.wa * fa if pd.notna(fa) else 0) + (r.wm * fm if pd.notna(fm) else 0)
         den = (r.wv if pd.notna(fv) else 0) + (r.wa if pd.notna(fa) else 0) \
             + (r.wm if pd.notna(fm) else 0)
-        out.append(min(max((num / den if den else 0) * pen, 0), 100))
-    g["S"] = out
+        v37.append(min(max((num / den if den else 0) * pen, 0), 100))
+    g["S_v37"] = v37
+
+    use_v4 = False
+    w_v4 = 0.5
+    try:
+        from config import USE_V4_MODEL, W_V4
+        use_v4 = bool(USE_V4_MODEL)
+        w_v4 = float(W_V4) if W_V4 is not None else 0.5
+    except Exception:
+        use_v4 = True
+
+    if use_v4:
+        try:
+            import model_v4
+            bundle = model_v4.load_model()
+            if bundle is not None and "ma20_dist" in g.columns:
+                wr_rk = g["wr"].rank(pct=True)
+                dc_rk = g["dc"].rank(pct=True)
+                r4_rk = g["r4"].rank(pct=True)
+                r7_rk = g["r7"].rank(pct=True)
+                rmdd = np.zeros(len(g))
+                r_mdd = g["R_MDD"]
+                m = r_mdd.notna() & (r_mdd > 1.2)
+                rmdd[m] = np.minimum(0.5 * (r_mdd[m] - 1.2), 1.0)
+                if (g["water"] <= 0.35).any():
+                    rmdd[m & (g["water"].values <= 0.35)] *= 0.5
+                trend_t = np.clip((g["ma20_dist"].fillna(0) + 0.02) / 0.06, 0, 1)
+                val_pct = g["val_pct"].astype(float).fillna(g["val_pct"].median())
+                w_arr = np.full(len(g), g["water"].iloc[0] if pd.notna(g["water"].iloc[0]) else 0.43)
+                X = model_v4.build_features(
+                    val_pct.values, r4_rk.values, r7_rk.values, wr_rk.values,
+                    dc_rk.values, rmdd, w_arr, trend_t.values)
+                mdl = bundle["model"]
+                z = mdl.named_steps["hub"].predict(mdl.named_steps["sc"].transform(X))
+                # V4 不乘 R_MDD 惩罚（已在模型内），但保留 other_pen (集中度/规模等)
+                s4 = (pd.Series(z).rank(pct=True) * 100).values * g["other_pen"].values
+                s4 = np.clip(s4, 0, 100)
+                g["S_v4"] = s4
+                g["S"] = np.round(w_v4 * s4 + (1 - w_v4) * g["S_v37"].values, 1)
+                g["model_version"] = f"{bundle.get('version','V4')}+V3.7×{1-w_v4:.1f}"
+                return g
+        except Exception as e:
+            print(f"  [score] V4 重算失败回退 V3.7: {e}")
+    g["S"] = g["S_v37"]
+    g["model_version"] = "V3.7"
     return g
 
 
@@ -132,8 +181,14 @@ def harvest_date(d, codes):
                 op *= (1 - p)
         recs.append(dict(code=h.code, water=h.water, wv=h.w_value, wa=h.w_alpha,
             wm=h.w_mom, val_pct=h.val_pct, val_cov=h.val_coverage,
-            trend_ok=bool(h.trend_ok), wr=h.ir_winrate, dc=h.down_capture,
-            r4=h.mom_4m1m, r7=h.mom_7m1m, R_MDD=pdt.get("R_MDD"), other_pen=op))
+            trend_ok=bool(h.trend_ok),
+            ma20_dist=getattr(h, "ma20_dist", None),
+            wr=h.ir_winrate, dc=h.down_capture,
+            r4=h.mom_4m1m, r7=h.mom_7m1m, R_MDD=pdt.get("R_MDD"),
+            other_pen=op,
+            S_engine=h.S_total, S_v4=getattr(h, "S_v4_penalized", np.nan),
+            S_v37=getattr(h, "S_v37", np.nan),
+            model_version=getattr(h, "model_version", "")))
     df = pd.DataFrame(recs)
     print(f"  [harvest] {d} 打分 {len(df)} 只 ({time.time()-t0:.0f}s)", flush=True)
     return df

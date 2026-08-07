@@ -9,8 +9,22 @@ from config import (W_VALUE, W_ALPHA, W_MOMENTUM, RATING_BANDS,
                     REGIME_LOW_WATER, REGIME_HIGH_WATER,
                     W_VALUE_LOW, W_ALPHA_LOW, W_MOM_LOW,
                     RBSA_INDICES, OVERSEAS_NAMES, OVERSEAS_SRCS,
-                    OVERSEAS_SWITCH_THRESHOLD, TENURE_CAP_DAYS, YOUNG_MAX_DAYS)
+                    OVERSEAS_SWITCH_THRESHOLD, TENURE_CAP_DAYS, YOUNG_MAX_DAYS,
+                    USE_V4_MODEL, W_V4)
 import provider, rbsa, factors, risk
+
+# V4 Huber 模型（可选依赖：未训练或未装 sklearn 时优雅降级到 V3.7）
+model_v4 = None
+_V4_BUNDLE = None
+try:
+    if USE_V4_MODEL:
+        import model_v4 as _mv4
+        _V4_BUNDLE = _mv4.load_model()
+        if _V4_BUNDLE is not None:
+            model_v4 = _mv4
+except Exception as _e:
+    import sys
+    print(f"[engine] V4 模型加载失败，回退 V3.7: {_e}", file=sys.stderr)
 
 
 def is_overseas_fund(code: str, name: str, ftype: str = None) -> bool:
@@ -257,7 +271,63 @@ def finalize(rows: list, as_of: str = None, use_global_ref: bool = False) -> pd.
         base = (num / den) if den > 1e-9 else 0.0
         return round(risk.apply_penalties(base, r["penalties"] or []), 1)
 
-    df["S_total"] = [total(r) for _, r in df.iterrows()]
+    df["S_v37"] = [total(r) for _, r in df.iterrows()]
+
+    # ---------- V4: Huber 稳健回归 + 截面 rank ----------
+    # 训练: 28季 PiT 面板, 7 经济学特征, 2 年衰减, Huber ε=1.35
+    # 验证: WF IC 0.198 vs V3.7 0.116 (+71%); strict OOS IC 0.171 vs 0.093 (+85%)
+    if model_v4 is not None and _V4_BUNDLE is not None:
+        bundle = _V4_BUNDLE
+        # 截面 rank 各原始量 (估值分位 val_pct 已是 5 年分位，不再 rank)
+        df["wr_rk"] = df["ir_winrate"].rank(pct=True)
+        df["dc_rk"] = df["down_capture"].rank(pct=True)
+        df["r4_rk"] = df["mom_4m1m"].rank(pct=True)
+        df["r7_rk"] = df["mom_7m1m"].rank(pct=True)
+        # V3.6 平滑回撤惩罚 (与训练时口径一致；底部区减半)
+        rmdd_pen = np.zeros(len(df))
+        pdt = df["penalty_detail"].apply(lambda d: d or {})
+        r_mdd = pdt.apply(lambda d: d.get("R_MDD"))
+        mask = r_mdd.notna() & (r_mdd > 1.2)
+        rmdd_pen[mask] = np.minimum(0.5 * (r_mdd[mask] - 1.2), 1.0)
+        if pd.notna(water):
+            if water <= 0.35:
+                rmdd_pen[mask] *= 0.5
+        # 趋势确认度 (与训练时同口径)
+        trend_t = np.clip((df["ma20_dist"].fillna(0) + 0.02) / 0.06, 0, 1)
+
+        # 估值盲区：V4 训练时 val_pct 是有效输入；盲区基金用截面中位数补
+        val_pct = df["val_pct"].astype(float).copy()
+        val_pct = val_pct.fillna(val_pct.median())
+
+        w_arr = np.full(len(df), water if water == water else 0.43)  # 截面均值兜底
+        X = model_v4.build_features(
+            val_pct.values, df["r4_rk"].values, df["r7_rk"].values,
+            df["wr_rk"].values, df["dc_rk"].values, rmdd_pen,
+            w_arr, trend_t.values)
+        m = bundle["model"]
+        z = m.named_steps["hub"].predict(m.named_steps["sc"].transform(X))
+        df["S_v4_raw"] = z
+        # 映射到 0~100 截面百分位
+        df["S_v4"] = (pd.Series(z).rank(pct=True) * 100).values
+        # V4 只乘非 R_MDD 惩罚 (任期归因/规模反噬/集中度)；R_MDD 已在模型内
+        non_rmdd_penalties = df["penalties"].apply(
+            lambda ps: [(n, p) for n, p in (ps or []) if "回撤比值" not in n])
+        df["S_v4_penalized"] = [
+            round(risk.apply_penalties(s, pl), 1) for s, pl in
+            zip(df["S_v4"], non_rmdd_penalties)
+        ]
+        # V4/V3.7 混合：V4 IC 高但在高水位偏激进，V3.7 的估值悬崖是安全垫
+        wv4 = float(W_V4) if W_V4 is not None else 0.5
+        df["S_total"] = (wv4 * df["S_v4_penalized"] +
+                         (1 - wv4) * df["S_v37"]).round(1)
+        df["model_version"] = f"{bundle.get('version', 'V4')}+V3.7×{1-wv4:.1f}"
+    else:
+        df["S_v4"] = np.nan
+        df["S_v4_penalized"] = np.nan
+        df["S_v4_raw"] = np.nan
+        df["S_total"] = df["S_v37"]
+        df["model_version"] = "V3.7"
+
     df["water"] = None if water != water else round(water, 4)
     df["weights_mode"] = mode
     df["w_value"], df["w_alpha"], df["w_mom"] = wv, wa, wm
