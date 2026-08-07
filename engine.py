@@ -178,9 +178,47 @@ def score_fund(code: str, as_of: str = None, bt: bool = False, indices=None,
     return out
 
 
-def finalize(rows: list, as_of: str = None) -> pd.DataFrame:
+def get_global_momentum_ref(as_of: str = None):
+    """
+    获取全局动量参照标尺 (Global Momentum Reference Universe)
+    为单基金透视、批量评分(如自选池/支付宝持仓)、持仓诊断提供同源唯一参考分布，
+    避免小样本被内部直接 rank(pct=True) 导致打分严重被排挤与产生前后背离。
+    返回: (ref_p4: pd.Series, ref_p7: pd.Series)
+    """
+    import glob, os
+    from config import OUTPUT_DIR
+    ref_p4 = ref_p7 = None
+    if as_of is None:
+        # 实时环境优先：近期生成的全市场扫描候选池
+        files = sorted(glob.glob(os.path.join(OUTPUT_DIR, "scan_*.csv")))
+        if files:
+            try:
+                df_ref = pd.read_csv(files[-1], dtype={"code": str})
+                p4 = pd.to_numeric(df_ref.get("mom_4m1m"), errors="coerce").dropna()
+                p7 = pd.to_numeric(df_ref.get("mom_7m1m"), errors="coerce").dropna()
+                if len(p4) >= 30 and len(p7) >= 30:
+                    ref_p4, ref_p7 = p4, p7
+            except Exception:
+                pass
+    # 备用方案（兜底缓存）：若不存在近期 scan 文件，则取最新一期全量时点表 (如 2026-06-30.csv)
+    if ref_p4 is None or ref_p7 is None:
+        files = sorted(glob.glob(os.path.join(OUTPUT_DIR, "bt_scores_cache", "*.csv")))
+        if files:
+            try:
+                df_ref = pd.read_csv(files[-1], dtype={"code": str})
+                p4 = pd.to_numeric(df_ref.get("mom_4m1m"), errors="coerce").dropna()
+                p7 = pd.to_numeric(df_ref.get("mom_7m1m"), errors="coerce").dropna()
+                if len(p4) >= 30 and len(p7) >= 30:
+                    ref_p4, ref_p7 = p4, p7
+            except Exception:
+                pass
+    return ref_p4, ref_p7
+
+
+def finalize(rows: list, as_of: str = None, use_global_ref: bool = False) -> pd.DataFrame:
     """截面动量排名 → F_momentum → S_total(regime权重) × 惩罚 → 评级
-    as_of: 回测日(水位计PiT); None → 实时"""
+    as_of: 回测日(水位计PiT); None → 实时
+    use_global_ref: 局部/小样本测算(单基、自选池、持仓诊断)采用全市场统一动量参照标尺"""
     df = pd.DataFrame(rows)
     if "error" not in df:
         df["error"] = None
@@ -193,8 +231,17 @@ def finalize(rows: list, as_of: str = None) -> pd.DataFrame:
 
     water = market_water(as_of)
     (wv, wa, wm), mode = resolve_weights(water)
-    df["rank4"] = df["mom_4m1m"].rank(pct=True)
-    df["rank7"] = df["mom_7m1m"].rank(pct=True)
+    if use_global_ref:
+        ref_p4, ref_p7 = get_global_momentum_ref(as_of)
+        if ref_p4 is not None and ref_p7 is not None and len(ref_p4) >= 30 and len(ref_p7) >= 30:
+            df["rank4"] = df["mom_4m1m"].apply(lambda m: float((ref_p4 <= m).mean()) if pd.notna(m) else np.nan)
+            df["rank7"] = df["mom_7m1m"].apply(lambda m: float((ref_p7 <= m).mean()) if pd.notna(m) else np.nan)
+        else:
+            df["rank4"] = df["mom_4m1m"].rank(pct=True)
+            df["rank7"] = df["mom_7m1m"].rank(pct=True)
+    else:
+        df["rank4"] = df["mom_4m1m"].rank(pct=True)
+        df["rank7"] = df["mom_7m1m"].rank(pct=True)
     df["F_momentum"] = df.apply(
         lambda r: factors.momentum_score_smooth_m1(r["rank4"], r["rank7"]), axis=1).round(1)   # V3.7 平滑M1 (t 3.20→3.33)
 
