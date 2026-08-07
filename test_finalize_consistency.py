@@ -167,6 +167,18 @@ def main():
         print(f"  ✅ [特征缺失行] 单基/批量均不抛异常，该行 V4 静默回退 V3.7 "
               f"(S_total={rn['S_total']})")
 
+        # ---- 场景5: 错误行缺失 penalty_detail/penalties 等列 → 不得因 pandas NaN 炸整批 ----
+        E = {"code": "999999", "name": "ERR", "error": "timeout"}
+        only_err = engine.finalize([dict(E)], use_global_ref=True)
+        mixed_err = engine.finalize([dict(A), dict(E)], use_global_ref=True)
+        re1 = only_err[only_err.code == "999999"].iloc[0]
+        re2 = mixed_err[mixed_err.code == "999999"].iloc[0]
+        assert re1["error"] == "timeout" and re2["error"] == "timeout"
+        assert isinstance(re1["penalties"], list) and isinstance(re1["penalty_detail"], dict)
+        assert isinstance(re2["penalties"], list) and isinstance(re2["penalty_detail"], dict)
+        print("  ✅ [错误行归一化] 缺失 dict/list 字段的错误行不会把 finalize 炸成 "
+              "'float' object has no attribute get'")
+
         print("=" * 74)
         print(" ✅ 全部通过：finalize 对批次大小/批次构成严格不变，三入口同源同分。")
         print("=" * 74)
