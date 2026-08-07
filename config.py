@@ -12,6 +12,8 @@
 """
 
 # V4 模型默认开关（False 时 engine.finalize 强制回退 V3.7，便于回滚）
+# V4.1 注: 小样本入口(单基/批量/诊断)的 V4 必须配合全市场参照快照使用(ECDF)，
+#          快照缺失时一致性闸门自动整体降级 V3.7，绝不使用批内 rank —— 见 engine.finalize
 USE_V4_MODEL = True
 # V4 与 V3.7 混合权重: S_final = W_V4*S_V4 + (1-W_V4)*S_v37
 # V4 pure IC 最高但在高水位有追涨倾向；混合 0.5/0.5 保留 V3.7 的估值安全垫
