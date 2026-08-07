@@ -48,6 +48,27 @@ def clean(o):
     return o
 
 
+
+def _safe_list(v):
+    return v if isinstance(v, list) else []
+
+
+def _safe_dict(v):
+    return v if isinstance(v, dict) else {}
+
+
+def _parse_int(v, default, low=None, high=None):
+    try:
+        out = int(float(v))
+    except (TypeError, ValueError):
+        out = default
+    if low is not None:
+        out = max(low, out)
+    if high is not None:
+        out = min(high, out)
+    return out
+
+
 # ---------------- 页面 ----------------
 @app.route("/")
 def home():
@@ -263,8 +284,8 @@ def scan():
     if STATE["phase"] in ("universe", "scoring"):
         return jsonify({"ok": False, "message": "扫描进行中"}), 409
     body = request.get_json(silent=True) or {}
-    right = int(body.get("right", 400))
-    left = int(body.get("left", 150))
+    right = _parse_int(body.get("right", 400), 400, low=1, high=2000)
+    left = _parse_int(body.get("left", 150), 150, low=0, high=1000)
     STATE.update(phase="universe", done=0, total=0, started=time.time(), elapsed=0,
                  message="启动中...")
     threading.Thread(target=_run_scan, args=(right, left), daemon=True).start()
@@ -406,7 +427,7 @@ def _is_veto_row(row):
     ps = str(row.get("penalty_str") or "")
     if "-100%" in ps:
         return True
-    pens = row.get("penalties") or []
+    pens = _safe_list(row.get("penalties"))
     for _, p in pens:
         try:
             if float(p) >= 0.999:
@@ -603,6 +624,9 @@ def rebalance():
         veto = _is_veto_row(rec) if not is_err else False
         rating = rec.get("rating") or ""
         ftype = rec.get("ftype") or ""
+        penalties = _safe_list(rec.get("penalties"))
+        penalty_detail = _safe_dict(rec.get("penalty_detail"))
+        rbsa_detail = _safe_dict(rec.get("rbsa"))
         holdings_detail.append({
             "code": code,
             "name": rec.get("name") or code,
@@ -616,9 +640,9 @@ def rebalance():
             "val_pct": rec.get("val_pct"),
             "ir_winrate": rec.get("ir_winrate"),
             "penalty_str": rec.get("penalty_str") or "",
-            "penalties": rec.get("penalties") or [],
-            "penalty_detail": rec.get("penalty_detail") or {},
-            "rbsa": rec.get("rbsa") or {},
+            "penalties": penalties,
+            "penalty_detail": penalty_detail,
+            "rbsa": rbsa_detail,
             "is_passive": rec.get("is_passive"),
             "scale": rec.get("scale"),
             "tenure_days": rec.get("tenure_days"),

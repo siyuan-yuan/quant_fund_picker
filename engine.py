@@ -27,6 +27,16 @@ except Exception as _e:
     print(f"[engine] V4 模型加载失败，回退 V3.7: {_e}", file=sys.stderr)
 
 
+def _safe_list(v):
+    """把 pandas 的 NaN / None / 其他脏值统一收敛成 list。"""
+    return v if isinstance(v, list) else []
+
+
+def _safe_dict(v):
+    """把 pandas 的 NaN / None / 其他脏值统一收敛成 dict。"""
+    return v if isinstance(v, dict) else {}
+
+
 def is_overseas_fund(code: str, name: str, ftype: str = None) -> bool:
     """判断必须可注入历史类型，PiT 回测不可回查今天的基金名录。"""
     ftype = ftype if ftype is not None else (provider.fund_type(code) or "")
@@ -287,12 +297,18 @@ def finalize(rows: list, as_of: str = None, use_global_ref: bool = False) -> pd.
     df = pd.DataFrame(rows)
     if "error" not in df:
         df["error"] = None
+    # 批量扫描/自选/调仓会混入异常行；pandas 会把缺失 dict/list 列补成 float('nan')。
+    # 若后续直接 d.get(...)，就会触发经典事故：'float' object has no attribute 'get'。
+    # 这里把 finalize 依赖的列一次性补齐并做类型归一化，让错误行保留但绝不拖垮整批。
     for col, default in [("mom_4m1m", np.nan), ("mom_7m1m", np.nan),
                          ("F_value", np.nan), ("F_alpha", np.nan),
-                         ("penalties", None)]:
+                         ("val_pct", np.nan), ("ma20_dist", np.nan),
+                         ("ir_winrate", np.nan), ("down_capture", np.nan),
+                         ("penalties", None), ("penalty_detail", None)]:
         if col not in df:
             df[col] = default
-    df["penalties"] = df["penalties"].apply(lambda p: p if isinstance(p, list) else [])
+    df["penalties"] = df["penalties"].apply(_safe_list)
+    df["penalty_detail"] = df["penalty_detail"].apply(_safe_dict)
 
     water = market_water(as_of)
     (wv, wa, wm), mode = resolve_weights(water)
@@ -368,7 +384,7 @@ def finalize(rows: list, as_of: str = None, use_global_ref: bool = False) -> pd.
                 val_fill = df["val_pct"].astype(float).median()
             # V3.6 平滑回撤惩罚 (与训练时口径一致；底部区减半)
             rmdd_pen = np.zeros(len(df))
-            pdt = df["penalty_detail"].apply(lambda d: d or {})
+            pdt = df["penalty_detail"].apply(_safe_dict)
             r_mdd = pdt.apply(lambda d: d.get("R_MDD"))
             mask = r_mdd.notna() & (r_mdd > 1.2)
             rmdd_pen[mask] = np.minimum(0.5 * (r_mdd[mask] - 1.2), 1.0)
