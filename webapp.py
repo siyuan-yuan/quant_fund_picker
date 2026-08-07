@@ -241,7 +241,9 @@ def _run_scan(right_n, left_n, workers=6):
                     STATE["elapsed"] = round(time.time() - t0)
         df = finalize(rows)
         stamp = dt.date.today().strftime("%Y%m%d")
-        keep = ["code", "name", "ftype", "channel", "S_total", "rating", "F_value",
+        # S_v4_raw(V4原始z值)必须落盘：它作为单基透视/批量评分/持仓诊断的
+        # 全市场V4参照快照(engine.get_global_ref_universe 读取)，缺列则三入口V4闸门降级
+        keep = ["code", "name", "ftype", "channel", "S_total", "S_v4_raw", "rating", "F_value",
                 "val_pct", "trend_ok", "trend_ma20", "bonus", "F_alpha", "ir_winrate",
                 "down_capture", "F_momentum", "mom_4m1m", "mom_7m1m", "rank4", "rank7",
                 "scale", "tenure_days", "is_passive", "penalty_str", "water",
@@ -319,7 +321,8 @@ def watchlist():
             "F_alpha", "ir_winrate", "s_ir", "down_capture", "s_dc",
             "F_momentum", "mom_4m1m", "mom_7m1m", "rbsa", "panel_mode",
             "tenure_days", "is_passive", "penalties", "penalty_detail",
-            "penalty_str", "scale", "n_days", "last_date", "error"]
+            "penalty_str", "scale", "n_days", "last_date", "error",
+            "model_version", "ref_stamp", "data_incomplete"]
     # V3.7.2 批判清单⑧: 组合级 RBSA 穿透 — 等权聚合整批隐形仓位, 单一板块≥35% 告警
     portfolio = None
     rb = [r["rbsa"] for r in rows if isinstance(r.get("rbsa"), dict) and r["rbsa"]]
@@ -346,7 +349,11 @@ def watchlist():
         note="CPPI需要用户组合净值/HWM，当前网页仅展示规则，不自动判断个人账户是否触发。",
     ))
 
-    return jsonify(dict(ok=True, portfolio=clean(portfolio),
+    # 参照戳与模型版本：三入口一致性自检与前端披露用
+    ref_stamp = str(df["ref_stamp"].iloc[0]) if "ref_stamp" in df and len(df) else None
+    model_ver = str(df["model_version"].iloc[0]) if "model_version" in df and len(df) else None
+    return jsonify(dict(ok=True, ref_stamp=ref_stamp, model_version=model_ver,
+                        portfolio=clean(portfolio),
                         portfolio_discipline=portfolio_discipline,
                         rows=clean(df[[c for c in cols if c in df]].where(pd.notna(df), None).to_dict("records"))))
 
@@ -532,6 +539,9 @@ def rebalance():
         df = pd.DataFrame(rows)
         if "S_total" not in df:
             df["S_total"] = np.nan
+    # 参照戳与模型版本（finalize 回退路径可能没有这些列 → 防御读取）
+    ref_stamp = str(df["ref_stamp"].iloc[0]) if "ref_stamp" in df and len(df) else None
+    model_ver = str(df["model_version"].iloc[0]) if "model_version" in df and len(df) else None
     # 映射回金额
     holdings_detail = []
     # 为便于查找，建立 code->row 映射（df 已按 S_total 排序，但映射不依赖顺序）
@@ -617,6 +627,7 @@ def rebalance():
             "is_veto": veto,
             "is_error": is_err,
             "retryable": is_retryable if is_err else False,
+            "data_incomplete": bool(rec.get("data_incomplete")),
         })
         scored_holdings.append({
             "code": code, "s": s_val, "veto": veto, "err": is_err, "amt": amt, "rec": rec
@@ -829,8 +840,11 @@ def rebalance():
     for h in holdings_detail:
         if h["is_error"]:
             warnings.append(f"{h['code']} {h['name']} 评分失败，暂不纳入纪律，需人工复核")
-        elif h.get("penalty_detail", {}).get("R_MDD") and h["penalty_detail"]["R_MDD"] and h["penalty_detail"]["R_MDD"]>2.0:
-            warnings.append(f"{h['code']} 超额回撤比 {h['penalty_detail']['R_MDD']} 偏高（>2.0 毒性区），即使暂未触发卖出也建议控制仓位")
+        else:
+            if h.get("data_incomplete"):
+                warnings.append(f"{h['code']} {h['name']} 档案数据缺失（数据源限流），任期类风控已豁免、评分仅供参考，建议稍后重试")
+            if h.get("penalty_detail", {}).get("R_MDD") and h["penalty_detail"]["R_MDD"] and h["penalty_detail"]["R_MDD"]>2.0:
+                warnings.append(f"{h['code']} 超额回撤比 {h['penalty_detail']['R_MDD']} 偏高（>2.0 毒性区），即使暂未触发卖出也建议控制仓位")
     # 危机
     if crisis_active:
         warnings.append(f"危机模式已激活（{crisis.get('reason','')}），已禁止新开仓，现有持仓仅按 S<{STRAT_SELL_TH:.0f} 或 20%移动止损退出")
@@ -894,7 +908,9 @@ def rebalance():
         orders=clean(orders),
         warnings=warnings,
         scan_msg=scan_msg,
-        asof=dict(expected=provider.expected_last_td()),
+        ref_stamp=ref_stamp,
+        model_version=model_ver,
+        asof=dict(expected=provider.expected_last_td(), ref=ref_stamp),
     )
     return jsonify(clean(resp))
 

@@ -451,7 +451,7 @@ function renderBoard(){
 async function queryFund(code){
   code=(code||'').trim(); if(!code) return;
   setStatus('q-dot','qst','busy','拉取…'); document.getElementById('wf').innerHTML='';
-  try{const j=await (await fetch('/api/fund/'+code.padStart(6,'0'),{method:'POST'})).json(); if(!j.ok){setStatus('q-dot','qst','err',j.message);return} setStatus('q-dot','qst','ok',j.fund.last_date); renderWaterfall(j.fund,'wf')}catch(e){setStatus('q-dot','qst','err','失败')}
+  try{const j=await (await fetch('/api/fund/'+code.padStart(6,'0'),{method:'POST'})).json(); if(!j.ok){setStatus('q-dot','qst','err',j.message);return} setStatus('q-dot','qst','ok',`${j.fund.last_date} · 参照 ${j.fund.ref_stamp||'—'}`); renderWaterfall(j.fund,'wf')}catch(e){setStatus('q-dot','qst','err','失败')}
 }
 function bar(l,v,c){v=v??0; return `<div class="fbar"><label><span>${l}</span><b>${(+v).toFixed(1)}</b></label><div class="tr"><i style="width:${v}%;background:${c}"></i></div></div>`}
 function renderWaterfall(f,mount){
@@ -461,7 +461,7 @@ function renderWaterfall(f,mount){
   const pd=f.penalty_detail||{};
   const scoreBadge=f.S_total!=null? `<span class="badge ${f.S_total>=70?'b-green':(f.S_total>=50?'b-amber':'b-red')}" style="font-size:13px;padding:5px 10px">总分 ${f.S_total}</span>` : `<span class="badge b-mute">总分 —</span>`;
   document.getElementById(mount).innerHTML=`<div class="wf">
-    <div><div class="wf-title">${f.code} ${f.name}</div><div style="display:flex;gap:8px;align-items:center;margin:8px 0;flex-wrap:wrap">${scoreBadge}${sigOf(f)}${ratingCell(f)}</div><div class="wf-meta">${f.ftype} · ${f.is_passive?'被动':'主动'} · ${f.panel_mode==='overseas'?'境外面板':'A股面板'} · 数据 ${f.last_date}</div>
+    <div><div class="wf-title">${f.code} ${f.name}</div><div style="display:flex;gap:8px;align-items:center;margin:8px 0;flex-wrap:wrap">${scoreBadge}${sigOf(f)}${ratingCell(f)}</div><div class="wf-meta">${f.ftype} · ${f.is_passive?'被动':'主动'} · ${f.panel_mode==='overseas'?'境外面板':'A股面板'} · 数据 ${f.last_date}${f.model_version?` · ${f.model_version}`:''}${f.ref_stamp?` · 参照 ${f.ref_stamp}`:''}${f.data_incomplete?' · <span style="color:var(--danger)">档案数据缺失</span>':''}</div>
       ${bar('F_value',f.F_value,'#15803d')}${bar('F_alpha',f.F_alpha,'#1d4ed8')}${bar('F_momentum',f.F_momentum,'#a16207')}
       <div class="facts">分位 ${f.val_pct!=null?(f.val_pct*100).toFixed(1)+'%':'—'} · 趋势 ${f.trend_ok?'是':'否'} · IR ${f.ir_winrate!=null?(f.ir_winrate*100).toFixed(0)+'%':'—'} · 下行捕获 ${f.down_capture??'—'}</div>
     </div><div><div class="eyebrow">穿透</div><div class="chips">${we||'<span style="color:var(--faint)">—</span>'}</div><div class="eyebrow" style="margin-top:12px">风控</div><ul class="plist">${pens}</ul><div class="facts">R_MDD ${pd.R_MDD??'—'}（回撤 ${pd.mdd_fund??'—'}/${pd.mdd_bench??'—'}） · 任职 ${f.tenure_days?Math.round(f.tenure_days/365)+'年':'—'} · 规模 ${f.scale??'—'}亿</div></div></div>`;
@@ -470,12 +470,13 @@ let WROWS=[], WD_OPEN=[];
 async function runWatch(){
   const codes=document.getElementById('watch').value.split(/[\s,，、]+/).filter(Boolean); if(!codes.length) return;
   const CH=6,chunks=[]; for(let i=0;i<codes.length;i+=CH) chunks.push(codes.slice(i,i+CH));
-  WROWS=[]; WD_OPEN=[];
+  WROWS=[]; WD_OPEN=[]; let WREF=null;
   for(let ci=0;ci<chunks.length;ci++){
     setStatus('w-dot','wst','busy',`${ci+1}/${chunks.length}`);
-    try{const j=await (await fetch('/api/watchlist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({codes:chunks[ci]})})).json(); if(j.ok) WROWS=WROWS.concat(j.rows||[])}catch(e){chunks[ci].forEach(c=>WROWS.push({code:c,error:'失败'}))}
+    try{const j=await (await fetch('/api/watchlist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({codes:chunks[ci]})})).json(); if(j.ok){WROWS=WROWS.concat(j.rows||[]); if(j.ref_stamp&&!WREF)WREF=j.ref_stamp}}catch(e){chunks[ci].forEach(c=>WROWS.push({code:c,error:'失败'}))}
   }
   WROWS.forEach(r=>r.pool_pct=poolPct(r,WROWS)); WD_OPEN=WROWS.map(()=>WROWS.length<=6);
+  setStatus('w-dot','wst','ok',`完成 · 参照 ${WREF||'—'}`);
   renderWatch();
 }
 function renderWatch(){
@@ -515,7 +516,7 @@ async function runRebalance(){
   try{
     const r=await fetch('/api/rebalance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({total_capital:total||0,cash:cash||0,holdings})});
     const j=await r.json(); if(!j.ok){setStatus('rb-dot','rb-st','err',j.message); document.getElementById('rb-out').innerHTML=`<div class="empty" style="color:var(--danger)">${j.message}</div>`; return}
-    setStatus('rb-dot','rb-st','ok','完成'); renderRebalance(j);
+    setStatus('rb-dot','rb-st','ok',`完成 · 参照 ${j.ref_stamp||'—'}`); renderRebalance(j);
   }catch(e){const msg=e.name==='AbortError'?'请求超时（180秒），请减少至3只以内或稍后重试':(e.message||'网络错误'); setStatus('rb-dot','rb-st','err',msg); document.getElementById('rb-out').innerHTML=`<div class="empty" style="color:var(--danger);border-color:#fecdd3;background:var(--danger-soft)">请求失败：${msg}<br><span style="color:var(--muted)">单基可用说明服务正常；持仓批量对并发更敏感，建议分2批（每次≤3只）或稍后重试。已自动降并发至2线程。</span><br><button class="btn btn-ghost" style="margin-top:8px;padding:6px 12px;font-size:12px" onclick="runRebalance()">重试</button></div>`}finally{document.getElementById('rb-btn').disabled=false}
 }
 function renderRebalance(j){
