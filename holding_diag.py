@@ -193,6 +193,7 @@ def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15):
     if anchor_amount and anchor_amount > 0 and mv > 0:
         k = anchor_amount / mv
     curve = pd.Series(shares_t * adj.values * k, index=idx, name="value")
+    curve[shares_t <= 1e-9] = np.nan       # 入场前/空仓期为 NaN（组合曲线按最早买入日自适应裁剪）
     basis *= k
     mv = float(curve.iloc[-1])
     first_pos = int(np.argmax(shares_t > 1e-9))
@@ -374,10 +375,20 @@ def portfolio_cppi(fund_series, cash=0.0, rules=None, full_slots=10,
     if not curves:
         return dict(computable=False,
                     reason="持仓缺少 市值+买入日期（或 成本/收益率），无法重建组合净值曲线（提供后自动计算真实回撤与槽位）")
-    # 并集交易日
-    idx = curves[0].index
+    # ---- 自适应起点：自动检测最早买入时间 ----
+    # 基金复权净值从成立日起就有数据，持仓曲线在买入前为 0/NaN；
+    # 取所有曲线中第一个有效值(>0)日期的最早者作为起点，裁掉前面全 0 的前缀段
+    starts = []
+    for c in curves:
+        arr = np.asarray(c.values, dtype=float)
+        v = np.where(np.isfinite(arr) & (arr > 0))[0]
+        if len(v):
+            starts.append(c.index[v[0]])
+    start = min(starts) if starts else curves[0].index[0]
+    # 并集交易日（从最早买入日起）
+    idx = curves[0].index[curves[0].index >= start]
     for c in curves[1:]:
-        idx = idx.union(c.index)
+        idx = idx.union(c.index[c.index >= start])
     idx = pd.DatetimeIndex(sorted(idx))
     contrib = np.zeros(len(idx))
     for c in curves:

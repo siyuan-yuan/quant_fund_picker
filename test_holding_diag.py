@@ -192,6 +192,28 @@ def test_portfolio_cppi_curve_input():
     print("test_portfolio_cppi_curve_input OK, dd=%.1f%% slots=%d | %s" % (r["dd"] * 100, r["slots"], r["tier_name"]))
 
 
+def test_portfolio_cppi_auto_start():
+    """组合曲线自适应起点：最早买入日前全 0/NaN 的前缀段应被裁掉"""
+    n = 60
+    idx = pd.date_range("2008-01-01", periods=n, freq="D")
+    # 基金A: 前 20 天未持有（0/NaN），从第 20 天起有值（2021 年式的“后入场”）
+    a = pd.Series([np.nan] * 20 + np.linspace(10000, 8000, 40).tolist(), index=idx)
+    # 基金B: 前 40 天未持有，从第 40 天起有值
+    b = pd.Series([np.nan] * 40 + np.linspace(20000, 24000, 20).tolist(), index=idx)
+    r = hd.portfolio_cppi([(a,), (b,)], cash=0.0,
+                          rules=[(-0.15, 6), (-0.20, 3), (-0.25, 0)], full_slots=10)
+    assert r["computable"] and r["n_funds"] == 2
+    # 起点 = 最早入场日（A 的第 20 天），不是 2008 年的第 0 天
+    assert r["chart"]["dates"][0] == str(idx[20].date()), r["chart"]["dates"][0]
+    assert len(r["chart"]["dates"]) == n - 20
+    # 组合值 = A + B（B 在 A 入场后仍有 20 天为 0，属真实历史，保留）
+    assert abs(r["current"] - (8000 + 24000)) < 1e-6
+    # 全部未入场 → 起点兜底为第一只曲线的起点
+    r2 = hd.portfolio_cppi([(pd.Series([np.nan] * 10, index=idx[:10]),)], cash=0.0)
+    assert not r2["computable"] or r2["chart"]["dates"][0] == str(idx[0].date())
+    print("test_portfolio_cppi_auto_start OK, start=%s → end=%s" % (r["chart"]["dates"][0], r["chart"]["dates"][-1]))
+
+
 def test_webapp_endpoint():
     """端到端: /api/rebalance 解析 代码 市值 买入日期|成本|收益率 并输出 stop/cppi（需 cache/ 净值）"""
     if not os.path.exists("cache/nav_161725.csv"):
@@ -220,7 +242,7 @@ def test_webapp_endpoint():
 
 
 if __name__ == "__main__":
-    for fn in [test_adj_series, test_infer_entry_date, test_fund_stop_diag, test_fund_lots_diag, test_portfolio_cppi_curve_input,
+    for fn in [test_adj_series, test_infer_entry_date, test_fund_stop_diag, test_fund_lots_diag, test_portfolio_cppi_curve_input, test_portfolio_cppi_auto_start,
                test_cppi_tier_sim, test_portfolio_cppi, test_webapp_endpoint]:
         fn()
     print("\nALL TESTS PASSED")
