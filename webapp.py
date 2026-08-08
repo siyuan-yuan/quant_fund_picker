@@ -453,12 +453,16 @@ def rebalance():
     # ---- 解析总资本 & 现金 ----
     total_capital_raw = body.get("total_capital", body.get("totalCapital", 0))
     cash_raw = body.get("cash", body.get("available_cash", 0))
+    peak_capital_raw = body.get("peak_capital", body.get("peakCapital", 0))
     total_capital = _parse_yuan(total_capital_raw)
     cash = _parse_yuan(cash_raw)
+    peak_capital = _parse_yuan(peak_capital_raw)
     if cash is None:
         cash = 0.0
     if total_capital is None:
         total_capital = 0.0
+    if peak_capital is None:
+        peak_capital = 0.0
     # ---- 解析持仓 ----
     holdings_in = body.get("holdings", None)
     # 兼容 holdings_text
@@ -475,26 +479,32 @@ def rebalance():
                 continue
             code = parts[0].strip().zfill(6)
             amt = _parse_yuan(parts[1]) if len(parts)>1 else None
-            holdings_in.append({"code": code, "amount": amt})
+            ed = parts[2].strip() if len(parts)>2 and parts[2].strip() else None
+            holdings_in.append({"code": code, "amount": amt, "entry_date": ed})
     if not isinstance(holdings_in, list):
         holdings_in = []
     # 标准化
     norm_holdings = []
     for h in holdings_in:
+        entry_date = None
         if isinstance(h, (list, tuple)) and len(h)>=1:
             code = str(h[0]).zfill(6)
             amt = _parse_yuan(h[1]) if len(h)>1 else None
+            entry_date = str(h[2]).strip() if len(h)>2 and h[2] else None
         elif isinstance(h, dict):
             code = str(h.get("code", h.get("symbol",""))).zfill(6)
             # amount 字段多种别名
             amt_raw = h.get("amount", h.get("value", h.get("market_value", h.get("amt", h.get("holding", None)))))
             amt = _parse_yuan(amt_raw)
+            entry_date = h.get("entry_date", h.get("date", h.get("in_date", None)))
+            if entry_date:
+                entry_date = str(entry_date).strip()
         else:
             code = str(h).zfill(6)
             amt = None
         if not re.fullmatch(r"\d{6}", code):
             continue
-        norm_holdings.append({"code": code, "amount": amt})
+        norm_holdings.append({"code": code, "amount": amt, "entry_date": entry_date})
         if len(norm_holdings) >= 50:
             break
     if not norm_holdings:
@@ -627,6 +637,27 @@ def rebalance():
         penalties = _safe_list(rec.get("penalties"))
         penalty_detail = _safe_dict(rec.get("penalty_detail"))
         rbsa_detail = _safe_dict(rec.get("rbsa"))
+        entry_date_str = h.get("entry_date")
+        mdd_from_peak = None
+        trail_triggered = False
+        trail_msg = ""
+        if entry_date_str and not is_err:
+            try:
+                nav_df = provider.get_fund_nav(code)
+                if not nav_df.empty:
+                    ed = pd.to_datetime(entry_date_str, errors="coerce")
+                    if pd.notna(ed):
+                        sub = nav_df[nav_df["date"] >= ed]
+                        if not sub.empty:
+                            peak_nav_val = float(sub["nav"].max())
+                            curr_nav_val = float(nav_df["nav"].iloc[-1])
+                            if peak_nav_val > 0:
+                                mdd_from_peak = round((curr_nav_val / peak_nav_val) - 1.0, 4)
+                                if mdd_from_peak <= -STRAT_TRAIL_STOP:
+                                    trail_triggered = True
+                                    trail_msg = f"自建仓({entry_date_str})高点净值({peak_nav_val:.4f})回撤 {mdd_from_peak*100:.1f}% ≤ -{STRAT_TRAIL_STOP*100:.0f}%，触发 20% 移动止损"
+            except Exception as _e:
+                pass
         holdings_detail.append({
             "code": code,
             "name": rec.get("name") or code,
@@ -652,6 +683,10 @@ def rebalance():
             "is_error": is_err,
             "retryable": is_retryable if is_err else False,
             "data_incomplete": bool(rec.get("data_incomplete")),
+            "entry_date": entry_date_str,
+            "mdd_from_peak": mdd_from_peak,
+            "trail_triggered": trail_triggered,
+            "trail_msg": trail_msg,
         })
         scored_holdings.append({
             "code": code, "s": s_val, "veto": veto, "err": is_err, "amt": amt, "rec": rec
@@ -681,11 +716,15 @@ def rebalance():
             continue
         s = h["S_total"]
         veto = h["is_veto"]
-        if veto or (s is not None and s < STRAT_SELL_TH):
+        trail_trig = h.get("trail_triggered", False)
+        if veto or trail_trig or (s is not None and s < STRAT_SELL_TH):
             h["action"] = "sell"
             if veto:
                 h["action_label"] = "纪律卖出·否决池"
                 h["action_reason"] = h["penalty_str"] or "否决池"
+            elif trail_trig:
+                h["action_label"] = "纪律卖出·20%高点止损"
+                h["action_reason"] = h.get("trail_msg") or "自建仓后创下的高点回撤超20%"
             else:
                 h["action_label"] = f"纪律卖出·S<{STRAT_SELL_TH:.0f}"
                 h["action_reason"] = f"S={s} 低于卖出线 {STRAT_SELL_TH:.0f}"
@@ -718,21 +757,59 @@ def rebalance():
             holds.append(h)
             keeps.append(h)
 
-    # 处理超槽位：若保留持仓数 > 允许槽位（常见于从未调仓的老组合持有20只），则把最弱的持仓加入卖出
-    # 仅在非危机且未触发 CPPI 极端时生效；危机时 max_slots=0 不做强制清退（按纪律仅禁新买）
+    # ---- 自动 CPPI 水线风控推算 ----
+    curr_total = holdings_value + cash
+    cppi_info = {
+        "enabled": STRAT_CPPI,
+        "peak_capital": round(float(peak_capital), 2) if peak_capital > 0 else 0.0,
+        "curr_capital": round(float(curr_total), 2),
+        "drawdown": None,
+        "active_cap": STRAT_SLOTS,
+        "status_label": "未填组合历史最高资产，未触发 CPPI 约束",
+        "level": "none"
+    }
+    max_slots_by_cppi = STRAT_SLOTS
+    if peak_capital > 0 and curr_total > 0:
+        cppi_dd = (curr_total / peak_capital) - 1.0
+        cppi_info["drawdown"] = round(cppi_dd, 4)
+        if cppi_dd <= STRAT_CPPI_DD3:
+            max_slots_by_cppi = STRAT_CPPI_SLOTS3
+            cppi_info["active_cap"] = 0
+            cppi_info["status_label"] = f"当前总计({curr_total:,.0f}元)距离最高水线({peak_capital:,.0f}元)累计回撤 {cppi_dd*100:.1f}% ≤ -25%，触发 CPPI 底线熔断清仓！"
+            cppi_info["level"] = "danger"
+        elif cppi_dd <= STRAT_CPPI_DD2:
+            max_slots_by_cppi = STRAT_CPPI_SLOTS2
+            cppi_info["active_cap"] = 3
+            cppi_info["status_label"] = f"距离高水线({peak_capital:,.0f}元)累计回撤 {cppi_dd*100:.1f}% ≤ -20%，触发 CPPI -20% 约束：权益槽位缩至最强 3 槽"
+            cppi_info["level"] = "warning"
+        elif cppi_dd <= STRAT_CPPI_DD1:
+            max_slots_by_cppi = STRAT_CPPI_SLOTS1
+            cppi_info["active_cap"] = 6
+            cppi_info["status_label"] = f"距离高水线({peak_capital:,.0f}元)累计回撤 {cppi_dd*100:.1f}% ≤ -15%，触发 CPPI -15% 约束：权益槽位缩至最强 6 槽"
+            cppi_info["level"] = "warning"
+        else:
+            max_slots_by_cppi = STRAT_SLOTS
+            cppi_info["active_cap"] = 10
+            cppi_info["status_label"] = f"距离高水线({peak_capital:,.0f}元)回撤 {cppi_dd*100:.1f}%，在 -15% 安全带之内，容许 10 槽位满额放开"
+            cppi_info["level"] = "success"
+
+    effective_max_slots = 0 if crisis_active else min(STRAT_SLOTS, max_slots_by_cppi)
+
+    # 处理超槽位：若保留持仓数 > 允许槽位（常见于从未调仓的老组合持有20只，或者回撤触发 CPPI 压缩槽位），则把最弱的持仓加入卖出
+    # 仅在非危机时生效；危机时 max_slots=0 不做强制清退（按纪律仅禁新买）
     num_keep = len(keeps)
     extra_sells = []
-    if not crisis_active and num_keep > STRAT_SLOTS:
+    if not crisis_active and num_keep > effective_max_slots:
         # 按 S 升序把多余的转为卖出
         keeps_sorted = sorted(keeps, key=lambda x: (x["S_total"] if x["S_total"] is not None else -1))
-        overflow = num_keep - STRAT_SLOTS
+        overflow = num_keep - effective_max_slots
         for h in keeps_sorted[:overflow]:
             # 已是卖出的不重复
             if h["action"] == "sell":
                 continue
             h["action"] = "sell"
-            h["action_label"] = "纪律卖出·超槽位"
-            h["action_reason"] = f"持仓数{num_keep}超过槽位上限{STRAT_SLOTS}，按 S 最弱优先退出（S={h['S_total']}）"
+            h["action_label"] = f"纪律卖出·CPPI限{effective_max_slots}槽" if max_slots_by_cppi < STRAT_SLOTS else f"纪律卖出·超槽位({STRAT_SLOTS})"
+            h["action_reason"] = f"持仓数{num_keep}超过现有可用槽位上限{effective_max_slots}，按 S 最弱优先退出（S={h['S_total']}）"
             h["target_amount"] = 0.0
             h["sell_amount"] = h["amount"]
             extra_sells.append(h)
@@ -743,7 +820,7 @@ def rebalance():
     sell_proceeds = round(float(sum(h.get("sell_amount", h["amount"]) for h in sells)),2)
     cash_after_sells = round(cash + sell_proceeds,2)
     num_keep_after = len(keeps)
-    free_slots = max(0, max_slots_by_macro - num_keep_after) if not crisis_active else 0
+    free_slots = max(0, effective_max_slots - num_keep_after) if not crisis_active else 0
     # 危机时即使有 free_slots 也不允许新买，故强制 0
     if crisis_active:
         free_slots = 0
@@ -873,9 +950,14 @@ def rebalance():
     if crisis_active:
         warnings.append(f"危机模式已激活（{crisis.get('reason','')}），已禁止新开仓，现有持仓仅按 S<{STRAT_SELL_TH:.0f} 或 20%移动止损退出")
     # CPPI 提示
-    if total_capital>0 and holdings_value + cash >0:
-        # 无法计算用户回撤，仅提示规则
-        warnings.append(f"CPPI 风险预算：回撤≤-15%限6槽 / ≤-20%限3槽 / ≤-25%清仓（需跟踪你组合自高点回撤，本页仅提示规则）")
+    if cppi_info["level"] == "danger":
+        warnings.append(f"🛑 {cppi_info['status_label']}")
+    elif cppi_info["level"] == "warning":
+        warnings.append(f"⚠️ {cppi_info['status_label']}")
+    elif cppi_info["level"] == "success":
+        warnings.append(f"✅ {cppi_info['status_label']}")
+    elif total_capital>0 and holdings_value + cash >0 and not peak_capital:
+        warnings.append(f"CPPI 风险预算：回撤≤-15%限6槽 / ≤-20%限3槽 / ≤-25%清仓（若需自动推算，可在表单中填入‘最高总资产’）")
     # 现金不足
     if buys and total_need > cash_after_sells:
         warnings.append(f"可用现金 {cash_after_sells:,.0f} 元不足以按每槽 {per_slot:,.0f} 元填满 {len(candidates)} 个候选，已按均分 {per_buy:,.0f} 元/只 调整；可追加现金或减少持仓")
@@ -901,6 +983,8 @@ def rebalance():
         cash_pct_after=cash_pct_after,
         max_slots=STRAT_SLOTS,
         max_slots_by_macro=max_slots_by_macro,
+        effective_max_slots=effective_max_slots,
+        cppi_info=cppi_info,
         crisis_active=crisis_active,
     )
 

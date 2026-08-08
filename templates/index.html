@@ -324,9 +324,10 @@
         <div class="form-row">
           <div class="field"><label>总资金</label><input id="rb-total" class="mono" placeholder="100000 或 10万"></div>
           <div class="field"><label>可用现金</label><input id="rb-cash" class="mono" placeholder="20000"></div>
+          <div class="field"><label>最高资产 <span style="font-weight:normal;color:var(--muted)">(选填·算CPPI)</span></label><input id="rb-peak" class="mono" placeholder="曾达到的峰值如 120000"></div>
         </div>
-        <div class="field" style="margin-top:12px"><label>持仓 · 每行 代码 金额</label><textarea id="rb-holdings" placeholder="110011 2.5万
-161725 18000
+        <div class="field" style="margin-top:12px"><label>持仓 · 每行: 代码 金额 [买入日期/年份(选填·算20%止损)]</label><textarea id="rb-holdings" placeholder="110011 2.5万 2024-01-01
+161725 18000 2023-06-30
 003096 1.2万"></textarea></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
           <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="rbFillExample()">示例</button>
@@ -492,7 +493,7 @@ function toggleWd(i){ WD_OPEN[i]=!WD_OPEN[i]; document.getElementById('wd-'+i)?.
 function watchToRebalance(){const c=document.getElementById('watch').value.trim(); if(!c) return; document.getElementById('rb-holdings').value=c.split(/[\s,，、]+/).filter(Boolean).map(x=>x.padStart(6,'0')+' 1万').join('\n'); document.getElementById('sec-rebalance').scrollIntoView({behavior:'smooth'}); updateRbPreview()}
 
 // rebalance
-function parseHoldingsText(t){const out=[]; for(const line of String(t||'').split(/[\n;；]+/)){const tr=line.trim(); if(!tr) continue; for(const seg of tr.split(/[,，]+/).map(s=>s.trim()).filter(Boolean)){const p=seg.split(/[\s:：]+/).filter(Boolean); const c=(p[0]||'').replace(/[^0-9]/g,'').padStart(6,'0'); if(!/^\d{6}$/.test(c)) continue; const v=p.length>1?parseYuan(p.slice(1).join(' ')):null; out.push({code:c,amount:v}); if(out.length>=50) break}} return out}
+function parseHoldingsText(t){const out=[]; for(const line of String(t||'').split(/[\n;；]+/)){const tr=line.trim(); if(!tr) continue; for(const seg of tr.split(/[,，]+/).map(s=>s.trim()).filter(Boolean)){const p=seg.split(/[\s:：]+/).filter(Boolean); const c=(p[0]||'').replace(/[^0-9]/g,'').padStart(6,'0'); if(!/^\d{6}$/.test(c)) continue; const v=p.length>1?parseYuan(p[1]):null; const d=p.length>2?p[2]:null; out.push({code:c,amount:v,entry_date:d}); if(out.length>=50) break}} return out}
 function updateRbPreview(){
   const t=document.getElementById('rb-holdings').value, total=parseYuan(document.getElementById('rb-total').value), cash=parseYuan(document.getElementById('rb-cash').value);
   const h=parseHoldingsText(t), n=h.length, sum=h.reduce((s,x)=>s+(x.amount||0),0);
@@ -500,21 +501,21 @@ function updateRbPreview(){
   const msg=n? `${n}只 · ${fmtYuanFull(sum)}` : '等待输入';
   document.getElementById('rb-preview').textContent=msg;
 }
-['rb-total','rb-cash','rb-holdings'].forEach(id=>document.getElementById(id)?.addEventListener('input',updateRbPreview));
-function rbFillExample(){document.getElementById('rb-total').value='100000';document.getElementById('rb-cash').value='20000';document.getElementById('rb-holdings').value='110011 2.5万\n161725 1.8万\n003096 1.2万';updateRbPreview()}
+['rb-total','rb-cash','rb-holdings','rb-peak'].forEach(id=>document.getElementById(id)?.addEventListener('input',updateRbPreview));
+function rbFillExample(){document.getElementById('rb-total').value='100000';document.getElementById('rb-cash').value='20000';document.getElementById('rb-peak').value='120000';document.getElementById('rb-holdings').value='110011 2.5万 2024-01-01\n161725 1.8万\n003096 1.2万';updateRbPreview()}
 function rbFromBoardTop(){if(!ROWS.length) return; const top=ROWS.filter(r=>r.S_total>=70).slice(0,5).map(r=>r.code+' 1万'); document.getElementById('rb-holdings').value=top.join('\n'); updateRbPreview()}
 function rbClear(){document.getElementById('rb-holdings').value=''; updateRbPreview(); document.getElementById('rb-out').innerHTML='';}
 function addToRebalance(c){c=String(c).padStart(6,'0'); const ta=document.getElementById('rb-holdings'); const cur=ta.value.trim(); if(parseHoldingsText(cur).some(x=>x.code===c)) return; ta.value=(cur?cur+'\n':'')+c+' 1万'; updateRbPreview(); document.getElementById('sec-rebalance').scrollIntoView({behavior:'smooth'})}
-function rbSave(){localStorage.setItem('rb_data',JSON.stringify({total:document.getElementById('rb-total').value,cash:document.getElementById('rb-cash').value,holdings:document.getElementById('rb-holdings').value})); setStatus('rb-dot','rb-st','ok','已记忆')}
-function rbLoad(){try{const d=JSON.parse(localStorage.getItem('rb_data')||'null'); if(!d) return; document.getElementById('rb-total').value=d.total||'';document.getElementById('rb-cash').value=d.cash||'';document.getElementById('rb-holdings').value=d.holdings||'';updateRbPreview()}catch(e){}}
+function rbSave(){localStorage.setItem('rb_data',JSON.stringify({total:document.getElementById('rb-total').value,cash:document.getElementById('rb-cash').value,peak:document.getElementById('rb-peak')?.value||'',holdings:document.getElementById('rb-holdings').value})); setStatus('rb-dot','rb-st','ok','已记忆')}
+function rbLoad(){try{const d=JSON.parse(localStorage.getItem('rb_data')||'null'); if(!d) return; document.getElementById('rb-total').value=d.total||'';document.getElementById('rb-cash').value=d.cash||'';if(document.getElementById('rb-peak'))document.getElementById('rb-peak').value=d.peak||'';document.getElementById('rb-holdings').value=d.holdings||'';updateRbPreview()}catch(e){}}
 async function runRebalance(){
   const holdings=parseHoldingsText(document.getElementById('rb-holdings').value.trim());
   if(!holdings.length) return;
-  const total=parseYuan(document.getElementById('rb-total').value), cash=parseYuan(document.getElementById('rb-cash').value);
+  const total=parseYuan(document.getElementById('rb-total').value), cash=parseYuan(document.getElementById('rb-cash').value), peak=parseYuan(document.getElementById('rb-peak')?.value);
   document.getElementById('rb-btn').disabled=true; setStatus('rb-dot','rb-st','busy','计算中…');
   document.getElementById('rb-out').innerHTML='<div class="empty">计算中…</div>';
   try{
-    const r=await fetch('/api/rebalance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({total_capital:total||0,cash:cash||0,holdings})});
+    const r=await fetch('/api/rebalance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({total_capital:total||0,cash:cash||0,peak_capital:peak||0,holdings})});
     const j=await r.json(); if(!j.ok){setStatus('rb-dot','rb-st','err',j.message); document.getElementById('rb-out').innerHTML=`<div class="empty" style="color:var(--danger)">${j.message}</div>`; return}
     setStatus('rb-dot','rb-st','ok',`完成 · 参照 ${j.ref_stamp||'—'}`); renderRebalance(j);
   }catch(e){const msg=e.name==='AbortError'?'请求超时（180秒），请减少至3只以内或稍后重试':(e.message||'网络错误'); setStatus('rb-dot','rb-st','err',msg); document.getElementById('rb-out').innerHTML=`<div class="empty" style="color:var(--danger);border-color:#fecdd3;background:var(--danger-soft)">请求失败：${msg}<br><span style="color:var(--muted)">单基可用说明服务正常；持仓批量对并发更敏感，建议分2批（每次≤3只）或稍后重试。已自动降并发至2线程。</span><br><button class="btn btn-ghost" style="margin-top:8px;padding:6px 12px;font-size:12px" onclick="runRebalance()">重试</button></div>`}finally{document.getElementById('rb-btn').disabled=false}
@@ -528,6 +529,16 @@ function renderRebalance(j){
     <div class="kpi"><label>操作</label><b>${s.num_sells? s.num_sells+' 卖出':'—'}</b><small>保留 ${s.num_keeps||0}</small></div>
     <div class="kpi"><label>现金余额</label><b>${fmtYuan(s.cash_after)}</b><small>${s.cash_pct_after||0}%</small></div>
   </div>`;
+  const cppi=s.cppi_info||{};
+  let cppiBanner='';
+  if(cppi.peak_capital>0){
+    const clr=cppi.level==='danger'?'var(--danger)':cppi.level==='warning'?'#d97706':'var(--success)';
+    const bg=cppi.level==='danger'?'var(--danger-soft)':cppi.level==='warning'?'#fffbeb':'var(--success-soft)';
+    cppiBanner=`<div style="margin-top:12px;padding:10px 14px;border-radius:8px;border:1px solid ${clr};background:${bg};font:12px var(--mono);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap">
+      <span style="color:${clr};font-weight:600">${cppi.status_label}</span>
+      <span style="color:var(--muted)">峰值 ${fmtYuanFull(cppi.peak_capital)} · 现值 ${fmtYuanFull(cppi.curr_capital)} · 容许上限 ${s.effective_max_slots ?? s.max_slots} 槽</span>
+    </div>`;
+  }
   const nErr=holdings.filter(h=>h.is_error).length;
   const nRetry=holdings.filter(h=>h.is_error && h.retryable!==false).length;
   const errBanner=nErr? `<div style="margin-top:12px;padding:10px 12px;border:1px solid #fde68a;background:#fffbeb;border-radius:8px;font:12px var(--mono);display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span>${nErr} 只待复核${nRetry? ` · ${nRetry} 只可重试`:``}</span>${nRetry? `<button class="btn btn-ghost" style="padding:4px 10px;font-size:12px" onclick="retryFailedHoldings()">重试可重试项</button>`:``}<span style="color:var(--faint)">新基历史不足无需重试</span></div>`:'';
@@ -537,12 +548,13 @@ function renderRebalance(j){
       return `<tr style="background:${canRetry?'#fffbeb':'#f5f5f4'}"><td>${h.code}</td><td class="name">${h.name}</td><td style="text-align:right">${fmtYuanFull(h.amount)}</td><td>—</td><td><span class="badge ${canRetry?'b-amber':'b-mute'}">${canRetry?'待重试':'观察仓'}</span></td><td><span class="badge b-mute">—</span></td><td style="max-width:260px;white-space:normal;font:12px var(--sans);color:var(--muted)">${h.error||''}</td><td>${canRetry?`<button class="btn btn-ghost" style="padding:4px 8px;font-size:11px" onclick="retryRebalanceSingle('${h.code}')">重试</button>`:`<span class="mono faint">—</span>`}</td></tr>`;
     }
     const act=h.action==='sell'?'卖出':'持有';
-    return `<tr><td>${h.code}</td><td class="name">${h.name}</td><td style="text-align:right">${fmtYuanFull(h.amount)}</td><td class="score">${h.S_total??'—'}</td><td>${ratingCell(h)}</td><td>${sigOf(h)}</td><td>${h.action_label||act}</td><td style="text-align:right">${fmtYuanFull(h.target_amount)}</td></tr>`;
+    const tag = h.trail_triggered ? `<span class="badge b-red" style="margin-left:4px" title="${h.trail_msg||''}">20%止损</span>` : '';
+    return `<tr><td>${h.code}</td><td class="name">${h.name}</td><td style="text-align:right">${fmtYuanFull(h.amount)}</td><td class="score">${h.S_total??'—'}</td><td>${ratingCell(h)}</td><td>${sigOf(h)}</td><td>${h.action_label||act}${tag}</td><td style="text-align:right">${fmtYuanFull(h.target_amount)}</td></tr>`;
   }).join('');
   const hTable=`<div style="margin-top:14px"><div class="table-wrap"><table><thead><tr><th>代码</th><th>名称</th><th>金额</th><th>总分</th><th>评级</th><th>信号</th><th>操作</th><th>目标</th></tr></thead><tbody>${hRows}</tbody></table></div></div>`;
   const orderHtml=orders.length? `<div style="margin-top:14px"><div class="orders">${orders.map(o=>`<div class="order ${o.side==='SELL'?'sell':'buy'}"><span class="side">${o.side==='SELL'?'卖出':'买入'}</span><div class="meta"><b>${o.code} ${o.name}</b><div>${o.reason||''}</div></div><div class="amt">${fmtYuanFull(o.amount)}</div></div>`).join('')}</div><div style="margin-top:8px;display:flex;gap:8px"><button class="btn btn-ghost" style="padding:6px 12px;font-size:12px" onclick="copyOrders()">复制</button><button class="btn btn-ghost" style="padding:6px 12px;font-size:12px" onclick="downloadOrders()">导出</button></div></div>`:`<div class="empty" style="margin-top:12px">${j.scan_msg||'无操作'}</div>`;
   const allocHtml=alloc.length? `<div style="margin-top:14px"><div class="alloc-bar">${alloc.map((a,i)=>`<i style="width:${a.pct}%;background:${['#0c0a09','#57534e','#a8a29e','#d6d3d1','#e7e5e4'][i%5]}"></i>`).join('')}<i style="width:${s.cash_pct_after||0}%;background:var(--surface-2);border:1px dashed var(--line)"></i></div><div class="legend">${alloc.map((a,i)=>`<span><em style="background:${['#0c0a09','#57534e','#a8a29e'][i%3]}"></em>${a.code} ${a.pct}%</span>`).join('')}<span><em style="background:var(--surface-2);border:1px solid var(--line)"></em>现金 ${s.cash_pct_after||0}%</span></div></div>`:'';
-  document.getElementById('rb-out').innerHTML=kpis+errBanner+hTable+orderHtml+allocHtml;
+  document.getElementById('rb-out').innerHTML=kpis+cppiBanner+errBanner+hTable+orderHtml+allocHtml;
   window._lastRebalance=j;
 }
 function copyOrders(){const j=window._lastRebalance; if(!j) return; const t=(j.orders||[]).map(o=>`${o.side} ${o.code} ${o.amount}`).join('\n'); navigator.clipboard.writeText(t).then(()=>setStatus('rb-dot','rb-st','ok','已复制'))}
