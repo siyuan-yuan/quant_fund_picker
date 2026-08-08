@@ -4,7 +4,7 @@
 手动触发爬取→计算→出榜, 本地运行
 启动: python webapp.py  (默认运行于 0.0.0.0:8000，生产级 WSGI 服务)
 """
-import os, glob, json, time, re, threading, datetime as dt
+import os, glob, json, time, re, random, threading, datetime as dt
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from math import sqrt
 
@@ -15,6 +15,7 @@ from flask import Flask, jsonify, request, render_template
 import provider, rbsa, factors, risk
 from engine import score_fund, finalize, market_water, resolve_weights
 from scan_market import build_universe
+import holding_diag
 from config import (
     RBSA_INDICES, OUTPUT_DIR,
     STRAT_VERSION, STRAT_BUY_TH, STRAT_SELL_TH, STRAT_SLOTS,
@@ -23,10 +24,197 @@ from config import (
     STRAT_CPPI, STRAT_CPPI_DD1, STRAT_CPPI_SLOTS1,
     STRAT_CPPI_DD2, STRAT_CPPI_SLOTS2,
     STRAT_CPPI_DD3, STRAT_CPPI_SLOTS3,
-    STRAT_STYLE_CAP,
+    STRAT_CPPI_HYSTERESIS, STRAT_STYLE_CAP,
 )
 
 app = Flask(__name__)
+
+# ---------------- 操作台账（买卖记录持久化，output/ledger.json） ----------------
+LEDGER_FILE = os.path.join(OUTPUT_DIR, "ledger.json")
+
+
+def _load_ledger() -> list:
+    """读取台账记录；文件缺失/损坏返回 []"""
+    try:
+        with open(LEDGER_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            data = data.get("txns", [])
+        if not isinstance(data, list):
+            return []
+        return [t for t in data if isinstance(t, dict)]
+    except Exception:
+        return []
+
+
+def _save_ledger(txns: list) -> bool:
+    """原子写台账（tmp+rename 防半写损坏）"""
+    try:
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        tmp = LEDGER_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "txns": txns}, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, LEDGER_FILE)
+        return True
+    except Exception:
+        return False
+
+
+def _norm_txn(t) -> dict:
+    """规范化单条台账记录 → 合法记录或 None"""
+    if not isinstance(t, dict):
+        return None
+    code = str(t.get("code", "")).strip()
+    if not re.fullmatch(r"\d{6}", code):
+        return None
+    d = _parse_date(t.get("date"))
+    if not d:
+        return None
+    side = str(t.get("side", "")).strip().lower()
+    if side in ("买", "买入", "b", "buy"):
+        side = "buy"
+    elif side in ("卖", "卖出", "s", "sell"):
+        side = "sell"
+    else:
+        return None
+    amt = _parse_yuan(t.get("amount"))
+    if not amt or amt <= 0:
+        return None
+    tid = str(t.get("id") or f"l{int(time.time()*1000)}{random.randint(0,9999)}")
+    return {"id": tid, "code": code, "date": d, "side": side,
+            "amount": round(float(amt), 2), "note": str(t.get("note", "") or "")[:120]}
+
+
+def _ledger_by_code(txns: list) -> dict:
+    """code -> [(date, side, amount), ...]（按日期排序，供持仓诊断）"""
+    by = {}
+    for t in txns:
+        by.setdefault(t["code"], []).append((t["date"], t["side"], t["amount"]))
+    return by
+
+
+@app.get("/api/ledger")
+def ledger_get():
+    """返回台账全部记录 + 每只基金实时状态（份额/成本/市值/回撤/止损），+组合CPPI(cash可选)"""
+    txns = _load_ledger()
+    cash = _parse_yuan(request.args.get("cash")) if request.args.get("cash") else None
+    by = _ledger_by_code(txns)
+    states = []
+    names = {}
+    try:
+        meta = provider.get_fund_meta()
+        names = dict(zip(meta.index.astype(str), meta["基金简称"])) if len(meta) else {}
+    except Exception:
+        pass
+    curves = {}
+    for code in sorted(by.keys()):
+        lots = by[code]
+        st = None
+        try:
+            nav_df = provider.get_fund_nav(code)
+            st = holding_diag.fund_lots_diag(lots, nav_df)
+            if st.get("curve") is not None:
+                curves[code] = st["curve"]
+        except Exception as e:
+            st = {"computable": False, "status": "no_data", "reason": str(e)[:100]}
+        states.append({
+            "code": code,
+            "name": names.get(code, code),
+            "lots": [{"date": d, "side": s, "amount": a} for d, s, a in lots],
+            "state": {k: v for k, v in st.items() if k != "curve"},
+        })
+    # 组合级 CPPI（可选现金；无现金时仅基金侧状态）
+    cppi = None
+    if cash is not None and curves:
+        cppi = holding_diag.portfolio_cppi([(c,) for c in curves.values()], cash=cash,
+                                           rules=[(STRAT_CPPI_DD1, STRAT_CPPI_SLOTS1),
+                                                  (STRAT_CPPI_DD2, STRAT_CPPI_SLOTS2),
+                                                  (STRAT_CPPI_DD3, STRAT_CPPI_SLOTS3)],
+                                           full_slots=STRAT_SLOTS, hysteresis=STRAT_CPPI_HYSTERESIS)
+    return jsonify(clean(dict(ok=True, txns=txns, funds=states, cppi=cppi)))
+
+
+@app.post("/api/ledger")
+def ledger_post():
+    """整体替换台账记录（前端持有全量，新增/删除后整存）；返回规范化后的记录"""
+    body = request.get_json(silent=True) or {}
+    raw = body.get("txns")
+    if not isinstance(raw, list):
+        return jsonify({"ok": False, "message": "txns 需要是数组"}), 400
+    txns = [t for t in (_norm_txn(t) for t in raw) if t]
+    if not _save_ledger(txns):
+        return jsonify({"ok": False, "message": "台账写入失败（output 目录不可写？）"}), 500
+    return jsonify(clean(dict(ok=True, txns=txns, message=f"已保存 {len(txns)} 条记录")))
+
+
+@app.post("/api/ledger/import")
+def ledger_import():
+    """把持仓输入（代码 市值 [买入日期|成本|收益率]）转换为买入记录并入台账。
+    只导入含买入日期或成本的持仓；仅市值+日期时成本按净值折算（锚定市值口径）。"""
+    body = request.get_json(silent=True) or {}
+    holdings_in = body.get("holdings")
+    if not isinstance(holdings_in, list):
+        return jsonify({"ok": False, "message": "holdings 需要是数组"}), 400
+    txns = _load_ledger()
+    existing_ids = {t["id"] for t in txns}
+    existing_keys = {(t["code"], t["date"], t["side"], round(float(t["amount"]), 2)) for t in txns}
+    added = 0
+    for h in holdings_in:
+        if not isinstance(h, dict):
+            continue
+        code = str(h.get("code", "")).zfill(6)
+        if not re.fullmatch(r"\d{6}", code):
+            continue
+        amt = _parse_yuan(h.get("amount"))
+        buy_date = _parse_date(h.get("buy_date"))
+        cost = _parse_yuan(h.get("cost"))
+        ret_pct = _parse_pct(h.get("ret_pct"))
+        if not amt or amt <= 0:
+            continue
+        if buy_date is None and cost is None and ret_pct is None:
+            continue          # 无入场信息，无法转成买入记录
+        if buy_date is None:
+            # 用净值反推入场日（收益率或 成本→收益率）
+            try:
+                adj = holding_diag.adj_series(provider.get_fund_nav(code))
+                r_infer = ret_pct
+                if r_infer is None and cost and cost > 0:
+                    r_infer = (amt / cost - 1.0) * 100.0
+                if r_infer is None:
+                    continue
+                d0, _ = holding_diag.infer_entry_date(adj, r_infer)
+                if d0 is None:
+                    continue
+                buy_date = str(d0.date())
+            except Exception:
+                continue
+        if cost is None or cost <= 0:
+            # 只有市值+日期：成本 = 市值 × adj(买入日)/adj(now)（锚定口径）
+            try:
+                adj = holding_diag.adj_series(provider.get_fund_nav(code))
+                d = pd.Timestamp(buy_date)
+                pos = int(adj.index.searchsorted(d))
+                pos = min(max(pos, 0), len(adj) - 1)
+                cost = amt * float(adj.iloc[pos]) / float(adj.iloc[-1])
+            except Exception:
+                cost = amt
+        t = _norm_txn({"code": code, "date": buy_date, "side": "buy", "amount": cost, "note": "导入"})
+        key = (t["code"], t["date"], t["side"], round(t["amount"], 2)) if t else None
+        if t and t["id"] not in existing_ids and key not in existing_keys:
+            txns.append(t)
+            existing_ids.add(t["id"])
+            existing_keys.add(key)
+            added += 1
+    _save_ledger(txns)
+    return jsonify(clean(dict(ok=True, txns=txns, added=added)))
+
+
+@app.delete("/api/ledger")
+def ledger_delete():
+    _save_ledger([])
+    return jsonify({"ok": True, "txns": []})
+
+
 STATE = {"phase": "idle", "done": 0, "total": 0, "started": None,
          "elapsed": 0, "message": "空闲", "stamp": None, "scan_mode": "default"}
 LOCK = threading.Lock()
@@ -441,6 +629,38 @@ def _parse_yuan(v):
         return None
 
 
+def _parse_pct(v):
+    """解析收益率：支持 12.3 / '12.3%' / '+8.5%' / '-8.5%'；失败返回 None"""
+    if v is None or v == "":
+        return None
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        try:
+            f = float(v)
+            return f if np.isfinite(f) else None
+        except:
+            return None
+    s = str(v).strip().replace("%", "").replace("％", "").replace(",", "").replace(" ", "")
+    if not s:
+        return None
+    try:
+        return float(s)
+    except:
+        return None
+
+
+def _parse_date(v):
+    """解析日期：YYYY-MM-DD / YYYY/MM/DD / YYYYMMDD / YYYY.MM.DD；失败返回 None"""
+    if v is None:
+        return None
+    s = str(v).strip()
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y%m%d", "%Y.%m.%d"):
+        try:
+            return dt.datetime.strptime(s, fmt).date().isoformat()
+        except:
+            continue
+    return None
+
+
 def _is_veto_row(row):
     """判断是否否决池：penalties含 -100% 或 S_total==0且有回撤惩罚"""
     ps = str(row.get("penalty_str") or "")
@@ -480,7 +700,7 @@ def rebalance():
         total_capital = 0.0
     # ---- 解析持仓 ----
     holdings_in = body.get("holdings", None)
-    # 兼容 holdings_text
+    # 兼容 holdings_text：每行 "代码 市值 [买入日期|成本|收益率%]"
     if (not holdings_in) and body.get("holdings_text"):
         txt = str(body.get("holdings_text"))
         holdings_in = []
@@ -494,36 +714,70 @@ def rebalance():
                 continue
             code = parts[0].strip().zfill(6)
             amt = _parse_yuan(parts[1]) if len(parts)>1 else None
-            holdings_in.append({"code": code, "amount": amt})
+            h = {"code": code, "amount": amt}
+            if len(parts) > 2:
+                p3 = parts[2].strip()
+                d = _parse_date(p3)
+                if d:
+                    h["buy_date"] = d
+                elif p3.endswith("%") or p3.endswith("％"):
+                    h["ret_pct"] = _parse_pct(p3)
+                else:
+                    c = _parse_yuan(p3)
+                    if c is not None:
+                        h["cost"] = c
+            holdings_in.append(h)
     if not isinstance(holdings_in, list):
         holdings_in = []
     # 标准化
     norm_holdings = []
     for h in holdings_in:
+        buy_date = cost = ret_pct = None
         if isinstance(h, (list, tuple)) and len(h)>=1:
             code = str(h[0]).zfill(6)
             amt = _parse_yuan(h[1]) if len(h)>1 else None
+            if len(h) > 2:
+                p3 = str(h[2]).strip()
+                d = _parse_date(p3)
+                if d:
+                    buy_date = d
+                elif p3.endswith("%") or p3.endswith("％"):
+                    ret_pct = _parse_pct(p3)
+                else:
+                    cost = _parse_yuan(p3)
         elif isinstance(h, dict):
             code = str(h.get("code", h.get("symbol",""))).zfill(6)
-            # amount 字段多种别名
+            # amount 字段多种别名（市值）
             amt_raw = h.get("amount", h.get("value", h.get("market_value", h.get("amt", h.get("holding", None)))))
             amt = _parse_yuan(amt_raw)
+            buy_date = _parse_date(h.get("buy_date", h.get("date", h.get("entry_date", None))))
+            cost = _parse_yuan(h.get("cost", None))
+            ret_pct = _parse_pct(h.get("ret_pct", h.get("return_pct", None)))
         else:
             code = str(h).zfill(6)
             amt = None
         if not re.fullmatch(r"\d{6}", code):
             continue
-        norm_holdings.append({"code": code, "amount": amt})
+        norm_holdings.append({"code": code, "amount": amt, "buy_date": buy_date, "cost": cost, "ret_pct": ret_pct})
         if len(norm_holdings) >= 50:
             break
+    # ---- 操作台账并入：台账基金自动加入诊断（无需每次重输持仓，新增操作只记台账）----
+    use_ledger = bool(body.get("use_ledger", True))
+    ledger_by = _ledger_by_code(_load_ledger()) if use_ledger else {}
+    if ledger_by:
+        seen = {h["code"] for h in norm_holdings}
+        for code in ledger_by:
+            if code not in seen:
+                norm_holdings.append({"code": code, "amount": None, "buy_date": None,
+                                      "cost": None, "ret_pct": None, "_ledger": True})
+                seen.add(code)
     if not norm_holdings:
-        return jsonify({"ok": False, "message": "请至少输入 1 只持仓基金代码（6位数字）"}), 400
+        return jsonify({"ok": False, "message": "请至少输入 1 只持仓基金代码，或在操作台账中添加买入记录"}), 400
 
     # ---- 危机 & 策略快照 ----
     crisis = _compute_crisis()
     crisis_active = bool(crisis.get("active") or crisis.get("data_insufficient"))
-    max_slots_by_macro = 0 if crisis_active else STRAT_SLOTS
-    # CPPI 默认不自动触发（需用户净值曲线），仅展示规则
+    # 注: max_slots_by_macro 在 CPPI 计算后定义（crisis → 0, 否则 10）；slots_eff 为最终生效槽位
     # ---- 评分持仓 ----
     codes = [h["code"] for h in norm_holdings]
     code_to_amount = {h["code"]: (h["amount"] if h["amount"] is not None else 0.0) for h in norm_holdings}
@@ -615,6 +869,29 @@ def rebalance():
         code = h["code"]
         amt = code_to_amount.get(code, 0.0) or 0.0
         rec = row_by_code.get(code, {"code": code, "name": code})
+        # ---- 入场高点回撤止损：用真实净值历史自动计算 ----
+        # 路径A（操作台账）：多笔买入/卖出 → FIFO 份额与成本 → 持仓曲线 → 回撤
+        # 路径B（输入行）：代码+市值+买入日期/成本/收益率 → 单笔（内部同样走多笔引擎）
+        stop = None
+        stop_curve = None
+        try:
+            nav_df = provider.get_fund_nav(code)
+            if ledger_by.get(code):
+                stop = holding_diag.fund_lots_diag(
+                    ledger_by[code], nav_df,
+                    anchor_amount=amt if amt and amt > 0 else None,
+                    stop=STRAT_TRAIL_STOP)
+            else:
+                # 用户输入(买入日期/成本/收益率)合并进评分行，供净值曲线反推入场
+                rec_in = dict(rec) if isinstance(rec, dict) else {"code": code, "name": code}
+                for _k in ("amount", "buy_date", "cost", "ret_pct"):
+                    if h.get(_k) is not None:
+                        rec_in[_k] = h[_k]
+                stop = holding_diag.fund_stop_diag(rec_in, nav_df, stop=STRAT_TRAIL_STOP)
+            if isinstance(stop, dict):
+                stop_curve = stop.pop("curve", None)
+        except Exception:
+            stop = None
         # ---- 关键修复：pandas 的 NaN 误判为真错误 ----
         raw_err = rec.get("error")
         # pandas 的 NaN、None、空串、字符串 "nan" 均视为无错
@@ -646,11 +923,20 @@ def rebalance():
         penalties = _safe_list(rec.get("penalties"))
         penalty_detail = _safe_dict(rec.get("penalty_detail"))
         rbsa_detail = _safe_dict(rec.get("rbsa"))
+        # 台账路径下当前市值由份额×净值自动算出（锚定用户填写值）；用户没填市值时直接用计算值
+        if isinstance(stop, dict) and stop.get("mv_now"):
+            amt = float(stop["mv_now"])
         holdings_detail.append({
             "code": code,
             "name": rec.get("name") or code,
             "ftype": ftype,
             "amount": round(float(amt),2),
+            "from_ledger": bool(ledger_by.get(code)),
+            "mv_computed": round(float(stop["mv_now"]), 2) if isinstance(stop, dict) and stop.get("mv_now") else None,
+            "basis": round(float(stop["basis"]), 2) if isinstance(stop, dict) and stop.get("basis") else None,
+            "lots_n": int(stop["lots_n"]) if isinstance(stop, dict) and stop.get("lots_n") else None,
+            "over_sell": bool(stop.get("over_sell")) if isinstance(stop, dict) else False,
+            "stop_curve": stop_curve,
             "S_total": None if s_val is None or not np.isfinite(s_val) else round(float(s_val),1),
             "rating": rating,
             "F_value": rec.get("F_value"),
@@ -671,10 +957,55 @@ def rebalance():
             "is_error": is_err,
             "retryable": is_retryable if is_err else False,
             "data_incomplete": bool(rec.get("data_incomplete")),
+            "stop": stop,
         })
         scored_holdings.append({
             "code": code, "s": s_val, "veto": veto, "err": is_err, "amt": amt, "rec": rec
         })
+
+    # ---- 台账中已全部卖出的基金剔除出组合（flat），提示但不参与诊断 ----
+    flat_warns = []
+    flat_codes = [h["code"] for h in holdings_detail
+                  if isinstance(h.get("stop"), dict) and h["stop"].get("flat")]
+    if flat_codes:
+        holdings_detail = [h for h in holdings_detail if h["code"] not in flat_codes]
+        for fc in flat_codes:
+            flat_warns.append(f"{fc} 在操作台账中已全部卖出，已从本次诊断中剔除")
+
+    # ---- 组合级 CPPI：真实净值重建组合曲线 → HWM → 动态槽位 ----
+    # 仅需"买入日期(或收益率) + 成本(或市值)"即可自动计算，无需用户维护净值曲线
+    cppi_rules = [
+        (STRAT_CPPI_DD1, STRAT_CPPI_SLOTS1),
+        (STRAT_CPPI_DD2, STRAT_CPPI_SLOTS2),
+        (STRAT_CPPI_DD3, STRAT_CPPI_SLOTS3),
+    ]
+    fund_series = []
+    for h in holdings_detail:
+        st = h.get("stop") or {}
+        # 优先用台账/单笔引擎算出的持仓市值曲线（已锚定当前市值，含多笔买卖）
+        if st.get("computable") and h.get("stop_curve") is not None and len(h["stop_curve"]) >= 5:
+            fund_series.append((h["stop_curve"],))
+            continue
+        # 兜底：单笔输入重建 市值×复权净值比 曲线
+        scale = (st.get("amount") or 0) if (st.get("amount") or 0) > 0 else (st.get("cost") or 0)
+        if st.get("computable") and st.get("entry_date") and scale > 0:
+            try:
+                nav_df = provider.get_fund_nav(h["code"])
+                fund_series.append((st["entry_date"], scale, holding_diag.adj_series(nav_df)))
+            except Exception:
+                continue
+    # Series 曲线仅用于计算，不进入 JSON 响应
+    for h in holdings_detail:
+        h.pop("stop_curve", None)
+    cppi = holding_diag.portfolio_cppi(
+        fund_series, cash=cash if cash and cash > 0 else 0.0,
+        rules=cppi_rules, full_slots=STRAT_SLOTS, hysteresis=STRAT_CPPI_HYSTERESIS,
+    )
+    cppi_ok = bool(cppi.get("computable"))
+    cppi_slots = int(cppi.get("slots", STRAT_SLOTS)) if cppi_ok else STRAT_SLOTS
+    # 生效槽位 = min(宏观槽位(危机=0), CPPI档位槽位)
+    max_slots_by_macro = 0 if crisis_active else STRAT_SLOTS
+    slots_eff = min(cppi_slots, max_slots_by_macro)
 
     # ---- 资产汇总 ----
     holdings_value = round(float(sum(h["amount"] for h in holdings_detail)),2)
@@ -682,7 +1013,7 @@ def rebalance():
     if total_capital <= 0:
         total_capital = holdings_value + cash
     # 防止 total_capital 小于已有资产：仍以输入为准，但标记警告
-    per_slot = round(total_capital / STRAT_SLOTS, 2) if total_capital>0 else 0.0
+    per_slot = round(total_capital / slots_eff, 2) if total_capital>0 and slots_eff>0 else 0.0
     # ---- 持仓诊断 & 操作分类 ----
     # V3.8 规则：S<45 卖出；S>=70 候选买入/持有；45-70持有
     sells = []
@@ -697,6 +1028,30 @@ def rebalance():
             h["target_amount"] = h["amount"]
             holds.append(h)
             keeps.append(h)
+            continue
+        # V3.8 移动止损（自动计算）：自入场日起高点回撤 > 20% → 清仓
+        st = h.get("stop") or {}
+        if st.get("status") == "triggered":
+            h["action"] = "sell"
+            h["action_label"] = "纪律卖出·入场高点回撤20%"
+            dd_txt = f"{st['dd']*100:.1f}%" if st.get("dd") is not None else "—"
+            h["action_reason"] = (f"自入场日({st.get('entry_date')})高点 {st.get('peak')} 回撤 {dd_txt}，"
+                                  f"已击穿20%移动止损线（触发价 {st.get('trigger_nav')}）→ 清仓"
+                                  + ("（买入日由收益率推断）" if st.get("inferred") else ""))
+            h["target_amount"] = 0.0
+            h["sell_amount"] = h["amount"]
+            sells.append(h)
+            continue
+        # CPPI 清仓档（回撤≤-25%）：组合整体清仓，等待右侧信号重启（HWM重置纪律）
+        if cppi_ok and cppi_slots == 0:
+            rs = cppi.get("restore") or {}
+            h["action"] = "sell"
+            h["action_label"] = "纪律卖出·CPPI清仓档"
+            h["action_reason"] = (f"组合自高点 {cppi['hwm']:,.0f} 元回撤 {cppi['dd']*100:.1f}%，跌破-25%清仓线，"
+                                  + (f"待回升至 {rs.get('value',0):,.0f} 元（-{abs(rs.get('dd',0))*100:.0f}%）恢复 {rs.get('slots',3)} 槽或出现右侧信号后再重启" if rs else "待右侧信号重启"))
+            h["target_amount"] = 0.0
+            h["sell_amount"] = h["amount"]
+            sells.append(h)
             continue
         s = h["S_total"]
         veto = h["is_veto"]
@@ -739,19 +1094,20 @@ def rebalance():
 
     # 处理超槽位：若保留持仓数 > 允许槽位（常见于从未调仓的老组合持有20只），则把最弱的持仓加入卖出
     # 仅在非危机且未触发 CPPI 极端时生效；危机时 max_slots=0 不做强制清退（按纪律仅禁新买）
+    # 槽位上限 = 生效槽位 slots_eff（宏观×CPPI 动态档位）
     num_keep = len(keeps)
     extra_sells = []
-    if not crisis_active and num_keep > STRAT_SLOTS:
+    if not crisis_active and slots_eff > 0 and num_keep > slots_eff:
         # 按 S 升序把多余的转为卖出
         keeps_sorted = sorted(keeps, key=lambda x: (x["S_total"] if x["S_total"] is not None else -1))
-        overflow = num_keep - STRAT_SLOTS
+        overflow = num_keep - slots_eff
         for h in keeps_sorted[:overflow]:
             # 已是卖出的不重复
             if h["action"] == "sell":
                 continue
             h["action"] = "sell"
             h["action_label"] = "纪律卖出·超槽位"
-            h["action_reason"] = f"持仓数{num_keep}超过槽位上限{STRAT_SLOTS}，按 S 最弱优先退出（S={h['S_total']}）"
+            h["action_reason"] = f"持仓数{num_keep}超过生效槽位上限{slots_eff}（CPPI档位），按 S 最弱优先退出（S={h['S_total']}）"
             h["target_amount"] = 0.0
             h["sell_amount"] = h["amount"]
             extra_sells.append(h)
@@ -762,7 +1118,7 @@ def rebalance():
     sell_proceeds = round(float(sum(h.get("sell_amount", h["amount"]) for h in sells)),2)
     cash_after_sells = round(cash + sell_proceeds,2)
     num_keep_after = len(keeps)
-    free_slots = max(0, max_slots_by_macro - num_keep_after) if not crisis_active else 0
+    free_slots = max(0, slots_eff - num_keep_after) if not crisis_active else 0
     # 危机时即使有 free_slots 也不允许新买，故强制 0
     if crisis_active:
         free_slots = 0
@@ -875,6 +1231,7 @@ def rebalance():
     cash_pct_after = round(cash_remaining/total_capital*100,1) if total_capital>0 else 0
 
     warnings = []
+    warnings.extend(flat_warns)
     # 集中度
     if portfolio_rbsa and portfolio_rbsa.get("flags"):
         for f in portfolio_rbsa["flags"]:
@@ -888,13 +1245,30 @@ def rebalance():
                 warnings.append(f"{h['code']} {h['name']} 档案数据缺失（数据源限流），任期类风控已豁免、评分仅供参考，建议稍后重试")
             if h.get("penalty_detail", {}).get("R_MDD") and h["penalty_detail"]["R_MDD"] and h["penalty_detail"]["R_MDD"]>2.0:
                 warnings.append(f"{h['code']} 超额回撤比 {h['penalty_detail']['R_MDD']} 偏高（>2.0 毒性区），即使暂未触发卖出也建议控制仓位")
+        # 单基 20% 移动止损接近线（真实净值自动计算）
+        st = h.get("stop") or {}
+        if st.get("status") == "near":
+            warnings.append(f"{h['code']} {h['name']} 自入场日({st.get('entry_date')})高点 {st.get('peak')} 已回撤 {st['dd']*100:.1f}%，接近20%移动止损线（触发价 {st.get('trigger_nav')}），建议收紧仓位")
+        elif st.get("status") == "triggered":
+            warnings.append(f"{h['code']} {h['name']} 已触发20%移动止损（自入场高点回撤 {st['dd']*100:.1f}%）→ 清仓")
+        elif st.get("status") in ("need_entry", "no_data") and st.get("reason"):
+            warnings.append(f"{h['code']} {h['name']}：{st['reason']}")
     # 危机
     if crisis_active:
         warnings.append(f"危机模式已激活（{crisis.get('reason','')}），已禁止新开仓，现有持仓仅按 S<{STRAT_SELL_TH:.0f} 或 20%移动止损退出")
-    # CPPI 提示
-    if total_capital>0 and holdings_value + cash >0:
-        # 无法计算用户回撤，仅提示规则
-        warnings.append(f"CPPI 风险预算：回撤≤-15%限6槽 / ≤-20%限3槽 / ≤-25%清仓（需跟踪你组合自高点回撤，本页仅提示规则）")
+    # CPPI 提示（真实净值自动计算 → 动态槽位）
+    if total_capital>0 and holdings_value + cash >0 and STRAT_CPPI:
+        if cppi_ok:
+            w = (f"CPPI 动态槽位：组合净值自高点 {cppi['hwm']:,.0f} 元回撤 {cppi['dd']*100:.1f}% → {cppi['tier_name']}（{cppi['slots']} 槽）")
+            if cppi_slots == 0:
+                w += "；已进入清仓档，全部持仓转卖出，等待右侧信号重启"
+            if cppi.get("next_trigger"):
+                w += f"；再跌至 {cppi['next_trigger']['value']:,.0f} 元（-{abs(cppi['next_trigger']['dd'])*100:.0f}%）降为 {cppi['next_trigger']['slots']} 槽"
+            if cppi.get("restore"):
+                w += f"；回升至 {cppi['restore']['value']:,.0f} 元（回撤 {cppi['restore']['dd']*100:.0f}% 内）恢复 {cppi['restore']['slots']} 槽"
+            warnings.append(w)
+        else:
+            warnings.append(f"CPPI 风险预算：回撤≤-15%限6槽 / ≤-20%限3槽 / ≤-25%清仓（{cppi.get('reason','提供买入日期/成本后自动计算真实触发状态')}）")
     # 现金不足
     if buys and total_need > cash_after_sells:
         warnings.append(f"可用现金 {cash_after_sells:,.0f} 元不足以按每槽 {per_slot:,.0f} 元填满 {len(candidates)} 个候选，已按均分 {per_buy:,.0f} 元/只 调整；可追加现金或减少持仓")
@@ -920,6 +1294,10 @@ def rebalance():
         cash_pct_after=cash_pct_after,
         max_slots=STRAT_SLOTS,
         max_slots_by_macro=max_slots_by_macro,
+        cppi_slots=cppi_slots if cppi_ok else STRAT_SLOTS,
+        slots_eff=slots_eff,
+        cppi_tier=cppi.get("tier_name") if cppi_ok else None,
+        portfolio_dd=round(cppi["dd"], 4) if cppi_ok else None,
         crisis_active=crisis_active,
     )
 
@@ -939,7 +1317,9 @@ def rebalance():
             ],
             crisis=crisis,
             max_slots_by_macro=max_slots_by_macro,
+            slots_eff=slots_eff,
         ),
+        cppi=clean(cppi),
         portfolio=portfolio_rbsa,
         summary=summary,
         holdings=clean(holdings_detail),

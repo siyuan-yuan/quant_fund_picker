@@ -134,6 +134,8 @@ STRAT_CPPI_DD1, STRAT_CPPI_SLOTS1 = -0.15, 6   # 回撤≤-15% → 最多6槽
 STRAT_CPPI_DD2, STRAT_CPPI_SLOTS2 = -0.20, 3   # 回撤≤-20% → 最多3槽
 STRAT_CPPI_DD3, STRAT_CPPI_SLOTS3 = -0.25, 0   # 回撤≤-25% → 清仓，等待右侧信号重启
 STRAT_CPPI_HWM_MODE = "reset"                  # 熔断后遇右侧信号且非危机：HWM重置为当前权益
+# 网页版持仓诊断：回补滞回带 —— 触发线 -15/-20/-25 减槽，回升至 线+2pp(-13/-18/-23) 加回槽位，防贴线抖动
+STRAT_CPPI_HYSTERESIS = 0.02
 
 # 保留的辅助安全阀/展示项
 STRAT_HI_WATER = 0.90        # 大盘水位≥90% → 持仓侧强制瘦身（历史变体中多为休眠）

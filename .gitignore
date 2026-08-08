@@ -6,3 +6,6 @@ __pycache__/
 output/strategy_experiment_*.csv
 output/strategy_experiment_*.md
 output/strategy_experiment_*.png
+
+# 用户操作台账（本地用户数据，不提交）
+output/ledger.json
