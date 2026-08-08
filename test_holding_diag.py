@@ -1,0 +1,155 @@
+# -*- coding: utf-8 -*-
+"""holding_diag 回归测试：入场高点回撤止损 / CPPI 状态机 / 组合曲线重建。
+
+纯本地合成数据（不联网）；另有 webapp /api/rebalance 端到端用例（需 cache/ 净值文件）。
+运行: python test_holding_diag.py
+"""
+import os
+import sys
+
+import numpy as np
+import pandas as pd
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import holding_diag as hd  # noqa: E402
+
+
+def mk_nav(dates, rets):
+    """按 日增长率 构造 provider.get_fund_nav 同构 DataFrame"""
+    nav = [1.0]
+    for r in rets[1:]:
+        nav.append(nav[-1] * (1 + r))
+    return pd.DataFrame({"date": pd.to_datetime(dates), "nav": nav, "ret": rets})
+
+
+def test_adj_series():
+    df = mk_nav(["2021-01-01", "2021-01-04", "2021-01-05"], [0.0, -0.10, 0.05])
+    adj = hd.adj_series(df)
+    assert abs(adj.iloc[-1] - 1.0 * 0.9 * 1.05) < 1e-9
+    print("test_adj_series OK")
+
+
+def test_infer_entry_date():
+    # 净值: 1.0 → 1.5(高点) → 1.2 → 0.9；当前0.9。持有收益率 -40%（自1.5起）
+    dates = pd.date_range("2021-01-01", periods=20, freq="D")
+    adj = pd.Series(np.linspace(1.0, 1.5, 10).tolist() + np.linspace(1.5, 0.9, 10).tolist(),
+                    index=dates)
+    d, err = hd.infer_entry_date(adj, -40.0)
+    assert d is not None and abs(err) < 0.02
+    # 收益率无法匹配 → None
+    d2, _ = hd.infer_entry_date(adj, 999.0)
+    assert d2 is None
+    print("test_infer_entry_date OK, inferred:", d.date())
+
+
+def test_fund_stop_diag():
+    dates = pd.date_range("2020-01-01", periods=120, freq="D")
+    # 前60日爬升到2.0，后60日跌到1.2 → 自高点回撤 -40%
+    vals = np.linspace(1.0, 2.0, 60).tolist() + np.linspace(2.0, 1.2, 60).tolist()
+    rets = [0.0] + [vals[i] / vals[i - 1] - 1 for i in range(1, len(vals))]
+    df = mk_nav([str(d.date()) for d in dates], rets)
+
+    # 给出买入日期（高点2.0在买入日之后）→ 精确计算
+    d = hd.fund_stop_diag(dict(code="X", amount=10000, buy_date="2020-02-01"), df)
+    assert d["computable"] and d["status"] == "triggered"
+    assert d["entry_date"] == "2020-02-01" and not d["inferred"]
+    assert abs(d["dd"] - (1.2 / 2.0 - 1)) < 1e-6
+    assert abs(d["trigger_nav"] - 2.0 * 0.8) < 1e-6
+
+    # 只给收益率 → 推断入场日
+    d2 = hd.fund_stop_diag(dict(code="X", amount=10000, ret_pct=-40.0), df)
+    assert d2["computable"] and d2["inferred"] and d2["status"] == "triggered"
+
+    # 市值+成本 → 隐含收益率 → 推断入场
+    d3 = hd.fund_stop_diag(dict(code="X", amount=10000, cost=16666.0), df)
+    assert d3["computable"] and d3["inferred"]
+
+    # 什么都不给 → 不误报
+    d4 = hd.fund_stop_diag(dict(code="X", amount=10000), df)
+    assert d4["status"] == "need_entry" and not d4["computable"]
+
+    # 买入日期=近期低点 → 正常（2020-04-28 之后净值≈1.2 走平）
+    d5 = hd.fund_stop_diag(dict(code="X", amount=10000, buy_date="2020-04-28"), df)
+    assert d5["computable"] and d5["status"] == "ok"
+    assert abs(d5["dd"]) < 0.03
+    print("test_fund_stop_diag OK")
+
+
+def test_cppi_tier_sim():
+    # 全路径: 触发-15(6槽) → 触发-20(3槽) → 回补-18(6槽) → 新高(满槽)
+    v = np.array([100.0, 88.0, 90.0, 84.0, 86.0, 78.0, 80.0, 81.0, 82.0, 83.0, 84.0, 86.0, 100.5])
+    ev, slots, dd, hwm = hd.cppi_tier_sim(v, [(-0.15, 6), (-0.20, 3), (-0.25, 0)], 10, 0.02)
+    assert slots == 10 and hwm == 100.5
+    assert [e[1] for e in ev] == ["trigger", "trigger", "restore", "newhigh"], ev
+    assert abs(ev[2][2] - (-0.18)) < 1e-9 and ev[2][3] == 6
+
+    # 触发-25(清仓) → 逐级回补 -23(3槽) → -18(6槽) → -13(满槽)
+    # （首日单日 -26% 会级联触发三档，属正常；随后逐级回补）
+    v2 = np.array([100.0, 74.0, 76.0, 78.0, 80.0, 82.0, 84.0, 86.0, 88.0])
+    ev2, slots2, _, _ = hd.cppi_tier_sim(v2, [(-0.15, 6), (-0.20, 3), (-0.25, 0)], 10, 0.02)
+    assert slots2 == 10
+    tr2 = [e for e in ev2 if e[1] == "trigger"]
+    rs2 = [e for e in ev2 if e[1] == "restore"]
+    assert tr2[-1][2] == -0.25 and tr2[-1][3] == 0
+    assert [round(e[2], 2) for e in rs2] == [-0.23, -0.18, -0.13]
+
+    # 滞回: 回撤收窄但未过回补线 → 不升档
+    v3 = np.array([100.0, 84.0, 87.0])
+    ev3, slots3, _, _ = hd.cppi_tier_sim(v3, [(-0.15, 6), (-0.20, 3), (-0.25, 0)], 10, 0.02)
+    assert slots3 == 6 and [e[1] for e in ev3] == ["trigger"]
+    print("test_cppi_tier_sim OK")
+
+
+def test_portfolio_cppi():
+    dates = pd.date_range("2021-01-01", periods=100, freq="D")
+    idx = pd.DatetimeIndex(dates)
+    # 基金A: 先涨后跌（2021-02-01入场，之后高点=2.0 → 现值1.2）
+    a = pd.Series(np.linspace(1.0, 2.0, 60).tolist() + np.linspace(2.0, 1.2, 40).tolist(), index=idx)
+    # 基金B: 稳步上涨（2021-01-15入场，现值为1.8）
+    b = pd.Series(np.linspace(1.0, 1.8, 100), index=idx)
+    r = hd.portfolio_cppi([("2021-02-01", 10000.0, a), ("2021-01-15", 20000.0, b)],
+                          cash=5000.0, rules=[(-0.15, 6), (-0.20, 3), (-0.25, 0)],
+                          full_slots=10, hysteresis=0.02)
+    assert r["computable"] and r["n_funds"] == 2
+    assert r["current"] == r["chart"]["value"][-1]
+    assert abs(r["current"] - (10000 * 1.2 / 1.2 + 20000 * 1.8 / 1.8 + 5000)) < 1e-6
+    assert r["hwm"] > r["current"] and r["dd"] < 0
+    assert 0 <= r["slots"] <= 10
+    assert r["restore"] is None or r["restore"]["slots"] > r["slots"]
+    # 无有效基金 → computable=False
+    r2 = hd.portfolio_cppi([(None, 10000.0, a)])
+    assert not r2["computable"]
+    print("test_portfolio_cppi OK, dd=%.1f%% slots=%d hwm=%.0f" % (r["dd"] * 100, r["slots"], r["hwm"]))
+
+
+def test_webapp_endpoint():
+    """端到端: /api/rebalance 解析 代码 市值 买入日期|成本|收益率 并输出 stop/cppi（需 cache/ 净值）"""
+    if not os.path.exists("cache/nav_161725.csv"):
+        print("test_webapp_endpoint SKIP (no cache)")
+        return
+    import warnings
+    warnings.filterwarnings("ignore")
+    import webapp
+    c = webapp.app.test_client()
+    r = c.post("/api/rebalance", json={
+        "total_capital": "10万", "cash": "20000",
+        "holdings_text": "161725 2.5万 2021-06-01\n110011 1.8万 2023-01-03\n005827 1.2万 +15.3%",
+    })
+    j = r.get_json()
+    assert r.status_code == 200 and j["ok"]
+    stops = [h["stop"] for h in j["holdings"]]
+    assert all(s and s.get("computable") for s in stops), stops
+    assert j["cppi"]["computable"] and j["cppi"]["n_funds"] == 3
+    assert "slots_eff" in j["summary"]
+    # 旧格式兼容
+    r2 = c.post("/api/rebalance", json={"holdings_text": "161725 2.5万"})
+    j2 = r2.get_json()
+    assert j2["ok"] and j2["cppi"]["computable"] is False
+    print("test_webapp_endpoint OK")
+
+
+if __name__ == "__main__":
+    for fn in [test_adj_series, test_infer_entry_date, test_fund_stop_diag,
+               test_cppi_tier_sim, test_portfolio_cppi, test_webapp_endpoint]:
+        fn()
+    print("\nALL TESTS PASSED")

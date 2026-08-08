@@ -328,7 +328,7 @@
   <section id="sec-rebalance">
     <div class="section-head">
       <h2>持仓诊断</h2>
-      <span class="hint">输入代码与金额，按策略生成操作</span>
+      <span class="hint">代码+市值+买入日期（或成本/收益率）→ 自动算 20% 入场高点止损 + CPPI 动态槽位</span>
     </div>
     <div class="rb">
       <div class="panel">
@@ -336,9 +336,10 @@
           <div class="field"><label>总资金</label><input id="rb-total" class="mono" placeholder="100000 或 10万"></div>
           <div class="field"><label>可用现金</label><input id="rb-cash" class="mono" placeholder="20000"></div>
         </div>
-        <div class="field" style="margin-top:12px"><label>持仓 · 每行 代码 金额</label><textarea id="rb-holdings" placeholder="110011 2.5万
-161725 18000
-003096 1.2万"></textarea></div>
+        <div class="field" style="margin-top:12px"><label>持仓 · 每行：代码 市值 [买入日期|成本|收益率]</label><textarea id="rb-holdings" placeholder="110011 2.5万 2023-03-15
+161725 1.8万 1.6万
+003096 1.2万 +8.5%"></textarea>
+        <div class="hint" style="margin-top:6px;line-height:1.7">支付宝「持有」页就有这些数据：<b>市值</b>=持有金额、<b>成本</b>=持仓成本、<b>收益率</b>=持有收益率（%）、<b>买入日期</b>=交易记录里看。三选一即可：日期最准；只给成本+市值也能反推收益率和入场日。数据不足的基金只跳过回撤判断，不影响评分。</div></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
           <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="rbFillExample()">示例</button>
           <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="rbFromBoardTop()">榜单前5</button>
@@ -549,7 +550,28 @@ function toggleWd(i){ WD_OPEN[i]=!WD_OPEN[i]; document.getElementById('wd-'+i)?.
 function watchToRebalance(){const c=document.getElementById('watch').value.trim(); if(!c) return; document.getElementById('rb-holdings').value=c.split(/[\s,，、]+/).filter(Boolean).map(x=>x.padStart(6,'0')+' 1万').join('\n'); document.getElementById('sec-rebalance').scrollIntoView({behavior:'smooth'}); updateRbPreview()}
 
 // rebalance
-function parseHoldingsText(t){const out=[]; for(const line of String(t||'').split(/[\n;；]+/)){const tr=line.trim(); if(!tr) continue; for(const seg of tr.split(/[,，]+/).map(s=>s.trim()).filter(Boolean)){const p=seg.split(/[\s:：]+/).filter(Boolean); const c=(p[0]||'').replace(/[^0-9]/g,'').padStart(6,'0'); if(!/^\d{6}$/.test(c)) continue; const v=p.length>1?parseYuan(p.slice(1).join(' ')):null; out.push({code:c,amount:v}); if(out.length>=50) break}} return out}
+// 每行: 代码 市值 [买入日期|成本|收益率%] —— 第3列可选，供 20% 入场止损 & CPPI 自动计算
+function parseHoldingsText(t){
+  const out=[];
+  for(const line of String(t||'').split(/[\n;；]+/)){
+    const tr=line.trim(); if(!tr) continue;
+    for(const seg of tr.split(/[,，]+/).map(s=>s.trim()).filter(Boolean)){
+      const p=seg.split(/[\s:：]+/).filter(Boolean);
+      const c=(p[0]||'').replace(/[^0-9]/g,'').padStart(6,'0');
+      if(!/^\d{6}$/.test(c)) continue;
+      const h={code:c, amount:p.length>1?parseYuan(p[1]):null};
+      if(p.length>2){
+        const p3=p[2];
+        if(/^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}$/.test(p3)) h.buy_date=p3.replace(/[/.]/g,'-');
+        else if(/^\d{8}$/.test(p3)) h.buy_date=p3;
+        else if(p3.endsWith('%')||p3.endsWith('％')) h.ret_pct=parseFloat(p3.replace(/[%％]/g,''));
+        else h.cost=parseYuan(p3);
+      }
+      out.push(h); if(out.length>=50) break;
+    }
+  }
+  return out;
+}
 function updateRbPreview(){
   const t=document.getElementById('rb-holdings').value, total=parseYuan(document.getElementById('rb-total').value), cash=parseYuan(document.getElementById('rb-cash').value);
   const h=parseHoldingsText(t), n=h.length, sum=h.reduce((s,x)=>s+(x.amount||0),0);
@@ -558,7 +580,7 @@ function updateRbPreview(){
   document.getElementById('rb-preview').textContent=msg;
 }
 ['rb-total','rb-cash','rb-holdings'].forEach(id=>document.getElementById(id)?.addEventListener('input',updateRbPreview));
-function rbFillExample(){document.getElementById('rb-total').value='100000';document.getElementById('rb-cash').value='20000';document.getElementById('rb-holdings').value='110011 2.5万\n161725 1.8万\n003096 1.2万';updateRbPreview()}
+function rbFillExample(){document.getElementById('rb-total').value='100000';document.getElementById('rb-cash').value='20000';document.getElementById('rb-holdings').value='110011 2.5万 2023-03-15\n161725 1.8万 1.6万\n003096 1.2万 +8.5%';updateRbPreview()}
 function rbFromBoardTop(){if(!ROWS.length) return; const top=ROWS.filter(r=>r.S_total>=70).slice(0,5).map(r=>r.code+' 1万'); document.getElementById('rb-holdings').value=top.join('\n'); updateRbPreview()}
 function rbClear(){document.getElementById('rb-holdings').value=''; updateRbPreview(); document.getElementById('rb-out').innerHTML='';}
 function addToRebalance(c){c=String(c).padStart(6,'0'); const ta=document.getElementById('rb-holdings'); const cur=ta.value.trim(); if(parseHoldingsText(cur).some(x=>x.code===c)) return; ta.value=(cur?cur+'\n':'')+c+' 1万'; updateRbPreview(); document.getElementById('sec-rebalance').scrollIntoView({behavior:'smooth'})}
@@ -576,9 +598,91 @@ async function runRebalance(){
     setStatus('rb-dot','rb-st','ok',`完成 · 参照 ${j.ref_stamp||'—'}`); renderRebalance(j);
   }catch(e){const msg=e.name==='AbortError'?'请求超时（180秒），请减少至3只以内或稍后重试':(e.message||'网络错误'); setStatus('rb-dot','rb-st','err',msg); document.getElementById('rb-out').innerHTML=`<div class="empty" style="color:var(--danger);border-color:#fecdd3;background:var(--danger-soft)">请求失败：${msg}<br><span style="color:var(--muted)">单基可用说明服务正常；持仓批量对并发更敏感，建议分2批（每次≤3只）或稍后重试。已自动降并发至2线程。</span><br><button class="btn btn-ghost" style="margin-top:8px;padding:6px 12px;font-size:12px" onclick="runRebalance()">重试</button></div>`}finally{document.getElementById('rb-btn').disabled=false}
 }
+function fmtPct(v,d=1){if(v==null||isNaN(v))return '—';return (v*100).toFixed(d)+'%'}
+function stopBadge(st){
+  if(!st) return '<span class="badge b-mute">—</span>';
+  if(st.status==='triggered') return '<span class="badge b-red">止损清仓</span>';
+  if(st.status==='near') return '<span class="badge b-amber">接近止损</span>';
+  if(st.status==='ok') return '<span class="badge b-green">正常</span>';
+  return '<span class="badge b-mute">需日期</span>';
+}
+function stopCell(h){
+  const st=h.stop||{};
+  if(!st.computable) return `<td class="mono faint">—</td><td class="mono faint">—</td><td><span class="badge b-mute">${st.status==='need_entry'?'需日期/收益率':'—'}</span></td>`;
+  const dd=st.dd==null?'—':fmtPct(st.dd);
+  const col=st.status==='triggered'?'var(--danger)':(st.status==='near'?'var(--warn)':'var(--muted)');
+  const tip=`入场 ${st.entry_date||'?'}${st.inferred?'（收益率推断）':''} · 入场后高点 ${st.peak}（${st.peak_date}）· 20%触发价 ${st.trigger_nav} · 真实持有收益 ${fmtPct(st.ret_held)}`;
+  return `<td class="mono" style="color:var(--muted)" title="${tip}">${st.entry_date||'—'}${st.inferred?'*':''}</td><td class="mono" style="color:${col};font-weight:600" title="${tip}">${dd}</td><td title="${tip}">${stopBadge(st)}</td>`;
+}
+function cppiPanelHtml(cp,s){
+  if(!cp || !cp.computable) return '';
+  const tier=cp.slots===0?'var(--danger)':(cp.slots<=3?'#ea580c':(cp.slots<=6?'#d97706':'var(--success)'));
+  const tierName=cp.tier_name||(cp.slots+' 槽');
+  const restore=cp.restore?`<div style="margin-top:8px;font:12px var(--sans);color:var(--muted);line-height:1.75">
+    <b style="color:var(--success)">↗ 回补提示：</b>组合值回升至 <b class="mono">${fmtYuanFull(cp.restore.value)}</b>（回撤收窄至 ${fmtPct(cp.restore.dd)} 线）→ 恢复 <b>${cp.restore.slots} 槽</b>；
+    或创出新高 <b class="mono">${fmtYuanFull(cp.restore.new_high_value)}</b> → 直接满 ${cp.full_slots} 槽。
+    ${cp.restore.last_on?`<span style="color:var(--faint)">上次站上该线：${cp.restore.last_on}。</span>`:''}</div>`:'';
+  const next=cp.next_trigger?`<div style="margin-top:6px;font:12px var(--sans);color:var(--muted);line-height:1.75">
+    <b style="color:var(--warn)">↘ 下一减仓线：</b>再跌至 <b class="mono">${fmtYuanFull(cp.next_trigger.value)}</b>（-${Math.abs(cp.next_trigger.dd*100).toFixed(0)}%）→ 降为 <b>${cp.next_trigger.slots===0?'清仓':cp.next_trigger.slots+' 槽'}</b></div>`:'';
+  const evs=(cp.events||[]).slice(-4).map(e=>{
+    const lbl=e.kind==='trigger'?'触发':(e.kind==='restore'?'回补':'新高');
+    const col=e.kind==='trigger'?'var(--warn)':(e.kind==='restore'?'var(--success)':'var(--muted)');
+    return `<div style="font:11px var(--mono);color:${col}">${e.date} ${lbl}${e.dd!=null?' '+fmtPct(e.dd,0)+'线':''} → ${e.slots===0?'清仓':e.slots+'槽'}</div>`;
+  }).join('');
+  return `<div class="panel" style="margin-top:14px;padding:14px">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <b>组合 CPPI 动态槽位</b>
+      <span class="badge" style="background:${tier}1a;color:${tier};border-color:${tier}66">${tierName} · ${cp.slots} 槽</span>
+      <span class="hint">规则：回撤≤-15%→6槽 / ≤-20%→3槽 / ≤-25%→清仓；回补带 -13% / -18% / -23%，新高满槽</span>
+    </div>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px">
+      <div style="flex:1 1 300px;min-width:260px">
+        <svg id="cppi-chart" viewBox="0 0 640 170" style="width:100%;height:auto;display:block;background:var(--surface-2);border:1px solid var(--line);border-radius:8px"></svg>
+        <div class="legend" style="margin-top:6px"><span><em style="background:var(--ink)"></em>组合净值</span><span><em style="background:#a8a29e"></em>HWM ${fmtYuan(cp.hwm)}</span><span><em style="background:#d97706"></em>-15%线</span><span><em style="background:#ea580c"></em>-20%线</span><span><em style="background:#dc2626"></em>-25%线</span></div>
+      </div>
+      <div style="flex:0 0 auto;min-width:250px">
+        <div class="kpis" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+          <div class="kpi"><label>当前组合值</label><b>${fmtYuan(cp.current)}</b><small>含现金 ${fmtYuan(cp.cash)}</small></div>
+          <div class="kpi"><label>自高点回撤</label><b style="color:${cp.dd<=-0.25?'var(--danger)':(cp.dd<=-0.15?'var(--warn)':'var(--ink)')}">${fmtPct(cp.dd)}</b><small>HWM ${fmtYuan(cp.hwm)}</small></div>
+          <div class="kpi"><label>CPPI 档位</label><b style="color:${tier}">${tierName}</b><small>${cp.slots} / ${cp.full_slots} 槽</small></div>
+          <div class="kpi"><label>生效槽位</label><b>${s.slots_eff??cp.slots}</b><small>${s.crisis_active?'危机·禁新开仓':'宏观×CPPI'}</small></div>
+        </div>
+        ${restore}${next}
+        ${evs?`<div style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--line)">${evs}</div>`:''}
+      </div>
+    </div>
+    <div style="margin-top:8px;font:11px var(--sans);color:var(--faint)">曲线 = 你填的市值/买入日期 × 天天基金真实复权净值重建（多笔/定投按最近一笔近似；现金按常数）；HWM 随新高上移，触发与回补日期均由该曲线真实算出。</div>
+  </div>`;
+}
+function drawCppiChart(cp){
+  const el=document.getElementById('cppi-chart');
+  if(!el||!cp||!cp.chart||!cp.chart.value||cp.chart.value.length<2) return;
+  const W=640,H=170,padL=8,padR=8,padT=12,padB=20;
+  const v=cp.chart.value, dates=cp.chart.dates, hwmF=cp.hwm;
+  const lines=[{r:0.85,c:'#d97706'},{r:0.80,c:'#ea580c'},{r:0.75,c:'#dc2626'}];
+  let lo=Math.min.apply(null,v), hi=Math.max.apply(null,v);
+  lines.forEach(l=>{hi=Math.max(hi,hwmF*l.r)});
+  hi=Math.max(hi,hwmF*1.02); lo=Math.min(lo,hwmF*0.72);
+  const X=i=>padL+i*(W-padL-padR)/(v.length-1);
+  const Y=x=>padT+(1-(x-lo)/(hi-lo))*(H-padT-padB);
+  const pt=v.map((x,i)=>X(i).toFixed(1)+','+Y(x).toFixed(1)).join(' ');
+  const area=pt+` ${X(v.length-1).toFixed(1)},${Y(lo).toFixed(1)} ${X(0).toFixed(1)},${Y(lo).toFixed(1)}`;
+  let s=`<polygon points="${area}" fill="rgba(12,10,9,0.07)"></polygon>`;
+  s+=`<polyline points="${pt}" fill="none" stroke="#0c0a09" stroke-width="1.6"></polyline>`;
+  s+=`<line x1="${X(0)}" y1="${Y(hwmF)}" x2="${X(v.length-1)}" y2="${Y(hwmF)}" stroke="#a8a29e" stroke-width="1.2" stroke-dasharray="5 4"></line>`;
+  lines.forEach(l=>{const y=Y(hwmF*l.r); s+=`<line x1="${X(0)}" y1="${y}" x2="${X(v.length-1)}" y2="${y}" stroke="${l.c}" stroke-width="1" stroke-dasharray="2 3" opacity="0.8"></line>`});
+  s+=`<text x="${padL}" y="${H-6}" font-size="9" fill="#a8a29e">${dates[0]}</text>`;
+  s+=`<text x="${W-padR-78}" y="${H-6}" font-size="9" fill="#a8a29e">${dates[dates.length-1]}</text>`;
+  s+=`<text x="${padL}" y="${Y(hwmF)-4}" font-size="9" fill="#a8a29e">HWM ${fmtYuan(hwmF)}</text>`;
+  const last=v[v.length-1];
+  s+=`<circle cx="${X(v.length-1)}" cy="${Y(last)}" r="3" fill="#0c0a09"></circle>`;
+  s+=`<text x="${X(v.length-1)-46}" y="${Y(last)+14}" font-size="9" fill="#0c0a09" font-weight="600">${fmtYuan(last)}</text>`;
+  el.innerHTML=s;
+}
 function renderRebalance(j){
   const s=j.summary||{}, holdings=j.holdings||[], orders=j.orders||[], alloc=j.allocation||[];
   const totalCap=s.total_capital||0, perSlot=s.per_slot||0;
+  const cppiHtml=cppiPanelHtml(j.cppi||{}, s);
   const kpis=`<div class="kpis">
     <div class="kpi"><label>总资金</label><b>${fmtYuanFull(totalCap)}</b><small>每槽 ${fmtYuanFull(perSlot)}</small></div>
     <div class="kpi"><label>持仓 / 现金</label><b>${fmtYuan(s.holdings_value_before)}</b><small>/ ${fmtYuan(s.cash_before)}</small></div>
@@ -591,16 +695,17 @@ function renderRebalance(j){
   const hRows=holdings.map(h=>{
     if(h.is_error){
       const canRetry=h.retryable!==false;
-      return `<tr style="background:${canRetry?'#fffbeb':'#f5f5f4'}"><td>${h.code}</td><td class="name">${h.name}</td><td style="text-align:right">${fmtYuanFull(h.amount)}</td><td>—</td><td><span class="badge ${canRetry?'b-amber':'b-mute'}">${canRetry?'待重试':'观察仓'}</span></td><td><span class="badge b-mute">—</span></td><td style="max-width:260px;white-space:normal;font:12px var(--sans);color:var(--muted)">${h.error||''}</td><td>${canRetry?`<button class="btn btn-ghost" style="padding:4px 8px;font-size:11px" onclick="retryRebalanceSingle('${h.code}')">重试</button>`:`<span class="mono faint">—</span>`}</td></tr>`;
+      return `<tr style="background:${canRetry?'#fffbeb':'#f5f5f4'}"><td>${h.code}</td><td class="name">${h.name}</td><td style="text-align:right">${fmtYuanFull(h.amount)}</td><td class="mono faint">—</td><td class="mono faint">—</td><td class="mono faint">—</td><td>—</td><td><span class="badge ${canRetry?'b-amber':'b-mute'}">${canRetry?'待重试':'观察仓'}</span></td><td><span class="badge b-mute">—</span></td><td style="max-width:240px;white-space:normal;font:12px var(--sans);color:var(--muted)">${h.error||''}</td><td>${canRetry?`<button class="btn btn-ghost" style="padding:4px 8px;font-size:11px" onclick="retryRebalanceSingle('${h.code}')">重试</button>`:`<span class="mono faint">—</span>`}</td></tr>`;
     }
     const act=h.action==='sell'?'卖出':'持有';
-    return `<tr><td>${h.code}</td><td class="name">${h.name}</td><td style="text-align:right">${fmtYuanFull(h.amount)}</td><td class="score">${h.S_total??'—'}</td><td>${ratingCell(h)}</td><td>${sigOf(h)}</td><td>${h.action_label||act}</td><td style="text-align:right">${fmtYuanFull(h.target_amount)}</td></tr>`;
+    return `<tr><td>${h.code}</td><td class="name">${h.name}</td><td style="text-align:right">${fmtYuanFull(h.amount)}</td>${stopCell(h)}<td class="score">${h.S_total??'—'}</td><td>${ratingCell(h)}</td><td>${sigOf(h)}</td><td>${h.action_label||act}</td><td style="text-align:right">${fmtYuanFull(h.target_amount)}</td></tr>`;
   }).join('');
-  const hTable=`<div style="margin-top:14px"><div class="table-wrap"><table><thead><tr><th>代码</th><th>名称</th><th>金额</th><th>总分</th><th>评级</th><th>信号</th><th>操作</th><th>目标</th></tr></thead><tbody>${hRows}</tbody></table></div></div>`;
+  const hTable=`<div style="margin-top:14px"><div class="table-wrap"><table><thead><tr><th>代码</th><th>名称</th><th>金额</th><th>入场日</th><th>高点回撤</th><th>20%止损</th><th>总分</th><th>评级</th><th>信号</th><th>操作</th><th>目标</th></tr></thead><tbody>${hRows}</tbody></table></div></div>`;
   const orderHtml=orders.length? `<div style="margin-top:14px"><div class="orders">${orders.map(o=>`<div class="order ${o.side==='SELL'?'sell':'buy'}"><span class="side">${o.side==='SELL'?'卖出':'买入'}</span><div class="meta"><b>${o.code} ${o.name}</b><div>${o.reason||''}</div></div><div class="amt">${fmtYuanFull(o.amount)}</div></div>`).join('')}</div><div style="margin-top:8px;display:flex;gap:8px"><button class="btn btn-ghost" style="padding:6px 12px;font-size:12px" onclick="copyOrders()">复制</button><button class="btn btn-ghost" style="padding:6px 12px;font-size:12px" onclick="downloadOrders()">导出</button></div></div>`:`<div class="empty" style="margin-top:12px">${j.scan_msg||'无操作'}</div>`;
   const allocHtml=alloc.length? `<div style="margin-top:14px"><div class="alloc-bar">${alloc.map((a,i)=>`<i style="width:${a.pct}%;background:${['#0c0a09','#57534e','#a8a29e','#d6d3d1','#e7e5e4'][i%5]}"></i>`).join('')}<i style="width:${s.cash_pct_after||0}%;background:var(--surface-2);border:1px dashed var(--line)"></i></div><div class="legend">${alloc.map((a,i)=>`<span><em style="background:${['#0c0a09','#57534e','#a8a29e'][i%3]}"></em>${a.code} ${a.pct}%</span>`).join('')}<span><em style="background:var(--surface-2);border:1px solid var(--line)"></em>现金 ${s.cash_pct_after||0}%</span></div></div>`:'';
-  document.getElementById('rb-out').innerHTML=kpis+errBanner+hTable+orderHtml+allocHtml;
+  document.getElementById('rb-out').innerHTML=kpis+cppiHtml+errBanner+hTable+orderHtml+allocHtml;
   window._lastRebalance=j;
+  drawCppiChart(j.cppi||{});
 }
 function copyOrders(){const j=window._lastRebalance; if(!j) return; const t=(j.orders||[]).map(o=>`${o.side} ${o.code} ${o.amount}`).join('\n'); navigator.clipboard.writeText(t).then(()=>setStatus('rb-dot','rb-st','ok','已复制'))}
 function downloadOrders(){const j=window._lastRebalance; if(!j) return; const rows=[['side','code','amount']].concat((j.orders||[]).map(o=>[o.side,o.code,o.amount])); const csv=rows.map(r=>r.join(',')).join('\n'); const b=new Blob(["\uFEFF"+csv],{type:'text/csv'}); const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download='orders.csv'; a.click()}
