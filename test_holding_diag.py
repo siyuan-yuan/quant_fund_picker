@@ -122,6 +122,76 @@ def test_portfolio_cppi():
     print("test_portfolio_cppi OK, dd=%.1f%% slots=%d hwm=%.0f" % (r["dd"] * 100, r["slots"], r["hwm"]))
 
 
+def test_fund_lots_diag():
+    # 合成净值（40天，平台+跳变保证数学干净）:
+    #   d0..d9 = 1.0 | d10 = 1.5 | d11..d29 = 1.5 | d30 = 1.2 | d31..d39 = 1.2
+    n = 40
+    idx = pd.date_range("2021-01-01", periods=n, freq="D")
+    vals = np.array([1.0] * 10 + [1.5] * 20 + [1.2] * 10)
+    rets = [0.0] + [vals[i] / vals[i - 1] - 1 for i in range(1, n)]
+    df = mk_nav([str(d.date()) for d in idx], rets)
+    d10, d30 = str(idx[10].date()), str(idx[30].date())
+    # 两笔买入 + 一笔部分卖出（FIFO）
+    lots = [
+        ("2021-01-01", "buy", 10000.0),   # 10000 股 @1.0
+        (d10, "buy", 15000.0),             # 10000 股 @1.5
+        (d30, "sell", 1200.0),             # 1000 股 @1.2 → FIFO 从第一笔扣
+    ]
+    d = hd.fund_lots_diag(lots, df)
+    assert d["computable"] and d["status"] == "triggered"
+    assert d["entry_date"] == "2021-01-01"
+    assert abs(d["mv_now"] - 22800.0) < 1e-6          # 19000股 × 1.2
+    assert abs(d["basis"] - 24000.0) < 1e-6           # 9000 + 15000（FIFO扣1000股成本）
+    assert abs(d["shares_now"] - 19000.0) < 1e-6
+    assert abs(d["ret_held"] - (22800 / 24000 - 1)) < 1e-9
+    assert abs(d["dd"] - (22800 / 30000 - 1)) < 1e-9  # 持仓曲线高点=20000股×1.5 @d10
+    assert abs(d["trigger_nav"] - 1.5 * 0.8) < 1e-9   # 净值口径触发价
+    assert d["peak_date"] == str(idx[10].date()) and d["peak"] == 1.5
+    assert d["lots_n"] == 3 and not d["over_sell"] and not d["flat"]
+    assert d["curve"] is not None and abs(d["curve"].iloc[-1] - 22800.0) < 1e-6
+    assert d["curve"].max() == 30000.0
+    # 锚定市值：整体缩放，收益率不变
+    d2 = hd.fund_lots_diag(lots, df, anchor_amount=18240.0)
+    assert abs(d2["mv_now"] - 18240.0) < 1e-6
+    assert abs(d2["basis"] - 19200.0) < 1e-6
+    assert abs(d2["ret_held"] - (22800 / 24000 - 1)) < 1e-9
+    # 卖出超过持有 → over_sell + flat
+    d3 = hd.fund_lots_diag([("2021-01-01", "buy", 10000.0), (d10, "sell", 50000.0)], df)
+    assert d3["over_sell"] and d3["flat"] and d3["status"] == "flat"
+    # 全部卖完 → flat
+    d4 = hd.fund_lots_diag([("2021-01-01", "buy", 10000.0), (d30, "sell", 15000.0)], df)
+    assert d4["flat"]
+    # 空记录 → need_entry
+    d5 = hd.fund_lots_diag([], df)
+    assert d5["status"] == "need_entry"
+    print("test_fund_lots_diag OK")
+
+
+def test_portfolio_cppi_curve_input():
+    # (curve,) 直接传持仓市值曲线（多笔买卖台账口径）
+    idx = pd.date_range("2021-01-01", periods=10, freq="D")
+    # 场景1: A 从 10000 跌到 2500（-75%），B 平稳 20000 → 组合 -21.4% → 3 槽
+    c1 = pd.Series(np.linspace(10000, 2500, 10), index=idx)
+    c2 = pd.Series(np.full(10, 20000.0), index=idx)
+    r = hd.portfolio_cppi([(c1,), (c2,)], cash=5000.0,
+                          rules=[(-0.15, 6), (-0.20, 3), (-0.25, 0)], full_slots=10)
+    assert r["computable"] and r["n_funds"] == 2
+    assert r["hwm"] == 35000.0
+    assert abs(r["current"] - 27500.0) < 1e-6
+    assert abs(r["dd"] - (27500 / 35000 - 1)) < 1e-9
+    assert r["slots"] == 3 and r["tier_name"] == "防御档·深度减槽"
+    # 场景2: 跌更深 → -25.7% → 清仓档
+    c1b = pd.Series(np.linspace(10000, 1000, 10), index=idx)
+    r2 = hd.portfolio_cppi([(c1b,), (c2,)], cash=5000.0,
+                           rules=[(-0.15, 6), (-0.20, 3), (-0.25, 0)], full_slots=10)
+    assert r2["slots"] == 0 and r2["tier_name"] == "清仓档·禁权益"
+    # 场景3: 横盘微跌 → 满槽
+    r3 = hd.portfolio_cppi([(pd.Series(np.linspace(10000, 9500, 10), index=idx),)],
+                           cash=0.0, rules=[(-0.15, 6), (-0.20, 3), (-0.25, 0)], full_slots=10)
+    assert r3["slots"] == 10
+    print("test_portfolio_cppi_curve_input OK, dd=%.1f%% slots=%d | %s" % (r["dd"] * 100, r["slots"], r["tier_name"]))
+
+
 def test_webapp_endpoint():
     """端到端: /api/rebalance 解析 代码 市值 买入日期|成本|收益率 并输出 stop/cppi（需 cache/ 净值）"""
     if not os.path.exists("cache/nav_161725.csv"):
@@ -131,6 +201,7 @@ def test_webapp_endpoint():
     warnings.filterwarnings("ignore")
     import webapp
     c = webapp.app.test_client()
+    c.delete("/api/ledger")   # 隔离：清空台账，避免污染断言
     r = c.post("/api/rebalance", json={
         "total_capital": "10万", "cash": "20000",
         "holdings_text": "161725 2.5万 2021-06-01\n110011 1.8万 2023-01-03\n005827 1.2万 +15.3%",
@@ -149,7 +220,7 @@ def test_webapp_endpoint():
 
 
 if __name__ == "__main__":
-    for fn in [test_adj_series, test_infer_entry_date, test_fund_stop_diag,
+    for fn in [test_adj_series, test_infer_entry_date, test_fund_stop_diag, test_fund_lots_diag, test_portfolio_cppi_curve_input,
                test_cppi_tier_sim, test_portfolio_cppi, test_webapp_endpoint]:
         fn()
     print("\nALL TESTS PASSED")

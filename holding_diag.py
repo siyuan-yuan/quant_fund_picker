@@ -103,11 +103,139 @@ def infer_entry_date(adj, ret_pct, tol_base=0.03):
     return adj.index[i], float(err[i])
 
 
+def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15):
+    """多笔买入/卖出 → 单基金持仓诊断（FIFO 成本 + 持仓市值曲线 + 入场高点回撤）。
+
+    lots: [(date, side, amount), ...]  side ∈ {'buy','sell'}，amount 为金额（元）。
+      买入金额 = 成交成本；卖出金额 = 卖出所得（按当日复权净值折算份额，忽略申赎费）。
+    anchor_amount: 用户当前市值（可选）。份额×现值与用户市值存在小数差/费用差时，
+      按 k=市值/计算值 整体缩放成本与曲线，保证"当前市值=用户所填"且持有收益率不变。
+    返回 dict（字段与 fund_stop_diag 兼容的超集）：
+      computable / status(ok|near|triggered|no_data|flat) / reason
+      entry_date / entry_nav / days_held / peak / peak_date / dd / trigger_nav
+      ret_held / mv_now(当前市值) / basis(FIFO剩余成本) / shares_now / over_sell
+      total_bought / total_sold / lots_n / flat / curve(持仓市值曲线 Series)
+    """
+    adj = adj_series(nav_df)
+    out = dict(
+        computable=False, status="no_data", reason="", entry_date=None, entry_nav=None,
+        inferred=False, days_held=None, peak=None, peak_date=None, dd=None,
+        trigger_nav=None, ret_held=None, mv_now=None, basis=None, shares_now=None,
+        over_sell=False, total_bought=0.0, total_sold=0.0, lots_n=0,
+        flat=False, curve=None, stop=float(stop),
+    )
+    if len(adj) < 30:
+        out["reason"] = "净值历史不足，无法计算入场高点回撤"
+        return out
+    lots = sorted([(pd.Timestamp(d), str(side).lower(), float(a))
+                   for d, side, a in lots if a is not None and a > 0])
+    lots = [(d, s, a) for d, s, a in lots if s in ("buy", "sell")]
+    if not lots:
+        out["status"] = "need_entry"
+        out["reason"] = "缺少买入记录，无法定位入场高点（在操作台账中添加买入，或输入 代码 市值 买入日期）"
+        return out
+    out["lots_n"] = len(lots)
+    n = len(adj)
+    idx = adj.index
+
+    def _pos(d):
+        p = int(idx.searchsorted(d))          # 买入日当天（含）按当日净值折算
+        return min(max(p, 0), n - 1)
+
+    # ---- 逐日持仓份额（卖出超持有时截断至0，标记 over_sell）----
+    deltas = np.zeros(n)
+    run = 0.0
+    for d, side, amt in lots:
+        px = float(adj.iloc[_pos(d)])
+        if px <= 0:
+            continue
+        sh = amt / px
+        if side == "buy":
+            deltas[_pos(d)] += sh
+            run += sh
+        else:
+            if sh > run + 1e-6:
+                out["over_sell"] = True
+            deltas[_pos(d)] -= sh
+            run = max(0.0, run - sh)
+    shares_t = np.maximum(np.cumsum(deltas), 0.0)
+
+    # ---- FIFO 剩余成本（卖出按先进先出扣减成本）----
+    q = []          # [剩余份额, 剩余成本]
+    total_bought = total_sold = 0.0
+    for d, side, amt in lots:
+        px = float(adj.iloc[_pos(d)])
+        if px <= 0:
+            continue
+        if side == "buy":
+            q.append([amt / px, amt])
+            total_bought += amt
+        else:
+            sh_sell = amt / px
+            total_sold += amt
+            while sh_sell > 1e-9 and q:
+                take = min(q[0][0], sh_sell)
+                q[0][1] *= (1.0 - take / q[0][0])
+                q[0][0] -= take
+                sh_sell -= take
+                if q[0][0] <= 1e-9:
+                    q.pop(0)
+    shares_now = float(sum(x[0] for x in q))
+    basis = float(sum(x[1] for x in q))
+    if shares_now <= 1e-9:
+        out.update(status="flat", computable=True, flat=True, shares_now=0.0,
+                   basis=0.0, total_bought=total_bought, total_sold=total_sold,
+                   reason="台账中该基金已全部卖出，不计入组合")
+        return out
+    mv = shares_now * float(adj.iloc[-1])
+    # ---- 锚定用户市值（可选）：整体缩放曲线与成本，收益率不变 ----
+    k = 1.0
+    if anchor_amount and anchor_amount > 0 and mv > 0:
+        k = anchor_amount / mv
+    curve = pd.Series(shares_t * adj.values * k, index=idx, name="value")
+    basis *= k
+    mv = float(curve.iloc[-1])
+    first_pos = int(np.argmax(shares_t > 1e-9))
+    peak_adj = float(adj.iloc[first_pos:].max())
+    peak_adj_date = adj.iloc[first_pos:].idxmax()
+    peak_val = float(curve.iloc[first_pos:].max())   # 持仓市值高点（多笔含卖出时为组合口径）
+    dd = float(mv / peak_val - 1.0)
+    entry_date = idx[first_pos]
+    entry_nav = float(adj.iloc[first_pos])
+    ret_held = float(mv / basis - 1.0) if basis > 0 else None
+    out.update(
+        computable=True,
+        status="ok",
+        entry_date=str(entry_date.date()),
+        entry_nav=round(entry_nav, 4),
+        inferred=False,
+        days_held=int((idx[-1] - entry_date).days),
+        peak=round(peak_adj, 4),
+        peak_date=str(peak_adj_date.date()),
+        dd=float(dd),
+        trigger_nav=round(peak_adj * (1.0 - stop), 4),
+        ret_held=ret_held,
+        mv_now=round(mv, 2),
+        basis=round(basis, 2),
+        shares_now=round(shares_now, 4),
+        total_bought=round(total_bought, 2),
+        total_sold=round(total_sold, 2),
+        curve=curve,
+    )
+    if dd <= -stop:
+        out["status"] = "triggered"      # 清仓
+    elif dd <= -warn_dd:
+        out["status"] = "near"           # 接近止损
+    else:
+        out["status"] = "ok"
+    return out
+
+
 def fund_stop_diag(rec, nav_df, stop=0.20, warn_dd=0.15):
-    """单基金入场高点回撤 → 移动止损状态。
+    """单基金入场高点回撤 → 移动止损状态（单笔买入 = 多笔引擎的特例）。
 
     返回 dict：
-      computable / status(ok|near|triggered|no_data|need_entry)
+      computable / status(ok|near|triggered|no_data|need_entry|flat)
       entry_date / entry_nav / inferred(收益率反推) / days_held
       peak / peak_date / dd(自入场高点回撤) / trigger_nav(触发清仓净值)
       ret_held(真实持有收益) / ret_user(用户报的收益率) / reason
@@ -125,7 +253,6 @@ def fund_stop_diag(rec, nav_df, stop=0.20, warn_dd=0.15):
         amount=ui["amount"], cost=ui["cost"],
     )
     if len(adj) < 30:
-        out["status"] = "no_data"
         out["reason"] = "净值历史不足，无法计算入场高点回撤"
         return out
     entry = ui["buy_date"]
@@ -145,40 +272,13 @@ def fund_stop_diag(rec, nav_df, stop=0.20, warn_dd=0.15):
             out["reason"] = "持有收益率与净值曲线无法匹配（多笔买入/转换/申赎费差异），请在支付宝交易记录中查买入日期后填写"
             return out
         out["inferred"] = True
-    entry = pd.Timestamp(entry)
-    if entry < adj.index[0]:
-        entry = adj.index[0]
-    if entry > adj.index[-1]:
-        entry = adj.index[-1]
-    seg = adj[adj.index >= entry]
-    if len(seg) < 2:
-        out["status"] = "no_data"
-        out["reason"] = "入场日之后净值数据不足"
-        return out
-    now = float(adj.iloc[-1])
-    entry_nav = float(seg.iloc[0])
-    peak = float(seg.max())
-    peak_date = seg.idxmax()
-    dd = now / peak - 1.0
-    ret_held = now / entry_nav - 1.0
-    out.update(
-        computable=True,
-        entry_date=str(entry.date()),
-        entry_nav=round(entry_nav, 4),
-        inferred=out["inferred"],
-        days_held=int((adj.index[-1] - entry).days),
-        peak=round(peak, 4),
-        peak_date=str(peak_date.date()),
-        dd=float(dd),
-        trigger_nav=round(peak * (1.0 - stop), 4),
-        ret_held=float(ret_held),
-    )
-    if dd <= -stop:
-        out["status"] = "triggered"      # 清仓
-    elif dd <= -warn_dd:
-        out["status"] = "near"           # 接近止损
-    else:
-        out["status"] = "ok"
+    # 单笔买入 → 复用多笔引擎（曲线锚定到用户市值，成本=市值或成本）
+    cost = ui["cost"] if (ui["cost"] or 0) > 0 else (ui["amount"] or 0)
+    lots = [(pd.Timestamp(entry), "buy", cost)]
+    d = fund_lots_diag(lots, nav_df, anchor_amount=ui["amount"] if (ui["amount"] or 0) > 0 else None,
+                       stop=stop, warn_dd=warn_dd)
+    out.update(d)
+    out["inferred"] = bool(ui["buy_date"] is None and out.get("entry_date"))
     return out
 
 
@@ -237,10 +337,11 @@ def portfolio_cppi(fund_series, cash=0.0, rules=None, full_slots=10,
                    hysteresis=0.02, max_points=160):
     """组合级 CPPI：重建组合净值曲线 → HWM → 当前回撤 → 档位/槽位/回补提示。
 
-    fund_series: [(entry_date, scale_value, adj_series), ...]
-      entry_date 可为推断日；scale_value = 当前市值（无市值时可用成本兜底），
-      曲线按 市值×adj(t)/adj(now) 重建 —— 与 成本×adj(t)/adj(entry) 完全等价，
-      因此只要"市值+买入日期（或收益率反推日期）"即可，无需用户维护净值曲线。
+    fund_series: 每个元素为一条持仓曲线，两种形式：
+      - (curve,)：pd.Series 直接给出持仓市值曲线（多笔买卖台账用，index=日期，
+        入场前为 NaN）；已锚定市值，不再缩放。
+      - (entry_date, scale_value, adj_series)：单笔买入用，曲线按
+        市值×adj(t)/adj(now) 重建（与 成本×adj(t)/adj(entry) 完全等价）。
     cash: 可用现金（按常数并入组合净值，近似处理）
     返回 dict（computable=False 时仅 reason）：
       hwm / current / dd / slots / tier_name / full_slots
@@ -249,27 +350,38 @@ def portfolio_cppi(fund_series, cash=0.0, rules=None, full_slots=10,
       restore: 当前档位回补线（回升到多少恢复多少槽，含金额与最后触及日）
       chart: 抽样后的 {dates, value, hwm} 供前端画曲线
     """
-    valid = []
-    for entry, scale, adj in fund_series:
-        if entry is None or not scale or scale <= 0 or adj is None or len(adj) < 5:
+    curves = []
+    for ent in fund_series:
+        try:
+            if isinstance(ent, (tuple, list)) and len(ent) == 1 and isinstance(ent[0], pd.Series):
+                c = ent[0]
+                if c is None or len(c) < 5 or float(c.iloc[-1]) <= 0:
+                    continue
+                curves.append(c)
+            elif isinstance(ent, (tuple, list)) and len(ent) == 3:
+                entry, scale, adj = ent
+                if entry is None or not scale or scale <= 0 or adj is None or len(adj) < 5:
+                    continue
+                entry = pd.Timestamp(entry)
+                if float(adj.iloc[-1]) <= 0 or float(adj.iloc[0]) <= 0:
+                    continue
+                now_adj = float(adj.iloc[-1])
+                c = pd.Series(adj.values / now_adj * float(scale), index=adj.index, name="value")
+                c[adj.index < entry] = np.nan
+                curves.append(c)
+        except Exception:
             continue
-        entry = pd.Timestamp(entry)
-        if float(adj.iloc[-1]) <= 0 or float(adj.iloc[0]) <= 0:
-            continue
-        valid.append((entry, float(scale), adj))
-    if not valid:
+    if not curves:
         return dict(computable=False,
                     reason="持仓缺少 市值+买入日期（或 成本/收益率），无法重建组合净值曲线（提供后自动计算真实回撤与槽位）")
     # 并集交易日
-    idx = valid[0][2].index
-    for _, _, a in valid[1:]:
-        idx = idx.union(a.index)
+    idx = curves[0].index
+    for c in curves[1:]:
+        idx = idx.union(c.index)
     idx = pd.DatetimeIndex(sorted(idx))
     contrib = np.zeros(len(idx))
-    for entry, scale, adj in valid:
-        now_adj = float(adj.iloc[-1])
-        vals = adj.reindex(idx).values / now_adj * scale
-        vals[idx < entry] = np.nan          # 入场前不计
+    for c in curves:
+        vals = c.reindex(idx).values
         vals = np.where(np.isnan(vals), 0.0, vals)
         contrib = contrib + vals
     value = contrib + cash                  # 现金常数并入
@@ -329,7 +441,7 @@ def portfolio_cppi(fund_series, cash=0.0, rules=None, full_slots=10,
         )
     return dict(
         computable=True,
-        n_funds=len(valid),
+        n_funds=len(curves),
         cash=cash,
         hwm=round(hwm, 2),
         current=round(current, 2),
