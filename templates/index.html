@@ -364,9 +364,8 @@
       <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center">
         <input id="led-line" class="mono" placeholder="161725 买 2021-06-01 20000（可多行）" style="flex:1;min-width:260px;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;font:13px var(--mono);outline:none">
         <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="ledAdd()">添加记录</button>
-        <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="ledImport()">从持仓输入导入</button>
-        <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="ledToHoldings()">生成持仓输入</button>
-        <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="ledClear()">清空台账</button>
+        <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="ledImport()">从持仓诊断导入</button>
+        <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="ledClear(this)">清空台账</button>
       </div>
       <div class="hint" style="margin-top:8px;line-height:1.7">格式：<b>代码 买/卖 日期 金额</b>，如 <span class="mono">161725 买 2021-06-01 20000</span>、<span class="mono">110011 卖 2025-09-01 8000</span>。买入=成交成本，卖出=到账金额（按当日净值折份额）；同一基金任意多笔，卖出按<b>先进先出</b>扣减成本与份额，全部卖完后自动从诊断中剔除。</div>
       <div id="led-out"></div>
@@ -609,26 +608,48 @@ async function ledImport(){
   if(j.ok){ await updateLedger(); setStatus('rb-dot','rb-st','ok',`已导入 ${j.added} 条买入记录`); }
   else setStatus('rb-dot','rb-st','err',j.message||'导入失败');
 }
-async function ledClear(){
-  if(!confirm('清空全部台账记录？此操作不可恢复')) return;
+async function ledClear(btn){
+  // 两步确认（iframe 环境 alert/confirm 可能被拦截，用按钮二次点击代替）
+  if(!btn._arm){ btn._arm=true; const old=btn.textContent; btn.textContent='确认清空？'; setTimeout(()=>{btn._arm=false; btn.textContent=old;},3000); return; }
+  btn._arm=false; btn.textContent='清空台账';
   await fetch('/api/ledger',{method:'DELETE'});
   LEDGER_TXNS=[]; renderLedger({txns:[],funds:[]});
+  setStatus('rb-dot','rb-st','ok','台账已清空');
+}
+// 把一笔实际操作记入台账（诊断结果里的 卖出→台账 / 买入→台账）
+async function ledRecord(code, side, amount, note){
+  const amt=parseYuan(amount);
+  if(!amt||amt<=0){ setStatus('rb-dot','rb-st','err','金额无效'); return; }
+  const d=new Date(), date=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  const txns=LEDGER_TXNS.slice();
+  txns.push({code, side, date, amount:amt, note:note||(side==='buy'?'诊断导入':'诊断导出')});
+  const j=await (await fetch('/api/ledger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({txns})})).json();
+  if(j.ok){ await updateLedger(); setStatus('rb-dot','rb-st','ok',`已记入台账：${code} ${side==='buy'?'买入':'卖出'} ${fmtYuan(amt)}（日期 ${date}）`); }
+  else setStatus('rb-dot','rb-st','err',j.message||'写入失败');
+}
+async function ledRecordBuy(code){
+  const inp=document.getElementById('led-buy-'+code);
+  await ledRecord(code,'buy',inp?inp.value:null,'诊断买入');
 }
 function ledToHoldings(){
   const j=window._lastLedger;
   if(!j||!(j.funds||[]).length) return;
   const lines=[];
+  const ledCodes=new Set();
   for(const f of j.funds||[]){
     const st=f.state||{};
-    if(st.flat) continue;
-    const mv=st.mv_now?Math.round(st.mv_now):0;
-    lines.push(`${f.code} ${mv?mv.toLocaleString('zh-CN'):'1万'}`);
+    if(st.flat||!st.mv_now) continue;
+    ledCodes.add(f.code);
+    const ret=(st.ret_held!=null&&!isNaN(st.ret_held))?fmtPct(st.ret_held,1):'';
+    lines.push(`${f.code} ${Math.round(st.mv_now)}${ret?' '+ret:''}`);
   }
   if(!lines.length) return;
-  const cur=document.getElementById('rb-holdings').value.trim();
-  document.getElementById('rb-holdings').value=cur?cur+'\n'+lines.join('\n'):lines.join('\n');
+  // 同代码行替换（保留用户手输的其他基金行），金额为系统按真实净值计算的市值（不带千分位，避免解析截断）
+  const keep=(document.getElementById('rb-holdings').value||'').split(/[\n;；]+/).map(l=>l.trim()).filter(Boolean)
+    .filter(l=>{const c=(l.split(/[\s:：]+/)[0]||'').replace(/[^0-9]/g,''); return !ledCodes.has(c);});
+  document.getElementById('rb-holdings').value=keep.concat(lines).join('\n');
   updateRbPreview();
-  setStatus('rb-dot','rb-st','ok',`已用台账市值填充 ${lines.length} 只持仓（金额为系统按净值计算，可改）`);
+  setStatus('rb-dot','rb-st','ok',`已按台账填充 ${lines.length} 只持仓（金额=真实净值计算值，可改；第3列=持有收益率）`);
 }
 function renderLedger(j){
   window._lastLedger=j;
@@ -731,8 +752,7 @@ function cppiPanelHtml(cp,s){
   const tier=cp.slots===0?'var(--danger)':(cp.slots<=3?'#ea580c':(cp.slots<=6?'#d97706':'var(--success)'));
   const tierName=cp.tier_name||(cp.slots+' 槽');
   const restore=cp.restore?`<div style="margin-top:8px;font:12px var(--sans);color:var(--muted);line-height:1.75">
-    <b style="color:var(--success)">↗ 回补提示：</b>组合值回升至 <b class="mono">${fmtYuanFull(cp.restore.value)}</b>（回撤收窄至 ${fmtPct(cp.restore.dd)} 线）→ 恢复 <b>${cp.restore.slots} 槽</b>；
-    或创出新高 <b class="mono">${fmtYuanFull(cp.restore.new_high_value)}</b> → 直接满 ${cp.full_slots} 槽。
+    <b style="color:var(--success)">↗ 回补提示：</b>组合值回升至 <b class="mono">${fmtYuanFull(cp.restore.value)}</b>（回撤收窄至 ${fmtPct(cp.restore.dd)} 线）→ 恢复 <b>${cp.restore.slots} 槽</b>。
     ${cp.restore.last_on?`<span style="color:var(--faint)">上次站上该线：${cp.restore.last_on}。</span>`:''}</div>`:'';
   const next=cp.next_trigger?`<div style="margin-top:6px;font:12px var(--sans);color:var(--muted);line-height:1.75">
     <b style="color:var(--warn)">↘ 下一减仓线：</b>再跌至 <b class="mono">${fmtYuanFull(cp.next_trigger.value)}</b>（-${Math.abs(cp.next_trigger.dd*100).toFixed(0)}%）→ 降为 <b>${cp.next_trigger.slots===0?'清仓':cp.next_trigger.slots+' 槽'}</b></div>`:'';
@@ -807,13 +827,19 @@ function renderRebalance(j){
   const hRows=holdings.map(h=>{
     if(h.is_error){
       const canRetry=h.retryable!==false;
-      return `<tr style="background:${canRetry?'#fffbeb':'#f5f5f4'}"><td>${h.code}</td><td class="name">${h.name}</td><td style="text-align:right">${fmtYuanFull(h.amount)}</td><td class="mono faint">—</td><td class="mono faint">—</td><td class="mono faint">—</td><td>—</td><td><span class="badge ${canRetry?'b-amber':'b-mute'}">${canRetry?'待重试':'观察仓'}</span></td><td><span class="badge b-mute">—</span></td><td style="max-width:240px;white-space:normal;font:12px var(--sans);color:var(--muted)">${h.error||''}</td><td>${canRetry?`<button class="btn btn-ghost" style="padding:4px 8px;font-size:11px" onclick="retryRebalanceSingle('${h.code}')">重试</button>`:`<span class="mono faint">—</span>`}</td></tr>`;
+      return `<tr style="background:${canRetry?'#fffbeb':'#f5f5f4'}"><td>${h.code}</td><td class="name">${h.name}</td><td style="text-align:right">${fmtYuanFull(h.amount)}</td><td class="mono faint">—</td><td class="mono faint">—</td><td class="mono faint">—</td><td>—</td><td><span class="badge ${canRetry?'b-amber':'b-mute'}">${canRetry?'待重试':'观察仓'}</span></td><td><span class="badge b-mute">—</span></td><td style="max-width:240px;white-space:normal;font:12px var(--sans);color:var(--muted)">${h.error||''}</td><td>${canRetry?`<button class="btn btn-ghost" style="padding:4px 8px;font-size:11px" onclick="retryRebalanceSingle('${h.code}')">重试</button>`:`<span class="mono faint">—</span>`}</td><td><span class="mono faint">—</span></td></tr>`;
     }
     const act=h.action==='sell'?'卖出':'持有';
-    return `<tr><td>${h.code}</td><td class="name">${h.name}</td><td style="text-align:right">${fmtYuanFull(h.amount)}</td>${stopCell(h)}<td class="score">${h.S_total??'—'}</td><td>${ratingCell(h)}</td><td>${sigOf(h)}</td><td>${h.action_label||act}</td><td style="text-align:right">${fmtYuanFull(h.target_amount)}</td></tr>`;
+    const ledBtn=h.action==='sell'&&h.amount>0
+      ? `<button class="btn btn-ghost" style="padding:3px 8px;font-size:11px" onclick="ledRecord('${h.code}','sell',${h.amount},'诊断卖出')">卖出→台账</button>`
+      : `<span class="mono faint">—</span>`;
+    return `<tr><td>${h.code}</td><td class="name">${h.name}</td><td style="text-align:right">${fmtYuanFull(h.amount)}</td>${stopCell(h)}<td class="score">${h.S_total??'—'}</td><td>${ratingCell(h)}</td><td>${sigOf(h)}</td><td>${h.action_label||act}</td><td style="text-align:right">${fmtYuanFull(h.target_amount)}</td><td>${ledBtn}</td></tr>`;
   }).join('');
-  const hTable=`<div style="margin-top:14px"><div class="table-wrap"><table><thead><tr><th>代码</th><th>名称</th><th>金额</th><th>入场日</th><th>高点回撤</th><th>20%止损</th><th>总分</th><th>评级</th><th>信号</th><th>操作</th><th>目标</th></tr></thead><tbody>${hRows}</tbody></table></div></div>`;
-  const orderHtml=orders.length? `<div style="margin-top:14px"><div class="orders">${orders.map(o=>`<div class="order ${o.side==='SELL'?'sell':'buy'}"><span class="side">${o.side==='SELL'?'卖出':'买入'}</span><div class="meta"><b>${o.code} ${o.name}</b><div>${o.reason||''}</div></div><div class="amt">${fmtYuanFull(o.amount)}</div></div>`).join('')}</div><div style="margin-top:8px;display:flex;gap:8px"><button class="btn btn-ghost" style="padding:6px 12px;font-size:12px" onclick="copyOrders()">复制</button><button class="btn btn-ghost" style="padding:6px 12px;font-size:12px" onclick="downloadOrders()">导出</button></div></div>`:`<div class="empty" style="margin-top:12px">${j.scan_msg||'无操作'}</div>`;
+  const hTable=`<div style="margin-top:14px"><div class="table-wrap"><table><thead><tr><th>代码</th><th>名称</th><th>金额</th><th>入场日</th><th>高点回撤</th><th>20%止损</th><th>总分</th><th>评级</th><th>信号</th><th>操作</th><th>目标</th><th>台账</th></tr></thead><tbody>${hRows}</tbody></table></div></div>`;
+  const orderHtml=orders.length? `<div style="margin-top:14px"><div class="orders">${orders.map(o=>{
+    const buyLed=o.side==='BUY'?`<div style="display:flex;gap:6px;align-items:center;margin-left:8px"><input id="led-buy-${o.code}" class="mono" style="width:110px;background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font:12px var(--mono);text-align:right" value="${fmtYuan(o.amount)}"><button class="btn btn-ghost" style="padding:4px 8px;font-size:11px" onclick="ledRecordBuy('${o.code}')">买入→台账</button></div>`:'';
+    return `<div class="order ${o.side==='SELL'?'sell':'buy'}"><span class="side">${o.side==='SELL'?'卖出':'买入'}</span><div class="meta"><b>${o.code} ${o.name}</b><div>${o.reason||''}</div></div><div class="amt">${fmtYuanFull(o.amount)}</div>${buyLed}</div>`;
+  }).join('')}</div><div style="margin-top:8px;display:flex;gap:8px"><button class="btn btn-ghost" style="padding:6px 12px;font-size:12px" onclick="copyOrders()">复制</button><button class="btn btn-ghost" style="padding:6px 12px;font-size:12px" onclick="downloadOrders()">导出</button></div></div>`:`<div class="empty" style="margin-top:12px">${j.scan_msg||'无操作'}</div>`;
   const allocHtml=alloc.length? `<div style="margin-top:14px"><div class="alloc-bar">${alloc.map((a,i)=>`<i style="width:${a.pct}%;background:${['#0c0a09','#57534e','#a8a29e','#d6d3d1','#e7e5e4'][i%5]}"></i>`).join('')}<i style="width:${s.cash_pct_after||0}%;background:var(--surface-2);border:1px dashed var(--line)"></i></div><div class="legend">${alloc.map((a,i)=>`<span><em style="background:${['#0c0a09','#57534e','#a8a29e'][i%3]}"></em>${a.code} ${a.pct}%</span>`).join('')}<span><em style="background:var(--surface-2);border:1px solid var(--line)"></em>现金 ${s.cash_pct_after||0}%</span></div></div>`:'';
   document.getElementById('rb-out').innerHTML=kpis+cppiHtml+errBanner+hTable+orderHtml+allocHtml;
   window._lastRebalance=j;

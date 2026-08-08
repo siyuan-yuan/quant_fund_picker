@@ -1265,7 +1265,7 @@ def rebalance():
             if cppi.get("next_trigger"):
                 w += f"；再跌至 {cppi['next_trigger']['value']:,.0f} 元（-{abs(cppi['next_trigger']['dd'])*100:.0f}%）降为 {cppi['next_trigger']['slots']} 槽"
             if cppi.get("restore"):
-                w += f"；回升至 {cppi['restore']['value']:,.0f} 元（回撤 {cppi['restore']['dd']*100:.0f}% 内）恢复 {cppi['restore']['slots']} 槽，或创新高 {cppi['hwm']:,.0f} 元直接满槽"
+                w += f"；回升至 {cppi['restore']['value']:,.0f} 元（回撤 {cppi['restore']['dd']*100:.0f}% 内）恢复 {cppi['restore']['slots']} 槽"
             warnings.append(w)
         else:
             warnings.append(f"CPPI 风险预算：回撤≤-15%限6槽 / ≤-20%限3槽 / ≤-25%清仓（{cppi.get('reason','提供买入日期/成本后自动计算真实触发状态')}）")
