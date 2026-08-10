@@ -767,6 +767,14 @@ async function runRebalance(){
     updateLedger();   // 台账市值可能因锚定微调，刷新汇总
   }catch(e){const msg=e.name==='AbortError'?'请求超时（180秒），建议减少持仓只数后重试':(e.message||'网络错误'); setStatus('rb-dot','rb-st','err',msg); document.getElementById('rb-out').innerHTML=`<div class="empty" style="color:var(--danger);border-color:#fecdd3;background:var(--danger-soft)">请求失败：${msg}<br><span style="color:var(--muted)">单基可用说明服务正常；持仓批量对并发更敏感，建议分2批（每次≤3只）或稍后重试。已自动降并发至2线程。</span><br><button class="btn btn-ghost" style="margin-top:8px;padding:6px 12px;font-size:12px" onclick="runRebalance()">重试</button></div>`}finally{document.getElementById('rb-btn').disabled=false}
 }
+function fmtPct(v,d=1){if(v==null||isNaN(v))return '—';return (v*100).toFixed(d)+'%'}
+function stopBadge(st){
+  if(!st) return '<span class="badge b-mute">—</span>';
+  if(st.status==='triggered') return '<span class="badge b-red">止损清仓</span>';
+  if(st.status==='near') return '<span class="badge b-amber">接近止损</span>';
+  if(st.status==='ok') return '<span class="badge b-green">正常</span>';
+  return '<span class="badge b-mute">需日期</span>';
+}
 function stopCell(h){
   const st=h.stop||{};
   if(!st.computable) return `<td class="mono faint">—</td><td class="mono faint">—</td><td><span class="badge b-mute">${st.status==='need_entry'?'需日期/收益率':'—'}</span></td>`;
