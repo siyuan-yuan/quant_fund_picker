@@ -84,8 +84,9 @@ def _norm_txn(t) -> dict:
     if not amt or amt <= 0:
         return None
     tid = str(t.get("id") or f"l{int(time.time()*1000)}{random.randint(0,9999)}")
+    isDca = bool(t.get("isDca", False))
     return {"id": tid, "code": code, "date": d, "side": side,
-            "amount": round(float(amt), 2), "note": str(t.get("note", "") or "")[:120]}
+            "amount": round(float(amt), 2), "note": str(t.get("note", "") or "")[:120], "isDca": isDca}
 
 
 def _ledger_by_code(txns: list) -> dict:
