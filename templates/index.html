@@ -354,6 +354,9 @@
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center">
           <button class="btn btn-primary" style="padding:8px 16px" onclick="ledAdd()">添加记录</button>
           <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="dcaToggle()">定投导入</button>
+          <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="ledExport()">导出台账</button>
+          <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="document.getElementById('led-file').click()">导入台账</button>
+          <input type="file" id="led-file" accept=".csv,.txt,.json" style="display:none" onchange="ledImportFile()">
           <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="ledClear(this)">清空台账</button>
         </div>
         <div class="status"><span class="dot" id="led-dot"></span><span id="led-st">就绪</span></div>
@@ -657,58 +660,69 @@ async function ledClear(btn){
   LEDGER_TXNS=[]; renderLedger({txns:[],funds:[]});
   setStatus('led-dot','led-st','ok','台账已清空');
 }
-// ============ 定投导入 (DCA)：生成序列 + 混合持仓反推参数 ============
-let DCA_LOTS=[], DCA_CODE='';
-function dcaToggle(){
-  const el=document.getElementById('dca-panel');
-  el.classList.toggle('hide');
-  if(!el.classList.contains('hide')&&!document.getElementById('dca-code').value){
-    const m=document.getElementById('led-code').value||'';
-    if(m) document.getElementById('dca-code').value=m;
+function normLedDate(d){const x=String(d).trim().replace(/[/.]/g,'-'); return /^\d{8}$/.test(x)?`${x.slice(0,4)}-${x.slice(4,6)}-${x.slice(6,8)}`:x}
+function ledExport(){
+  if(!LEDGER_TXNS.length){ setStatus('led-dot','led-st','err','台账为空，无可导出'); return; }
+  const esc=v=>{const s=String(v==null?'':v); return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s};
+  const rows=[['日期','方向','代码','金额','备注']];
+  for(const t of LEDGER_TXNS) rows.push([t.date, t.side==='buy'?'买入':'卖出', t.code, t.amount, esc(t.note||'')]);
+  const csv=rows.map(r=>r.join(',')).join('\n');
+  const b=new Blob(["\uFEFF"+csv],{type:'text/csv'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(b);
+  a.download='ledger_'+new Date().toISOString().slice(0,10)+'.csv'; a.click();
+  setStatus('led-dot','led-st','ok',`已导出 ${LEDGER_TXNS.length} 条台账记录（CSV）`);
+}
+function parseLedgerFile(text){
+  const out=[];
+  const isSide=s=>/^(买|买入|buy|b|卖|卖出|sell|s)$/i.test(String(s).trim());
+  const isDate=s=>/^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}$/.test(String(s).trim())||/^\d{8}$/.test(String(s).trim());
+  const lines=String(text).split(/[\r\n]+/).map(l=>l.trim()).filter(Boolean);
+  for(const line of lines){
+    if(/^(日期|date)[,\s]/.test(line.toLowerCase())) continue;   // 跳过表头
+    let parts=line.split(',').map(x=>x.trim()).filter(Boolean);
+    if(parts.length<4) parts=line.split(/[\s，;；]+/).filter(Boolean);
+    if(parts.length<4) continue;
+    let date,side,code,amount;
+    if(isDate(parts[0])&&isSide(parts[1])&&/^\d{6}$/.test(parts[2].replace(/\D/g,''))){
+      date=parts[0]; side=parts[1]; code=parts[2].replace(/\D/g,'').padStart(6,'0'); amount=parts[3];
+    } else if(/^\d{6}$/.test(parts[0].replace(/\D/g,''))&&isSide(parts[1])&&isDate(parts[2])){
+      code=parts[0].replace(/\D/g,'').padStart(6,'0'); side=parts[1]; date=parts[2]; amount=parts[3];
+    } else continue;
+    const a=parseYuan(amount);
+    if(!/^\d{6}$/.test(code)||!isDate(date)||!a||a<=0) continue;
+    out.push({code, side:/^(卖|卖出|sell|s)$/i.test(side)?'sell':'buy', date:normLedDate(date), amount:a});
   }
+  return out;
 }
-async function dcaPreview(){
-  const code=document.getElementById('dca-code').value.replace(/\D/g,'').padStart(6,'0');
-  const start=document.getElementById('dca-start').value.trim();
-  const amt=document.getElementById('dca-amt').value.trim();
-  const freq=document.getElementById('dca-freq').value;
-  const end=document.getElementById('dca-end').value.trim()||null;
-  if(!/^\d{6}$/.test(code)||!start||!amt){setStatus('dca-dot','dca-st','err','需要 代码+开始日期+每期金额');return}
-  setStatus('dca-dot','dca-st','busy','生成中…');
-  try{
-    const j=await (await fetch('/api/dca/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code,start_date:start,amount:amt,freq,end_date:end})})).json();
-    if(!j.ok){setStatus('dca-dot','dca-st','err',j.message||'生成失败');return}
-    DCA_LOTS=j.lots; DCA_CODE=code;
-    document.getElementById('dca-preview').innerHTML=`${j.n} 期 · ${j.first} → ${j.last} · ${j.freq_label}定投 · 累计投入 ${fmtYuanFull(j.total)} · 按真实净值折算当前市值约 <b>${fmtYuanFull(j.implied_mv)}</b>`;
-    document.getElementById('dca-save-btn').disabled=false;
-    setStatus('dca-dot','dca-st','ok',`已生成 ${j.n} 期，核对后点「保存到台账」`);
-  }catch(e){setStatus('dca-dot','dca-st','err','生成失败')}
-}
-async function dcaSave(){
-  if(!DCA_LOTS.length||!DCA_CODE) return;
-  const note=`定投导入:${document.getElementById('dca-freq').value} 起${document.getElementById('dca-start').value||''}每期${document.getElementById('dca-amt').value||''}`;
+async function ledImportFile(){
+  const inp=document.getElementById('led-file');
+  const f=inp.files&&inp.files[0];
+  if(!f) return;
+  let text, parsed=[];
+  try{ text=await f.text(); }catch(e){ setStatus('led-dot','led-st','err','文件读取失败'); inp.value=''; return; }
+  if(/\.json$/i.test(f.name)){
+    try{
+      const data=JSON.parse(text);
+      const arr=Array.isArray(data)?data:(data.txns||[]);
+      parsed=arr.filter(t=>t&&t.code&&t.date&&t.amount).map(t=>({code:String(t.code).replace(/\D/g,'').padStart(6,'0'), side:/^(卖|卖出|sell|s)$/i.test(t.side||'buy')?'sell':'buy', date:normLedDate(t.date), amount:parseYuan(t.amount)})).filter(x=>/^\d{6}$/.test(x.code)&&x.amount>0);
+    }catch(e){ setStatus('led-dot','led-st','err','JSON 解析失败'); inp.value=''; return; }
+  } else {
+    parsed=parseLedgerFile(text);
+  }
+  if(!parsed.length){ setStatus('led-dot','led-st','err','未解析到有效记录（CSV: 日期,方向,代码,金额）'); inp.value=''; return; }
   const txns=LEDGER_TXNS.slice();
   const seen=new Set(txns.map(t=>t.code+'|'+t.date+'|'+t.side+'|'+t.amount));
   let added=0;
-  for(const l of DCA_LOTS){
-    const k=DCA_CODE+'|'+l.date+'|buy|'+l.amount;
+  for(const r of parsed){
+    const k=r.code+'|'+r.date+'|'+r.side+'|'+r.amount;
     if(seen.has(k)) continue;
-    seen.add(k);
-    txns.push({code:DCA_CODE,side:'buy',date:l.date,amount:l.amount,note});
-    added++;
+    seen.add(k); txns.push(r); added++;
   }
   const j=await (await fetch('/api/ledger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({txns})})).json();
-  if(j.ok){
-    await updateLedger();
-    const manualCnt=LEDGER_TXNS.filter(t=>t.code===DCA_CODE&&!String(t.note||'').startsWith('定投')).length;
-    setStatus('dca-dot','dca-st','ok',`已导入 ${added} 笔定投买入（台账原有 ${manualCnt} 条主动记录，已自动合并）`);
-    DCA_LOTS=[]; DCA_CODE='';
-    document.getElementById('dca-save-btn').disabled=true;
-    document.getElementById('dca-preview').innerHTML='填写参数后点「生成定投序列」。';
-    dcaToggle();
-  }else setStatus('dca-dot','dca-st','err',j.message||'保存失败');
+  if(j.ok){ await updateLedger(); setStatus('led-dot','led-st','ok',`已导入 ${added} 条（共解析 ${parsed.length} 条，跳过重复 ${parsed.length-added} 条）`); }
+  else setStatus('led-dot','led-st','err',j.message||'导入失败');
+  inp.value='';
 }
-// 把一笔实际操作记入台账（诊断结果里的 卖出→台账 / 买入→台账）
 async function ledRecord(code, side, amount, note){
   const amt=parseYuan(amount);
   if(!amt||amt<=0){ setStatus('led-dot','led-st','err','金额无效'); return; }
@@ -760,8 +774,8 @@ function renderLedger(j){
 function rbSave(){localStorage.setItem('rb_data',JSON.stringify({total:document.getElementById('rb-total').value,cash:document.getElementById('rb-cash').value})); setStatus('rb-dot','rb-st','ok','已记忆')}
 function rbLoad(){try{const d=JSON.parse(localStorage.getItem('rb_data')||'null'); if(!d) return; document.getElementById('rb-total').value=d.total||'';document.getElementById('rb-cash').value=d.cash||'';}catch(e){}}
 async function runRebalance(){
-  if(!LEDGER_TXNS.length){ setStatus('rb-dot','rb-st','err','台账为空：请先添加买入记录（或点「定投导入」）'); return; }
   const total=parseYuan(document.getElementById('rb-total').value), cash=parseYuan(document.getElementById('rb-cash').value);
+  if(!LEDGER_TXNS.length&&!total&&!cash){ setStatus('rb-dot','rb-st','err','台账为空且未填现金：请添加买入记录或填写可用现金'); return; }
   document.getElementById('rb-btn').disabled=true; setStatus('rb-dot','rb-st','busy','计算中…');
   document.getElementById('rb-out').innerHTML='<div class="empty">计算中…</div>';
   try{

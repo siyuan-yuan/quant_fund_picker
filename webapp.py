@@ -866,8 +866,10 @@ def rebalance():
                 norm_holdings.append({"code": code, "amount": None, "buy_date": None,
                                       "cost": None, "ret_pct": None, "_ledger": True})
                 seen.add(code)
-    if not norm_holdings:
-        return jsonify({"ok": False, "message": "请至少输入 1 只持仓基金代码，或在操作台账中添加买入记录"}), 400
+    # V3.9: 允许空组合（无持仓但有可用现金）生成纯买入方案；
+    # 只有"既无持仓也无现金/总资金"才拒绝
+    if not norm_holdings and not cash and not total_capital:
+        return jsonify({"ok": False, "message": "请至少输入 1 只持仓基金代码，或在操作台账中添加买入记录，或填写可用现金"}), 400
 
     # ---- 危机 & 策略快照 ----
     crisis = _compute_crisis()
@@ -1389,19 +1391,28 @@ def rebalance():
             "S": h["S_total"],
         })
     if candidates and free_slots>0:
-        # 均分可用现金，但每只不超过 per_slot，且不低于 1000 元才执行（避免碎单）
-        per_buy = per_slot if per_slot>0 else 0
-        # 若现金不足以按 per_slot 填满，则按现金均分
-        total_need = per_buy * len(candidates)
-        if total_need > cash_after_sells and cash_after_sells>0:
-            per_buy = cash_after_sells / len(candidates)
-        per_buy = round(per_buy,2)
+        # 每只最低买入额 10 元（V3.9）：现金充足按每槽目标 per_slot；现金不足时
+        # 按"每只至少10元"收缩可买只数，然后在可买只数之间平分现金
+        MIN_BUY = 10.0
+        n_buy = len(candidates)
+        if cash_after_sells > 0:
+            max_by_cash = int(cash_after_sells // MIN_BUY)   # 现金最多能买几只(每只≥10)
+            n_buy = min(n_buy, max_by_cash)
+        per_buy = 0.0
+        if n_buy > 0:
+            per_buy = per_slot if per_slot>0 else 0
+            total_need = per_buy * n_buy
+            if total_need > cash_after_sells and cash_after_sells>0:
+                per_buy = cash_after_sells / n_buy
+            per_buy = round(per_buy,2)
         for c in candidates:
-            if cash_remaining < 1000:
+            if len(buys) >= n_buy:
+                break
+            if cash_remaining < MIN_BUY:
                 break
             buy_amt = min(per_buy, cash_remaining)
-            # 最低 100 元门槛（基金申购起点）
-            if buy_amt < 100:
+            # 最低 10 元门槛（基金申购起点）
+            if buy_amt < MIN_BUY:
                 continue
             c["suggested_amount"] = round(buy_amt,2)
             # 估算目标占比
@@ -1426,11 +1437,11 @@ def rebalance():
         # V3.9: 有候选但一只都没买成 → 明确原因（避免"推荐0只"无解释）
         buy_note = None
         if candidates and not buys:
-            if cash_after_sells < 1000:
-                buy_note = (f"可用现金仅 {cash_after_sells:,.0f} 元（<1000 元），"
+            if cash_after_sells < MIN_BUY:
+                buy_note = (f"可用现金仅 {cash_after_sells:,.0f} 元（<{MIN_BUY:.0f} 元），"
                             f"暂不买入；请补充可用现金或减少持仓")
-            elif per_buy and per_buy < 100:
-                buy_note = (f"单笔预算 {per_buy:,.0f} 元低于 100 元申购门槛，"
+            elif per_buy and per_buy < MIN_BUY:
+                buy_note = (f"单笔预算 {per_buy:,.0f} 元低于 {MIN_BUY:.0f} 元最低买入额，"
                             f"请调大总资金/现金")
             else:
                 buy_note = "候选均未达到买入条件，建议检查现金与门槛"
