@@ -548,9 +548,9 @@ def _run_scan(right_n, left_n, workers=6, scan_mode="default"):
                     STATE["elapsed"] = round(time.time() - t0)
         df = finalize(rows)
         stamp = dt.date.today().strftime("%Y%m%d")
-        # S_v4_raw(V4原始z值)必须落盘：它作为单基透视/批量评分/持仓诊断的
-        # 全市场V4参照快照(engine.get_global_ref_universe 读取)，缺列则三入口V4闸门降级
-        keep = ["code", "name", "ftype", "channel", "S_total", "S_v4_raw", "rating", "F_value",
+        # 动量腿参照列(mom_4m1m/mom_7m1m)落盘：单基透视/批量评分/持仓诊断的
+        # 全市场参照快照(engine.get_global_ref_universe 读取)以它为 ECDF 标尺
+        keep = ["code", "name", "ftype", "channel", "S_total", "rating", "F_value",
                 "val_pct", "trend_ok", "trend_ma20", "bonus", "F_alpha", "ir_winrate",
                 "down_capture", "F_momentum", "mom_4m1m", "mom_7m1m", "rank4", "rank7",
                 "scale", "tenure_days", "is_passive", "penalty_str", "water",
@@ -1316,7 +1316,7 @@ def rebalance():
             # 贪心选取：市场内保持 S 降序；跨市场按 S 高者优先（海外受配额限制）；
             # 重复度两档规则（详见 config）：
             #   ① 指数级重复：候选 top1≥0.40 且该风格组合已实质持有 → 必排除（同指数）
-            #   ② 簇上限：同 top1 风格最多 STRAT_CLUSTER_MAX 只 → 第3只起顺位换风格
+            #   ② 簇上限：同 top1 风格最多 STRAT_CLUSTER_MAX 只 → 第2只起顺位换风格
             # 被排除的记入 dup_skips（前端展示原因）
             ov_cap = min(STRAT_OVERSEAS_SLOT_CAP, free_slots)
             ov_used = 0

@@ -9,22 +9,8 @@ from config import (W_VALUE, W_ALPHA, W_MOMENTUM, RATING_BANDS,
                     REGIME_LOW_WATER, REGIME_HIGH_WATER,
                     W_VALUE_LOW, W_ALPHA_LOW, W_MOM_LOW,
                     RBSA_INDICES, OVERSEAS_NAMES, OVERSEAS_SRCS,
-                    OVERSEAS_SWITCH_THRESHOLD, TENURE_CAP_DAYS, YOUNG_MAX_DAYS,
-                    USE_V4_MODEL, W_V4)
+                    OVERSEAS_SWITCH_THRESHOLD, TENURE_CAP_DAYS, YOUNG_MAX_DAYS)
 import provider, rbsa, factors, risk
-
-# V4 Huber 模型（可选依赖：未训练或未装 sklearn 时优雅降级到 V3.7）
-model_v4 = None
-_V4_BUNDLE = None
-try:
-    if USE_V4_MODEL:
-        import model_v4 as _mv4
-        _V4_BUNDLE = _mv4.load_model()
-        if _V4_BUNDLE is not None:
-            model_v4 = _mv4
-except Exception as _e:
-    import sys
-    print(f"[engine] V4 模型加载失败，回退 V3.7: {_e}", file=sys.stderr)
 
 
 def _safe_list(v):
@@ -213,17 +199,16 @@ _REF_CACHE = {"key": None, "ref": None}   # 进程内参照快照缓存 (path, m
 
 
 def _load_ref_file(path: str, stamp: str):
-    """从参照快照文件解析各因子全市场分布。列别名兼容两类来源：
-      扫描榜单 scan_*.csv      → mom_4m1m / mom_7m1m / ir_winrate / down_capture / val_pct / S_v4_raw
-      回测时点 bt_scores_cache → r4 / r7 / wr / dc / val_pct  (无 z 列 → 仅支撑 V3.7 腿)
+    """从参照快照文件解析 V3.7 动量腿的全市场分布（mom4/mom7 ECDF 标尺）。
+    列别名兼容两类来源：
+      扫描榜单 scan_*.csv      → mom_4m1m / mom_7m1m
+      回测时点 bt_scores_cache → r4 / r7
     任一分布样本<30 视为不可用(None)。"""
     try:
         df = pd.read_csv(path, dtype={"code": str})
     except Exception:
         return None
-    alias = {"mom4": ["mom_4m1m", "r4"], "mom7": ["mom_7m1m", "r7"],
-             "wr": ["ir_winrate", "wr"], "dc": ["down_capture", "dc"],
-             "val_pct": ["val_pct"], "z": ["S_v4_raw"]}
+    alias = {"mom4": ["mom_4m1m", "r4"], "mom7": ["mom_7m1m", "r7"]}
 
     def col(key):
         for c in alias[key]:
@@ -233,24 +218,17 @@ def _load_ref_file(path: str, stamp: str):
                     return s
         return None
 
-    vp = col("val_pct")
     return {"stamp": stamp,
-            "mom4": col("mom4"), "mom7": col("mom7"),
-            "wr": col("wr"), "dc": col("dc"),
-            "val_median": float(vp.median()) if vp is not None else np.nan,
-            "z": col("z")}
+            "mom4": col("mom4"), "mom7": col("mom7")}
 
 
 def get_global_ref_universe(as_of: str = None):
     """
     全市场参照宇宙快照 (Global Reference Universe)
     为单基透视、批量评分、持仓诊断等小样本测算提供同源唯一参照分布：
-      mom4/mom7   —— V3.7 动量腿的 ECDF 标尺
-      wr/dc       —— V4 质量腿输入 (ir胜率/下行捕获) 的 ECDF 标尺
-      val_median  —— V4 估值盲区填充中位数(替代批内中位数)
-      z           —— V4 原始预测值的全市场分位映射(替代批内 rank→0~100)
-    返回 dict(stamp, mom4, mom7, wr, dc, val_median, z) 或 None。
+      mom4/mom7 —— V3.7 动量腿的 ECDF 标尺
     批次无关性：同一基金在同一快照下，无论与 1 只还是 5000 只基金同批计算，结果严格一致。
+    返回 dict(stamp, mom4, mom7) 或 None。
     """
     import glob, os
     from config import OUTPUT_DIR
@@ -291,9 +269,9 @@ def finalize(rows: list, as_of: str = None, use_global_ref: bool = False) -> pd.
     """截面动量排名 → F_momentum → S_total(regime权重) × 惩罚 → 评级
     as_of: 回测日(水位计PiT); None → 实时
     use_global_ref: 局部/小样本测算(单基、自选池、持仓诊断)采用全市场统一参照快照 —
-        V3.7 动量腿与 V4 的全部 rank 输入 / z 分位统一对参照宇宙做 ECDF 映射，
+        V3.7 动量腿统一对参照宇宙做 ECDF 映射，
         结果与批次大小和批次构成完全无关(单基=批量=诊断)；
-        快照缺失 V4 所需分布时按一致性闸门整体降级 V3.7，绝不退回批内 rank。"""
+        快照缺失动量分布时动量腿关闭(按剩余因子归一化)，绝不退回批内 rank。"""
     df = pd.DataFrame(rows)
     if "error" not in df:
         df["error"] = None
@@ -345,100 +323,13 @@ def finalize(rows: list, as_of: str = None, use_global_ref: bool = False) -> pd.
 
     df["S_v37"] = [total(r) for _, r in df.iterrows()]
 
-    # ---------- V4: Huber 稳健回归 + 截面 rank ----------
-    # 训练: 28季 PiT 面板, 7 经济学特征, 2 年衰减, Huber ε=1.35
-    # 验证: WF IC 0.198 vs V3.7 0.116 (+71%); strict OOS IC 0.171 vs 0.093 (+85%)
-    if model_v4 is not None and _V4_BUNDLE is not None:
-        bundle = _V4_BUNDLE
-        # ---- 一致性闸门 (V4.1) ----
-        # 小样本模式(use_global_ref)下，V4 必须有全市场快照做 ECDF 映射；
-        # 否则批内 rank 会随批次构成漂移(单基时 S_v4 恒=100，模型信息被丢弃) ——
-        # 宁可整体回退 V3.7，也绝不退回批内 rank。全域批(扫描/回测)批内即训练域，保持原口径。
-        v4_global_ok = (global_mom_ok
-                        and ref.get("z") is not None
-                        and ref.get("wr") is not None
-                        and ref.get("dc") is not None
-                        and ref.get("val_median") == ref.get("val_median"))  # NaN 防御
-        v4_mode = ("global" if v4_global_ok else "off") if use_global_ref else "batch"
-
-        if v4_mode == "off":
-            df["S_v4"] = np.nan
-            df["S_v4_penalized"] = np.nan
-            df["S_v4_raw"] = np.nan
-            df["S_total"] = df["S_v37"]
-            df["model_version"] = "V3.7(无V4全市场快照·闸门降级)"
-        else:
-            if v4_mode == "global":
-                # 与 V3.7 动量腿同一把尺：全部 rank 输入对参照宇宙做 ECDF
-                df["wr_rk"] = df["ir_winrate"].apply(lambda v: float((ref["wr"] <= v).mean()) if pd.notna(v) else np.nan)
-                df["dc_rk"] = df["down_capture"].apply(lambda v: float((ref["dc"] <= v).mean()) if pd.notna(v) else np.nan)
-                df["r4_rk"] = df["rank4"]
-                df["r7_rk"] = df["rank7"]
-                val_fill = ref["val_median"]
-            else:
-                # 全市场批次: 批内即全截面，与训练同域
-                df["wr_rk"] = df["ir_winrate"].rank(pct=True)
-                df["dc_rk"] = df["down_capture"].rank(pct=True)
-                df["r4_rk"] = df["mom_4m1m"].rank(pct=True)
-                df["r7_rk"] = df["mom_7m1m"].rank(pct=True)
-                val_fill = df["val_pct"].astype(float).median()
-            # V3.6 平滑回撤惩罚 (与训练时口径一致；底部区减半)
-            rmdd_pen = np.zeros(len(df))
-            pdt = df["penalty_detail"].apply(_safe_dict)
-            r_mdd = pdt.apply(lambda d: d.get("R_MDD"))
-            mask = r_mdd.notna() & (r_mdd > 1.2)
-            rmdd_pen[mask] = np.minimum(0.5 * (r_mdd[mask] - 1.2), 1.0)
-            if pd.notna(water):
-                if water <= 0.35:
-                    rmdd_pen[mask] *= 0.5
-            # 趋势确认度 (与训练时同口径)
-            trend_t = np.clip((df["ma20_dist"].fillna(0) + 0.02) / 0.06, 0, 1)
-
-            # 估值盲区：V4 训练时 val_pct 是有效输入；盲区基金用参照中位数(global)或全域中位数(batch)补
-            val_pct = df["val_pct"].astype(float).copy()
-            val_pct = val_pct.fillna(val_fill)
-
-            w_arr = np.full(len(df), water if water == water else 0.43)  # 截面均值兜底
-            X = model_v4.build_features(
-                val_pct.values, df["r4_rk"].values, df["r7_rk"].values,
-                df["wr_rk"].values, df["dc_rk"].values, rmdd_pen,
-                w_arr, trend_t.values)
-            m = bundle["model"]
-            # 逐行防御：任一特征非有限(NaN/±Inf)的行不喂模型，该行 V4 静默回退 V3.7
-            # (修复旧版单基估值盲区基 X 含 NaN 直接抛 ValueError → 接口400 的事故)
-            finite = np.isfinite(X).all(axis=1)
-            z = np.full(len(df), np.nan)
-            if finite.any():
-                z[finite] = m.named_steps["hub"].predict(m.named_steps["sc"].transform(X[finite]))
-            df["S_v4_raw"] = z
-            # 映射到 0~100：global 模式对快照 z 分布做 ECDF；batch 模式批内即全截面
-            if v4_mode == "global":
-                df["S_v4"] = [round(float((ref["z"] <= zz).mean()) * 100, 1)
-                              if pd.notna(zz) else np.nan for zz in z]
-            else:
-                df["S_v4"] = (pd.Series(z).rank(pct=True) * 100).values
-            # V4 只乘非 R_MDD 惩罚 (任期归因/规模反噬/集中度)；R_MDD 已在模型内
-            non_rmdd_penalties = df["penalties"].apply(
-                lambda ps: [(n, p) for n, p in (ps or []) if "回撤比值" not in n])
-            df["S_v4_penalized"] = [
-                round(risk.apply_penalties(s, pl), 1) if pd.notna(s) else np.nan
-                for s, pl in zip(df["S_v4"], non_rmdd_penalties)
-            ]
-            # V4/V3.7 混合：V4 IC 高但在高水位偏激进，V3.7 的估值悬崖是安全垫
-            wv4 = float(W_V4) if W_V4 is not None else 0.5
-            st = df["S_v37"].astype(float).copy()
-            okb = df["S_v4_penalized"].notna()
-            st.loc[okb] = (wv4 * df.loc[okb, "S_v4_penalized"] +
-                           (1 - wv4) * df.loc[okb, "S_v37"]).round(1)
-            df["S_total"] = st
-            tag = "·全市场ECDF" if v4_mode == "global" else ""
-            df["model_version"] = f"{bundle.get('version', 'V4')}+V3.7×{1-wv4:.1f}{tag}"
-    else:
-        df["S_v4"] = np.nan
-        df["S_v4_penalized"] = np.nan
-        df["S_v4_raw"] = np.nan
-        df["S_total"] = df["S_v37"]
-        df["model_version"] = "V3.7"
+    # ---------- 模型裁决 (2026-08-10 模型动物园) ----------
+    # V3.7 规则合成模型 = 唯一最优模型:
+    #   全历史严格 walk-forward (2006-09→2026-03, 235季×217只, 无前视) IC=0.113 (t=8.1),
+    #   高于全部 66 个 ML 配置; 端到端回测三窗口 Calmar 0.33/0.27/0.64 全胜。
+    # 详见 output/model_zoo_report.md; V4 实验代码与产物已全部移除。
+    df["S_total"] = df["S_v37"]
+    df["model_version"] = "V3.7"
 
     df["water"] = None if water != water else round(water, 4)
     df["weights_mode"] = mode
