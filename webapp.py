@@ -1350,9 +1350,7 @@ def rebalance():
                 n_a = sum(1 for c in candidates if c["region"] == "A股")
                 n_ov = len(candidates) - n_a
                 scan_msg = (f"候选 {len(candidates)} 只（A股 {n_a} / 海外 {n_ov}，海外≤{STRAT_OVERSEAS_SLOT_CAP}槽）："
-                            f"市场内按 S 排序 + 组合重复度过滤"
-                            + (f"，排除 {len(dup_skips)} 只重复候选（同指数重复 / 同风格超{STRAT_CLUSTER_MAX}只）"
-                               if dup_skips else ""))
+                            f"市场内按 S 排序 + 重复度过滤（同指数/同风格自动顺位）")
                 if not has_rbsa:
                     scan_msg += "；旧榜单无暴露数据，重复度过滤未生效（重新扫描后自动开启）"
         except Exception as e:
