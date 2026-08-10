@@ -1133,7 +1133,7 @@ def rebalance():
             h["action_reason"] = (f"自入场日({st.get('entry_date')})高点 {st.get('peak')} 回撤 {dd_txt}，"
                                   f"已击穿20%移动止损线（触发价 {st.get('trigger_nav')}）→ 清仓"
                                   + ("（买入日由收益率推断）" if st.get("inferred") else "")
-                                  + ("；⚠ 反推疑似多笔/定投买入，回撤为近似值，建议先在操作台账核对每笔买卖再执行"
+                                  + ("；反推疑似多笔/定投买入，回撤为近似值，建议先在操作台账核对每笔买卖再执行"
                                      if st.get("infer_ambiguous") else ""))
             h["target_amount"] = 0.0
             h["sell_amount"] = h["amount"]
@@ -1354,7 +1354,7 @@ def rebalance():
                             + (f"，排除 {len(dup_skips)} 只重复候选（同指数重复 / 同风格超{STRAT_CLUSTER_MAX}只）"
                                if dup_skips else ""))
                 if not has_rbsa:
-                    scan_msg += "；⚠ 旧榜单无暴露数据，重复度过滤未生效（重新扫描后自动开启）"
+                    scan_msg += "；旧榜单无暴露数据，重复度过滤未生效（重新扫描后自动开启）"
         except Exception as e:
             scan_msg = f"读取扫描榜单失败：{str(e)[:80]}"
     elif free_slots==0 and not crisis_active:
@@ -1401,7 +1401,7 @@ def rebalance():
             c["target_pct"] = round(buy_amt/total_capital*100,2) if total_capital>0 else 0
             buys.append(c)
             cash_remaining = round(cash_remaining - buy_amt,2)
-            ov_txt = "🌐海外" if c.get("region") == "海外" else "🇨🇳A股"
+            ov_txt = "海外候选" if c.get("region") == "海外" else "A股候选"
             dup_txt = f" · 与组合重叠 {c['overlap']*100:.0f}%" if c.get("overlap") is not None else ""
             orders.append({
                 "side": "BUY",
