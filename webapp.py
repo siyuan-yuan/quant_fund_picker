@@ -1228,6 +1228,7 @@ def rebalance():
     candidates = []
     dup_skips = []
     scan_msg = ""
+    buy_note = None
     cand_stats = None     # 建议买入统计: gt70=榜单S>70总数, total=未持有候选数, dup=已排除重复数
     scan_file = _latest_scan()
     if scan_file and free_slots>0:
@@ -1422,6 +1423,17 @@ def rebalance():
         if buys and cash_remaining > 1000:
             # 可选：把剩余现金留在现金池吃 2.5% 收益，不强制用完
             pass
+        # V3.9: 有候选但一只都没买成 → 明确原因（避免"推荐0只"无解释）
+        buy_note = None
+        if candidates and not buys:
+            if cash_after_sells < 1000:
+                buy_note = (f"可用现金仅 {cash_after_sells:,.0f} 元（<1000 元），"
+                            f"暂不买入；请补充可用现金或减少持仓")
+            elif per_buy and per_buy < 100:
+                buy_note = (f"单笔预算 {per_buy:,.0f} 元低于 100 元申购门槛，"
+                            f"请调大总资金/现金")
+            else:
+                buy_note = "候选均未达到买入条件，建议检查现金与门槛"
 
     # ---- 目标配置 & 风险提示 ----
     total_invested_after = sum(h["target_amount"] for h in keeps) + sum(b.get("suggested_amount",0) for b in buys)
@@ -1540,6 +1552,7 @@ def rebalance():
         candidates=clean(candidates),
         dup_skips=clean(dup_skips),
         cand_stats=cand_stats,
+        buy_note=buy_note,
         allocation=clean(allocation),
         orders=clean(orders),
         warnings=warnings,
