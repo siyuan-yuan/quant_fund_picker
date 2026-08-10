@@ -115,6 +115,153 @@ def infer_entry_date(adj, ret_pct, tol_base=0.03, return_info=False):
 INFER_AMBIGUOUS_SPAN_DAYS = 60
 
 
+# ================= 定投 (DCA) 生成与混合持仓反推 =================
+DCA_FREQ_LABELS = {"monthly": "每月", "biweekly": "每两周", "weekly": "每周"}
+_DCA_FREQ_DAYS = {"monthly": None, "biweekly": 14, "weekly": 7}
+# 反推时每月扣款日的候选日（覆盖发薪日/常见定投日；均 ≤28，避免大小月问题）
+DCA_DAY_OF_MONTH_GRID = (1, 5, 10, 15, 20, 25, 28)
+
+
+def dca_dates(start, freq="monthly", end=None):
+    """定投扣款日序列（自然日，升序）。
+
+    monthly: 每月与开始日同一天；该月无此日(如31号)取当月最后一天。
+    end 缺省 = 今天；返回 ≥ start 且 ≤ end 的期次。
+    """
+    start = pd.Timestamp(str(start)).normalize()
+    end = pd.Timestamp(str(end)).normalize() if end else pd.Timestamp.today().normalize()
+    if start > end:
+        return []
+    if freq == "monthly":
+        # 锚定"开始日所在月"的1号，保证首月期次不丢（如 1/31 开始 → 首期=1/31）
+        anchor = start.to_period("M").start_time
+        months = pd.date_range(anchor, end, freq="MS")
+        out = []
+        for m in months:
+            d = m + pd.Timedelta(days=min(start.day, m.days_in_month) - 1)
+            if start <= d <= end:          # 双向钳制：首期不早于开始日，末期不晚于结束日
+                out.append(d.date())
+        return out
+    step = _DCA_FREQ_DAYS.get(freq, 7)
+    return [d.date() for d in pd.date_range(start, end, freq=f"{step}D")]
+
+
+def dca_lots(start, amount, freq="monthly", end=None, adj=None):
+    """生成定投买入记录 [(date_str, 'buy', amount), ...]。
+
+    adj 提供时裁剪到净值覆盖范围 [首个净值日, 最新净值日]（早于成立日的期次丢弃）。
+    """
+    amount = float(amount)
+    if amount <= 0:
+        return []
+    dates = dca_dates(start, freq, end)
+    if adj is not None and len(adj):
+        lo, hi = adj.index[0].date(), adj.index[-1].date()
+        dates = [d for d in dates if lo <= d <= hi]
+    return [(str(d), "buy", amount) for d in dates]
+
+
+def infer_dca(manual_lots, total_mv, adj, freqs=("monthly", "biweekly", "weekly"),
+              top_n=5, max_history_days=10 * 365):
+    """混合持仓反推定投参数：已知当前总市值 + 主动买入/卖出记录 → 反推(频率, 开始日, 每期金额)。
+
+    manual_lots: [(date, side, amount), ...]（定投之外的主动买卖，卖出为负贡献）。
+    原理: 定投贡献市值 V_d = 总市值 - 主动记录贡献；对每个候选(频率, 开始日)，
+    每期金额 a = V_d / Σ(now/adj(扣款日)) 可精确求解；再按金额整数度(百元整)、
+    频率先验(每月>两周>每周)、期数打分排序 → 返回 top_n 候选。
+    返回 dict: {ok, reason, candidates:[{freq, freq_label, start_date, amount,
+                periods, total_invested, score}...]}
+    """
+    out = dict(ok=False, reason="", candidates=[])
+    if total_mv is None or float(total_mv) <= 0:
+        out["reason"] = "需要当前总市值（支付宝持仓页可查）"
+        return out
+    if adj is None or len(adj) < 60:
+        out["reason"] = "净值历史不足，无法反推定投参数"
+        return out
+    now = float(adj.iloc[-1])
+    if now <= 0:
+        out["reason"] = "净值数据异常"
+        return out
+    idx = adj.index
+    n = len(idx)
+
+    def _mv(d, side, amt):
+        pos = int(min(max(int(idx.searchsorted(pd.Timestamp(d))), 0), n - 1))
+        return (amt if side == "buy" else -amt) * now / float(adj.iloc[pos])
+
+    v_manual = sum(_mv(d, s, a) for d, s, a in manual_lots if a and a > 0)
+    v_dca = float(total_mv) - v_manual
+    if v_dca < -max(1.0, 0.01 * float(total_mv)):
+        out["reason"] = (f"主动买卖按净值折算的市值约 {v_manual:,.0f} 元已超过总市值 "
+                         f"{float(total_mv):,.0f} 元，无法反推定投（请核对主动买入记录或市值）")
+        return out
+    if v_dca <= 0:
+        out["reason"] = "总市值≈主动买卖市值，未检测到定投贡献，无需反推"
+        return out
+    lo_date = max(idx[0].date(), (pd.Timestamp.today() - pd.Timedelta(days=max_history_days)).date())
+    hi_date = idx[-1].date()
+    if lo_date > hi_date:
+        out["reason"] = "净值历史不足"
+        return out
+
+    freq_prior = {"monthly": 1.0, "biweekly": 0.85, "weekly": 0.70}
+    common_amounts = (500, 1000, 1500, 2000, 3000, 5000, 8000, 10000)
+    cands = []
+    for freq in freqs:
+        if freq == "monthly":
+            starts = []
+            for m in pd.date_range(pd.Timestamp(lo_date), pd.Timestamp(hi_date), freq="MS"):
+                for day in DCA_DAY_OF_MONTH_GRID:
+                    d = m + pd.Timedelta(days=min(day, m.days_in_month) - 1)
+                    if d.date() >= lo_date:
+                        starts.append(d)
+        else:
+            starts = pd.date_range(lo_date, hi_date, freq=f"{_DCA_FREQ_DAYS.get(freq, 7)}D")
+        for s in starts:
+            dates = dca_dates(s, freq, hi_date)
+            if len(dates) < 2:
+                continue
+            pos = np.clip(idx.searchsorted(pd.DatetimeIndex(dates)), 0, n - 1)
+            W = float(np.sum(now / adj.values[pos]))
+            if W <= 0:
+                continue
+            a = v_dca / W
+            if a < 10 or a > 500000:
+                continue
+            # 金额整数度: 离整百越近越可信（定投金额习惯整百）→ 整百=1.0, 半百=0.0
+            frac = (a / 100.0) - np.floor(a / 100.0)
+            round_score = 1.0 - 2.0 * min(frac, 1.0 - frac)
+            score = round_score * freq_prior.get(freq, 1.0)
+            if any(abs(a - c) / c < 0.01 for c in common_amounts):
+                score += 0.05 * freq_prior.get(freq, 1.0)
+            k = len(dates)
+            if k < 3:
+                score *= 0.8
+            cands.append(dict(freq=freq, freq_label=DCA_FREQ_LABELS.get(freq, freq),
+                              start_date=str(s.date()), amount=round(a, 2),
+                              periods=k, total_invested=round(a * k, 2),
+                              score=round(score, 4)))
+    if not cands:
+        out["reason"] = "未找到合理的定投参数组合（请核对市值与主动记录）"
+        return out
+    cands.sort(key=lambda c: -c["score"])
+    dedup = []
+    for c in cands:
+        dup = False
+        for d0 in dedup:
+            if (c["freq"] == d0["freq"] and abs(c["amount"] - d0["amount"]) / d0["amount"] < 0.02
+                    and abs((pd.Timestamp(c["start_date"]) - pd.Timestamp(d0["start_date"])).days) <= 31):
+                dup = True
+                break
+        if not dup:
+            dedup.append(c)
+        if len(dedup) >= top_n:
+            break
+    out.update(ok=True, candidates=dedup)
+    return out
+
+
 def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15):
     """多笔买入/卖出 → 单基金持仓诊断（FIFO 成本 + 持仓市值曲线 + 入场高点回撤）。
 

@@ -415,11 +415,103 @@ def results():
     # V3.7.3: 榜单墙钟 vs 数据内容截至 — 两个时钟必须同框展示
     asof = str(df["last_date"].max())[:10] if "last_date" in df else None
     exp = provider.expected_last_td()
+    # V3.9: 分市场榜单计数（A股/海外）
+    n_a = n_ov = None
+    if "region" in df:
+        n_a = int((df["region"] == "A股").sum())
+        n_ov = int((df["region"] == "海外").sum())
     return jsonify({"rows": clean(df.where(pd.notna(df), None).to_dict("records")),
-                    "stamp": stamp, "n": len(df),
+                    "stamp": stamp, "n": len(df), "n_a": n_a, "n_ov": n_ov,
                     "asof": asof, "asof_expected": exp,
                     "asof_stale": bool(asof and asof < exp),
                     "stale": provider.stale_warnings()})
+
+
+# ---------------- 定投导入 (DCA) ----------------
+@app.post("/api/dca/preview")
+def dca_preview():
+    """生成定投买入序列（预览，不落库）。
+    body: {code, start_date, amount, freq, end_date?}
+    返回: lots + 序列当前市值估算（按真实复权净值折算）。"""
+    body = request.get_json(silent=True) or {}
+    code = str(body.get("code", "")).zfill(6)
+    start = _parse_date(body.get("start_date"))
+    amt = _parse_yuan(body.get("amount"))
+    freq = str(body.get("freq") or "monthly").lower()
+    if freq not in ("monthly", "biweekly", "weekly"):
+        return jsonify({"ok": False, "message": "频率仅支持 monthly / biweekly / weekly"}), 400
+    if not re.fullmatch(r"\d{6}", code) or not start or not amt or amt <= 0:
+        return jsonify({"ok": False, "message": "需要 基金代码 + 开始日期 + 每期金额"}), 400
+    try:
+        nav_df = provider.get_fund_nav(code)
+    except Exception as e:
+        return jsonify({"ok": False, "message": f"净值获取失败: {str(e)[:120]}"}), 400
+    adj = holding_diag.adj_series(nav_df)
+    end = _parse_date(body.get("end_date"))
+    lots = holding_diag.dca_lots(start, amt, freq, end, adj=adj)
+    if not lots:
+        return jsonify({"ok": False, "message": "生成 0 期（开始日期晚于净值最新日？）"}), 400
+    # 序列当前市值估算（每期按当日净值折份额 × 最新净值）
+    now = float(adj.iloc[-1])
+    n = len(adj)
+    mv = 0.0
+    for d, _, a in lots:
+        pos = int(min(max(int(adj.index.searchsorted(pd.Timestamp(d))), 0), n - 1))
+        mv += a * now / float(adj.iloc[pos])
+    total = sum(a for _, _, a in lots)
+    return jsonify(clean(dict(
+        ok=True, code=code, freq=freq, freq_label=holding_diag.DCA_FREQ_LABELS.get(freq, freq),
+        lots=[{"date": d, "amount": a} for d, _, a in lots],
+        n=len(lots), first=lots[0][0], last=lots[-1][0],
+        total=round(total, 2), implied_mv=round(mv, 2))))
+
+
+@app.post("/api/dca/infer")
+def dca_infer():
+    """混合持仓反推定投参数。
+    body: {code, total_mv, manual_lots?: [{date, amount, side?}], freqs?}
+    manual_lots 缺省 → 自动读取台账中该基金的非定投记录（note 以"定投"开头的除外）。"""
+    body = request.get_json(silent=True) or {}
+    code = str(body.get("code", "")).zfill(6)
+    total_mv = _parse_yuan(body.get("total_mv"))
+    if not re.fullmatch(r"\d{6}", code):
+        return jsonify({"ok": False, "message": "基金代码无效"}), 400
+    if not total_mv or total_mv <= 0:
+        return jsonify({"ok": False, "message": "需要当前总市值"}), 400
+    freqs = body.get("freqs") or ("monthly", "biweekly", "weekly")
+    manual = body.get("manual_lots")
+    source = "用户输入"
+    if isinstance(manual, list) and manual:
+        lots = []
+        for m in manual:
+            if not isinstance(m, dict):
+                continue
+            d = _parse_date(m.get("date"))
+            a = _parse_yuan(m.get("amount"))
+            side = str(m.get("side", "buy")).lower()
+            side = "sell" if side in ("sell", "卖", "s") else "buy"
+            if d and a and a > 0:
+                lots.append((d, side, a))
+        if not lots:
+            return jsonify({"ok": False, "message": "主动买入记录格式无效（每行: 日期 金额）"}), 400
+    else:
+        txns = [t for t in _load_ledger()
+                if t.get("code") == code and not str(t.get("note", "")).startswith("定投")]
+        lots = [(t["date"], t["side"], t["amount"]) for t in txns]
+        source = f"台账（{len(lots)} 条主动记录）" if lots else "台账（无记录）"
+    try:
+        nav_df = provider.get_fund_nav(code)
+    except Exception as e:
+        return jsonify({"ok": False, "message": f"净值获取失败: {str(e)[:120]}"}), 400
+    adj = holding_diag.adj_series(nav_df)
+    r = holding_diag.infer_dca(lots, total_mv, adj, freqs=freqs)
+    r.update(code=code, source=source)
+    if r.get("candidates"):
+        c = r["candidates"][0]
+        r["message"] = (f"推荐：{holding_diag.DCA_FREQ_LABELS.get(c['freq'], c['freq'])}定投 "
+                        f"{c['amount']:,.0f} 元/期 · 自 {c['start_date']} 起 · 共 {c['periods']} 期"
+                        f"（点击候选填入上方生成序列）")
+    return jsonify(clean(r))
 
 
 # ---------------- 手动触发: 全市场扫描 ----------------

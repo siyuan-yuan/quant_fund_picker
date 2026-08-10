@@ -17,7 +17,8 @@ import akshare as ak
 
 import provider
 from engine import score_fund, finalize
-from config import OUTPUT_DIR, CACHE_DIR, YOUNG_TOP_N, SCAN_INCLUDE_OVERSEAS_INDEX
+from config import (OUTPUT_DIR, CACHE_DIR, YOUNG_TOP_N, SCAN_INCLUDE_OVERSEAS_INDEX,
+                    OVERSEAS_FUND_TYPES)
 
 # 扫描目标类型白名单（A股四类 + 可选海外指数QDII通道）
 # 016452 南方纳斯达克100(QDII)A 等"指数型-海外股票"此前因此白名单被排除在全部扫描模式外，
@@ -26,6 +27,11 @@ TARGET_TYPES = {"混合型-偏股", "股票型", "指数型-股票", "混合型-
 if SCAN_INCLUDE_OVERSEAS_INDEX:
     TARGET_TYPES = TARGET_TYPES | {"指数型-海外股票"}
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+def _region(ftypes) -> pd.Series:
+    """基金类型 → 市场标签（A股/海外），供榜单分市场视图。"""
+    return np.where(ftypes.isin(OVERSEAS_FUND_TYPES), "海外", "A股")
 
 
 def _load_rank_table() -> pd.DataFrame:
@@ -71,6 +77,7 @@ def build_universe(right_n=400, left_n=150, mode="default") -> pd.DataFrame:
     if mode == "all_main":
         pool = main_df.copy()
         pool["channel"] = "全量-主池"
+        pool["region"] = _region(pool["基金类型"])
         pool = pool.drop_duplicates("基金代码").reset_index(drop=True)
         print(f"[漏斗] 全主池模式 | 近3年完整主池 {len(pool)}")
         return pool
@@ -81,6 +88,7 @@ def build_universe(right_n=400, left_n=150, mode="default") -> pd.DataFrame:
         pool = df.copy()
         pool["channel"] = np.where(main_mask, "全量-主池",
                              np.where(young_mask, "新星", "全量-次新/缺历史"))
+        pool["region"] = _region(pool["基金类型"])
         pool = pool.drop_duplicates("基金代码").reset_index(drop=True)
         print(f"[漏斗] 全目标类型模式 | 类型过滤+去C/E {len(pool)} | "
               f"主池 {int(main_mask.sum())} | 新星 {int(young_mask.sum())} | "
@@ -95,6 +103,7 @@ def build_universe(right_n=400, left_n=150, mode="default") -> pd.DataFrame:
     left_pool = main_df[(main_df["近1年"] < 0) & (~main_df.index.isin(right.index))]
     left = left_pool.nsmallest(left_n, "近1年").assign(channel="左侧")
     pool = pd.concat([right, left, ypool]).drop_duplicates("基金代码")
+    pool["region"] = _region(pool["基金类型"])
     print(f"[漏斗] 类型过滤后 {len(main_df)} | 右侧池 {len(right)} | 左侧池 {len(left)} | "
           f"🌱新星池 {len(ypool)} | 合计 {len(pool)}")
     return pool
@@ -123,7 +132,7 @@ def main(right_n=400, left_n=150, workers=6, mode="default"):
     df = finalize(rows)
     stamp = dt.date.today().strftime("%Y%m%d")
     out_csv = f"{OUTPUT_DIR}/scan_{stamp}.csv"
-    keep = ["code", "name", "ftype", "channel", "S_total", "rating",
+    keep = ["code", "name", "ftype", "region", "channel", "S_total", "rating",
             "F_value", "val_pct", "trend_ok", "trend_ma20", "bonus", "F_alpha",
             "ir_winrate", "down_capture", "F_momentum", "mom_4m1m", "mom_7m1m",
             "rank4", "rank7", "scale", "tenure_days", "is_passive", "penalty_str",

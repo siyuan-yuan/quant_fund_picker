@@ -108,6 +108,47 @@ def test_infer_ambiguous():
     print("test_infer_ambiguous OK")
 
 
+def test_dca_dates_lots_infer():
+    """定投序列生成（月末钳制/周频）+ 混合持仓反推定投参数。"""
+    # 净值: 先涨后跌（与其它用例同构）
+    dates = pd.date_range("2024-01-01", periods=200, freq="D")
+    vals = np.linspace(1.0, 1.5, 100).tolist() + np.linspace(1.5, 1.19, 100).tolist()
+    rets = [0.0] + [vals[i] / vals[i - 1] - 1 for i in range(1, len(vals))]
+    df = mk_nav([str(d.date()) for d in dates], rets)
+    adj = hd.adj_series(df)
+
+    # 月末31号定投 → 无31号的月份自动取月末（2月29 / 4月30）
+    d2 = hd.dca_dates("2024-01-31", "monthly", "2024-04-30")
+    assert [str(d) for d in d2] == ["2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30"], d2
+    # 末期钳制: 结束日早于当月扣款日 → 该期不生成（防超界多一期）
+    d5 = hd.dca_dates("2024-03-10", "monthly", "2024-05-06")
+    assert [str(d) for d in d5] == ["2024-03-10", "2024-04-10"], d5
+    # 周频: 2024-03-01(周五) 起 5 期
+    d3 = hd.dca_dates("2024-03-01", "weekly", "2024-03-31")
+    assert len(d3) == 5 and str(d3[0]) == "2024-03-01"
+    # 两周期
+    d4 = hd.dca_dates("2024-03-01", "biweekly", "2024-04-30")
+    assert len(d4) == 5
+    # 生成记录 + 净值范围裁剪
+    lots = hd.dca_lots("2024-02-15", 1000, "monthly", adj=adj)
+    assert all(lt[1] == "buy" and lt[2] == 1000.0 for lt in lots)
+    assert lots[0][0] >= str(adj.index[0].date())
+    # 混合持仓: 每月1号定投1000(2024-03-01起) + 主动买入一笔10000 → 反推应还原 ≈1000/月
+    dca = hd.dca_lots("2024-03-01", 1000, "monthly", adj=adj)
+    manual = [("2024-04-10", "buy", 10000.0)]
+    mv = hd.fund_lots_diag(dca + manual, df)["mv_now"]
+    r = hd.infer_dca(manual, mv, adj, freqs=("monthly",))
+    assert r["ok"] and r["candidates"], r
+    top = r["candidates"][0]
+    assert top["freq"] == "monthly"
+    assert abs(top["amount"] - 1000) / 1000 < 0.10, top
+    assert abs((pd.Timestamp(top["start_date"]) - pd.Timestamp("2024-03-01")).days) <= 35, top
+    # 主动买卖市值超过总市值 → 明确失败原因，不瞎给结果
+    r2 = hd.infer_dca([("2024-04-10", "buy", 10000.0)], 1000.0, adj, freqs=("monthly",))
+    assert not r2["ok"] and "超过" in r2["reason"]
+    print("test_dca_dates_lots_infer OK")
+
+
 def test_cppi_tier_sim():
     # 全路径: 触发-15(6槽) → 触发-20(3槽) → 回补-18(6槽) → 新高(满槽)
     v = np.array([100.0, 88.0, 90.0, 84.0, 86.0, 78.0, 80.0, 81.0, 82.0, 83.0, 84.0, 86.0, 100.5])
@@ -276,6 +317,6 @@ def test_webapp_endpoint():
 
 if __name__ == "__main__":
     for fn in [test_adj_series, test_infer_entry_date, test_infer_ambiguous, test_fund_stop_diag, test_fund_lots_diag, test_portfolio_cppi_curve_input, test_portfolio_cppi_auto_start,
-               test_cppi_tier_sim, test_portfolio_cppi, test_webapp_endpoint]:
+               test_dca_dates_lots_infer, test_cppi_tier_sim, test_portfolio_cppi, test_webapp_endpoint]:
         fn()
     print("\nALL TESTS PASSED")

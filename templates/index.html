@@ -307,7 +307,15 @@
           <button data-f="yellow" onclick="setFlt('yellow')">50–70</button>
           <button data-f="veto" onclick="setFlt('veto')">否决</button>
         </div>
+        <div class="seg" id="mkt-seg">
+          <button data-m="all" class="on" onclick="setMkt('all')">A股+海外</button>
+          <button data-m="a" onclick="setMkt('a')">🇨🇳 A股榜</button>
+          <button data-m="ov" onclick="setMkt('ov')">🌐 海外榜</button>
+        </div>
         <span class="count mono" id="bd-n"></span>
+      </div>
+      <div class="hint" style="padding:8px 14px 0;line-height:1.7">⚠ A股与海外基金不在同一参照系（估值口径/动量子集不同），<b>分数不可横向比较</b>：
+        先定「A股 vs 海外」配置比例，再在各自榜单内选。海外指数建议配置思维（长期+定投，申赎摩擦大），A股按信号思维（本系统完整闭环+止损）。</div>
       </div>
       <div class="table-wrap" style="border:none;border-radius:0">
         <table id="board"><thead><tr>
@@ -365,7 +373,34 @@
         <input id="led-line" class="mono" placeholder="161725 买 2021-06-01 20000（可多行）" style="flex:1;min-width:260px;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:8px 12px;font:13px var(--mono);outline:none">
         <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="ledAdd()">添加记录</button>
         <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="ledImport()">从持仓诊断导入</button>
+        <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="dcaToggle()">📅 定投导入</button>
         <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="ledClear(this)">清空台账</button>
+      </div>
+      <div id="dca-panel" class="hide" style="margin-top:10px;padding:12px;border:1px dashed var(--line);border-radius:8px">
+        <div class="form-row">
+          <div class="field"><label>基金代码</label><input id="dca-code" class="mono" placeholder="016452" style="width:110px"></div>
+          <div class="field"><label>开始定投日期</label><input id="dca-start" class="mono" placeholder="2023-06-15"></div>
+          <div class="field"><label>每期金额</label><input id="dca-amt" class="mono" placeholder="1000"></div>
+          <div class="field"><label>频率</label><select id="dca-freq" style="padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);font:13px var(--sans)">
+            <option value="monthly" selected>每月</option>
+            <option value="biweekly">每两周</option>
+            <option value="weekly">每周</option></select></div>
+          <div class="field"><label>结束日期(可选)</label><input id="dca-end" class="mono" placeholder="默认至今"></div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:8px;align-items:center">
+          <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="dcaPreview()">生成定投序列</button>
+          <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="dcaInfer()">🔍 混合反推参数</button>
+          <span class="hint">同基金定投+主动买入混合时：填「当前市值」+「主动买入记录」，自动反推定投参数</span>
+        </div>
+        <div class="form-row" style="margin-top:8px">
+          <div class="field"><label>当前市值（仅反推用）</label><input id="dca-mv" class="mono" placeholder="14314.76"></div>
+          <div class="field" style="flex:2"><label>主动买入记录（每行 日期 金额；留空=自动读台账非定投记录）</label><textarea id="dca-manual" rows="2" class="mono" placeholder="2024-02-19 10000&#10;2024-05-29 10000"></textarea></div>
+        </div>
+        <div class="preview mono" id="dca-preview" style="margin-top:8px">填写参数后点「生成定投序列」；或点「混合反推参数」自动反推。</div>
+        <div class="actions" style="margin-top:8px">
+          <button class="btn btn-primary" id="dca-save-btn" disabled onclick="dcaSave()">保存到台账</button>
+        </div>
+        <div class="status"><span class="dot" id="dca-dot"></span><span id="dca-st">就绪</span></div>
       </div>
       <div class="hint" style="margin-top:8px;line-height:1.7">格式：<b>代码 买/卖 日期 金额</b>，如 <span class="mono">161725 买 2021-06-01 20000</span>、<span class="mono">110011 卖 2025-09-01 8000</span>。买入=成交成本，卖出=到账金额（按当日净值折份额）；同一基金任意多笔，卖出按<b>先进先出</b>扣减成本与份额，全部卖完后自动从诊断中剔除。</div>
       <div id="led-out"></div>
@@ -402,7 +437,10 @@
 </div>
 
 <script>
-let ROWS=[], sortKey='S_total', sortDir=-1, flt='all', poll=null;
+let ROWS=[], sortKey='S_total', sortDir=-1, flt='all', mkt='all', poll=null;
+const OVERSEAS_TYPES=new Set(['指数型-海外股票','QDII-普通股票','QDII-混合偏股','QDII-混合灵活','QDII-混合平衡','QDII-混合债','QDII-纯债','QDII-商品','QDII-FOF','QDII-REITs']);
+function regionOf(r){return (r.region)||(OVERSEAS_TYPES.has(r.ftype)?'海外':'A股')}
+function regionBadge(r){return regionOf(r)==='海外'?'<span class="badge" style="background:#1d4ed81a;color:#1d4ed8;border-color:#1d4ed866">🌐海外</span>':''}
 const G={
   dot:'<svg viewBox="0 0 10 10" fill="currentColor"><circle cx="5" cy="5" r="4"/></svg>',
   bolt:'<svg viewBox="0 0 10 10" fill="currentColor"><path d="M5.8 0 2 5.6h2.5L3.6 10 8.4 3.8H5.7L7.4 0z"/></svg>',
@@ -413,7 +451,7 @@ function setStatus(a,b,k,t){const d=document.getElementById(a);if(d)d.className=
 function fmtYuan(n){if(n==null||isNaN(n))return '—';n=Number(n);if(Math.abs(n)>=10000)return (n/10000).toFixed(n%10000===0?0:2)+'万';return n.toLocaleString('zh-CN')}
 function fmtYuanFull(n){if(n==null||isNaN(n))return '—';return Number(n).toLocaleString('zh-CN',{minimumFractionDigits:0,maximumFractionDigits:0})+' 元'}
 function parseYuan(s){if(s==null||s==='')return 0;if(typeof s==='number')return s;let t=String(s).trim().replace(/,/g,'').replace(/，/g,'').replace(/\s+/g,'');if(!t)return 0;let m=1;const low=t.toLowerCase();if(low.endsWith('万元')||low.endsWith('万')){t=t.replace(/万元?$/,'').replace(/万$/,'');m=10000}else if(low.endsWith('w')){t=t.slice(0,-1);m=10000}else if(low.endsWith('k')){t=t.slice(0,-1);m=1000}t=t.replace(/[¥￥元]/g,'');const v=parseFloat(t);return isNaN(v)?0:v*m}
-function updateScanModeUI(){const mode=document.getElementById('scan-mode')?.value||'default'; const r=document.getElementById('in-right'), l=document.getElementById('in-left'), h=document.getElementById('scan-mode-hint'); const useFunnel=(mode==='default'); if(r) r.disabled=!useFunnel; if(l) l.disabled=!useFunnel; if(r) r.title=useFunnel?'':'全量模式下忽略右侧池'; if(l) l.title=useFunnel?'':'全量模式下忽略左侧池'; if(h){h.textContent=mode==='all_main'?'扫描全部主池：只覆盖近3年完整的目标基金，约 4530 只。' : (mode==='all_target'?'扫描全部目标类型：覆盖混合型-偏股 / 股票型 / 指数型-股票 / 混合型-灵活，含次新基金，约 6538 只。':'默认模式会按右侧池 / 左侧池 / 新星池做漏斗深算。')}}
+function updateScanModeUI(){const mode=document.getElementById('scan-mode')?.value||'default'; const r=document.getElementById('in-right'), l=document.getElementById('in-left'), h=document.getElementById('scan-mode-hint'); const useFunnel=(mode==='default'); if(r) r.disabled=!useFunnel; if(l) l.disabled=!useFunnel; if(r) r.title=useFunnel?'':'全量模式下忽略右侧池'; if(l) l.title=useFunnel?'':'全量模式下忽略左侧池'; if(h){h.textContent=mode==='all_main'?'扫描全部主池：近3年完整的目标基金（A股四类 + 海外指数QDII），约 4580 只。' : (mode==='all_target'?'扫描全部目标类型：混合型-偏股 / 股票型 / 指数型-股票 / 混合型-灵活 / 指数型-海外股票，含次新基金，约 6630 只。':'默认模式会按右侧池 / 左侧池 / 新星池做漏斗深算。')}}
 
 async function loadStrategyState(){
   try{
@@ -500,8 +538,9 @@ function startPoll(){
 }
 function poolPct(r,a){return a.length? a.filter(x=>x.S_total<=r.S_total).length/a.length:0}
 function sigOf(r){const ps=String(r.penalty_str||''); const veto=/-100%/.test(ps)||((r.penalties||[]).some(p=>p[1]>=1)); if(veto) return `<span class="badge b-red">否决</span>`; if(r.channel==='新星') return r.S_total>=50?`<span class="badge b-blue">观察</span>`:`<span class="badge b-mute">—</span>`; if((r.rating||'').includes('封顶')) return `<span class="badge b-green">Buy·帽</span>`; if(r.S_total>=70) return `<span class="badge b-green">买入</span>`; if(r.S_total<45) return `<span class="badge b-red">卖出</span>`; if(r.S_total>=50) return `<span class="badge b-amber">持有</span>`; return `<span class="badge b-mute">回避</span>`}
-async function loadResults(){const j=await (await fetch('/api/results')).json(); ROWS=j.rows||[]; const M=ROWS.filter(r=>r.channel!=='新星'); ROWS.forEach(r=>r.pool_pct=poolPct(r,M)); document.getElementById('bd-empty').style.display=ROWS.length?'none':''; document.getElementById('bd-n').textContent=ROWS.length?`${j.n} · ${j.stamp} · ${j.asof||''}`:''; renderBoard()}
+async function loadResults(){const j=await (await fetch('/api/results')).json(); ROWS=j.rows||[]; const M=ROWS.filter(r=>r.channel!=='新星'); ROWS.forEach(r=>r.pool_pct=poolPct(r,M)); document.getElementById('bd-empty').style.display=ROWS.length?'none':''; document.getElementById('bd-n').textContent=ROWS.length?`${j.n} · ${j.stamp} · ${j.asof||''}${j.n_a!=null?` · A股 ${j.n_a} / 海外 ${j.n_ov}`:''}`:''; renderBoard()}
 function setFlt(f){flt=f; document.querySelectorAll('#flt-seg button').forEach(b=>b.classList.toggle('on',b.dataset.f===f)); renderBoard()}
+function setMkt(m){mkt=m; document.querySelectorAll('#mkt-seg button').forEach(b=>b.classList.toggle('on',b.dataset.m===m)); renderBoard()}
 function sortBy(k){if(sortKey===k) sortDir*=-1; else{sortKey=k;sortDir=-1} renderBoard()}
 function ratingCell(r){const rt=String(r.rating||''); if(rt.includes('🌱')) return `<span class="badge b-blue">观察</span>`; if(rt.includes('封顶')) return `<span class="badge b-green">Buy·帽</span>`; if(r.S_total>=85) return `<span class="badge b-green">StrongBuy</span>`; if(r.S_total>=70) return `<span class="badge b-green">Buy</span>`; if(r.S_total>=50) return `<span class="badge b-amber">Hold</span>`; return `<span class="badge b-red">Sell</span>`}
 function renderBoard(){
@@ -511,10 +550,12 @@ function renderBoard(){
     if(flt==='green'&&!(r.S_total>=70))return false;
     if(flt==='yellow'&&!(r.S_total>=50&&r.S_total<70))return false;
     if(flt==='veto'&&!/-100%/.test(String(r.penalty_str||'')))return false;
+    if(mkt==='a'&&regionOf(r)!=='A股')return false;
+    if(mkt==='ov'&&regionOf(r)!=='海外')return false;
     return true;
   }); v.sort((a,b)=>((b[sortKey]??-999)-(a[sortKey]??-999))*(sortDir===1?-1:1)*-1); v=v.slice(0,300);
   document.querySelector('#board tbody').innerHTML=v.map((r,i)=>`<tr onclick="queryFund('${r.code}')" style="cursor:pointer">
-    <td>${i+1}</td><td>${r.code}</td><td class="name">${r.name}</td>
+    <td>${i+1}</td><td>${r.code}</td><td class="name">${regionBadge(r)}${r.name}</td>
     <td class="score">${r.S_total}</td><td>${ratingCell(r)}</td><td>${sigOf(r)}</td>
     <td>${r.F_value??''}</td><td>${r.F_alpha??''}</td><td>${r.F_momentum??''}</td>
     <td>${r.val_pct!=null?(r.val_pct*100).toFixed(0)+'%':''}</td>
@@ -615,6 +656,80 @@ async function ledClear(btn){
   await fetch('/api/ledger',{method:'DELETE'});
   LEDGER_TXNS=[]; renderLedger({txns:[],funds:[]});
   setStatus('rb-dot','rb-st','ok','台账已清空');
+}
+// ============ 定投导入 (DCA)：生成序列 + 混合持仓反推参数 ============
+let DCA_LOTS=[], DCA_CODE='', DCA_CANDS=[];
+function dcaToggle(){
+  const el=document.getElementById('dca-panel');
+  el.classList.toggle('hide');
+  if(!el.classList.contains('hide')&&!document.getElementById('dca-code').value){
+    const m=(document.getElementById('led-line').value||'').match(/\d{6}/);
+    if(m) document.getElementById('dca-code').value=m[0];
+  }
+}
+async function dcaPreview(){
+  const code=document.getElementById('dca-code').value.replace(/\D/g,'').padStart(6,'0');
+  const start=document.getElementById('dca-start').value.trim();
+  const amt=document.getElementById('dca-amt').value.trim();
+  const freq=document.getElementById('dca-freq').value;
+  const end=document.getElementById('dca-end').value.trim()||null;
+  if(!/^\d{6}$/.test(code)||!start||!amt){setStatus('dca-dot','dca-st','err','需要 代码+开始日期+每期金额');return}
+  setStatus('dca-dot','dca-st','busy','生成中…');
+  try{
+    const j=await (await fetch('/api/dca/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code,start_date:start,amount:amt,freq,end_date:end})})).json();
+    if(!j.ok){setStatus('dca-dot','dca-st','err',j.message||'生成失败');return}
+    DCA_LOTS=j.lots; DCA_CODE=code;
+    document.getElementById('dca-preview').innerHTML=`${j.n} 期 · ${j.first} → ${j.last} · ${j.freq_label}定投 · 累计投入 ${fmtYuanFull(j.total)} · 按真实净值折算当前市值约 <b>${fmtYuanFull(j.implied_mv)}</b>`;
+    document.getElementById('dca-save-btn').disabled=false;
+    setStatus('dca-dot','dca-st','ok',`已生成 ${j.n} 期，核对后点「保存到台账」`);
+  }catch(e){setStatus('dca-dot','dca-st','err','生成失败')}
+}
+async function dcaInfer(){
+  const code=document.getElementById('dca-code').value.replace(/\D/g,'').padStart(6,'0');
+  const mv=document.getElementById('dca-mv').value.trim();
+  if(!/^\d{6}$/.test(code)||!mv){setStatus('dca-dot','dca-st','err','需要 代码+当前市值');return}
+  const manual=String(document.getElementById('dca-manual').value).split(/[\n;；]+/).map(l=>l.trim()).filter(Boolean)
+    .map(l=>{const p=l.split(/[\s,，、:：]+/).filter(Boolean); if(p.length<2) return null; return {date:p[0],amount:parseYuan(p[1])};}).filter(Boolean);
+  setStatus('dca-dot','dca-st','busy','反推中（需净值，约几秒）…');
+  try{
+    const j=await (await fetch('/api/dca/infer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code,total_mv:mv,manual_lots:manual.length?manual:null})})).json();
+    if(!j.ok){setStatus('dca-dot','dca-st','err',j.message||'反推失败');return}
+    if(!j.candidates||!j.candidates.length){setStatus('dca-dot','dca-st','err',j.reason||'无结果');return}
+    DCA_CANDS=j.candidates;
+    const rows=j.candidates.map((c,i)=>`<button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="dcaPick(${i})">${c.freq_label}定投 ${fmtYuan(c.amount)}/期 · ${c.start_date}起 · ${c.periods}期 · 累计${fmtYuan(c.total_invested)}</button>`).join('');
+    document.getElementById('dca-preview').innerHTML=`<div style="display:flex;gap:8px;flex-wrap:wrap">${rows}</div><div class="hint" style="margin-top:6px">主动记录来源：${j.source||''} · 点击候选自动填入上方参数并生成序列（推荐第1个）</div>`;
+    setStatus('dca-dot','dca-st','ok',j.message||'');
+  }catch(e){setStatus('dca-dot','dca-st','err','反推失败')}
+}
+function dcaPick(i){
+  const c=DCA_CANDS[i]; if(!c) return;
+  document.getElementById('dca-start').value=c.start_date;
+  document.getElementById('dca-amt').value=Math.round(c.amount);
+  document.getElementById('dca-freq').value=c.freq;
+  dcaPreview();
+}
+async function dcaSave(){
+  if(!DCA_LOTS.length||!DCA_CODE) return;
+  const note=`定投导入:${document.getElementById('dca-freq').value} 起${document.getElementById('dca-start').value||''}每期${document.getElementById('dca-amt').value||''}`;
+  const txns=LEDGER_TXNS.slice();
+  const seen=new Set(txns.map(t=>t.code+'|'+t.date+'|'+t.side+'|'+t.amount));
+  let added=0;
+  for(const l of DCA_LOTS){
+    const k=DCA_CODE+'|'+l.date+'|buy|'+l.amount;
+    if(seen.has(k)) continue;
+    seen.add(k);
+    txns.push({code:DCA_CODE,side:'buy',date:l.date,amount:l.amount,note});
+    added++;
+  }
+  const j=await (await fetch('/api/ledger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({txns})})).json();
+  if(j.ok){
+    await updateLedger();
+    setStatus('dca-dot','dca-st','ok',`已导入 ${added} 笔定投买入到台账（同日已存在则跳过）`);
+    DCA_LOTS=[]; DCA_CODE='';
+    document.getElementById('dca-save-btn').disabled=true;
+    document.getElementById('dca-preview').innerHTML='填写参数后点「生成定投序列」；或点「混合反推参数」自动反推。';
+    dcaToggle();
+  }else setStatus('dca-dot','dca-st','err',j.message||'保存失败');
 }
 // 把一笔实际操作记入台账（诊断结果里的 卖出→台账 / 买入→台账）
 async function ledRecord(code, side, amount, note){
