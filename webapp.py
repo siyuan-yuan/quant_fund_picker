@@ -1303,8 +1303,13 @@ def rebalance():
                         continue
                     if fv > 0:
                         port_expo[k] = port_expo.get(k, 0.0) + fv
-            # 持仓中已是"单一指数/主题"的（top1≥0.40）→ 其 top1 风格簇被占用 1 个名额
+            # 持仓的 top1 风格簇：凡实质暴露（top1≥STRAT_INDEX_PORT=0.15）即占用
+            # 该簇 1 个名额，与候选侧"同风格最多1只"口径对称。
+            # 【2026-08-11 修复】此前仅 top1≥0.40 的指数级持仓才占簇，导致弥散型
+            #   主动持仓(如 519770/013107 top1=全指信息0.225~0.229, 相互收益相关
+            #   0.91)不占簇 → 持有其一仍推荐另一只, 同风格实际持有两只。
             cluster_count = {}
+            cluster_owner = {}
             for h in keeps:
                 rb = _safe_dict(h.get("rbsa"))
                 if not rb:
@@ -1314,10 +1319,12 @@ def rebalance():
                     t1w = float(t1[1])
                 except (TypeError, ValueError):
                     continue
-                if t1w >= STRAT_INDEX_TOP1:
+                if t1w >= STRAT_INDEX_PORT:
                     cluster_count[t1[0]] = cluster_count.get(t1[0], 0) + 1
-            # 复制盘参照池：保留持仓的 RBSA 暴露（top1 未达 0.40 的主动基金此前
-            # 不进簇、两档规则均检不出其孪生产品，由 Tier0 逐对 L1 距离兜底）；
+                    cluster_owner.setdefault(t1[0], f"{h['code']} {h.get('name') or ''}".strip())
+            # 复制盘参照池：保留持仓的 RBSA 暴露。Tier2 按 top1 风格簇判重，
+            # 仍检不出"暴露逐格几乎一致、但 top1 相同风格被表述为不同簇"的极端
+            # 孪生（以及 RBSA 键集不同的跨市场孪生）；由 Tier0 逐对 L1 距离兜底。
             # 每选中一只候选也并入参照池，候选之间同样互查
             clone_refs = []
             for h in keeps:
@@ -1361,10 +1368,13 @@ def rebalance():
                         dup_skips.append(cand)
                         continue
                     if cluster_count.get(top1_style, 0) >= STRAT_CLUSTER_MAX:
-                        cand["dup_reason"] = f"同风格重复（{top1_style} 已选{STRAT_CLUSTER_MAX}只）"
+                        owner = cluster_owner.get(top1_style)
+                        owner_txt = f"已由 {owner} 占用" if owner else f"已选{STRAT_CLUSTER_MAX}只"
+                        cand["dup_reason"] = f"同风格重复（{top1_style} {owner_txt}）"
                         dup_skips.append(cand)
                         continue
                     cluster_count[top1_style] = cluster_count.get(top1_style, 0) + 1
+                    cluster_owner.setdefault(top1_style, f"{cand['code']} {cand.get('name') or ''}".strip())
                     clone_refs.append((cand["code"], cand.get("name") or cand["code"], rb))
                     # 已选候选也并入暴露池（供①的"已实质持有"判断）
                     for k, v in rb.items():
