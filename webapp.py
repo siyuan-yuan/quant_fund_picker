@@ -1391,26 +1391,29 @@ def rebalance():
             "S": h["S_total"],
         })
     if candidates and free_slots>0:
-        # 每只最低买入额 10 元（V3.9）：现金充足按每槽目标 per_slot；现金不足时
-        # 按"每只至少10元"收缩可买只数，然后在可买只数之间平分现金
+        # V3.9 等权槽位买入：先把可用现金按生效槽位平分成"份"，
+        # 每只候选买 1 份（不超过每槽目标 per_slot），剩余现金保留现金池。
+        #   份 = min(每槽目标, 可用现金 ÷ 槽位数)   （现金不足时每份按槽缩水）
+        #   份 ≥ 最低买入额 10 元；可买只数 = min(候选数, 现金能买起的份数)
+        # 例: 现金100 + 10槽 → 每份10元, 5个候选各买10元, 花50剩50（不花光）
         MIN_BUY = 10.0
-        n_buy = len(candidates)
+        slots_now = slots_eff if slots_eff > 0 else STRAT_SLOTS
+        share = 0.0
         if cash_after_sells > 0:
-            max_by_cash = int(cash_after_sells // MIN_BUY)   # 现金最多能买几只(每只≥10)
-            n_buy = min(n_buy, max_by_cash)
-        per_buy = 0.0
-        if n_buy > 0:
-            per_buy = per_slot if per_slot>0 else 0
-            total_need = per_buy * n_buy
-            if total_need > cash_after_sells and cash_after_sells>0:
-                per_buy = cash_after_sells / n_buy
-            per_buy = round(per_buy,2)
+            share = cash_after_sells / slots_now
+        if per_slot > 0 and per_slot < share:
+            share = per_slot
+        share = round(max(share, MIN_BUY), 2) if share > 0 else 0.0
+        n_buy = len(candidates)
+        if share > 0:
+            n_buy = min(n_buy, int(cash_after_sells // share))
+        per_buy = share
         for c in candidates:
             if len(buys) >= n_buy:
                 break
-            if cash_remaining < MIN_BUY:
+            if cash_remaining < share:
                 break
-            buy_amt = min(per_buy, cash_remaining)
+            buy_amt = share
             # 最低 10 元门槛（基金申购起点）
             if buy_amt < MIN_BUY:
                 continue
@@ -1440,9 +1443,9 @@ def rebalance():
             if cash_after_sells < MIN_BUY:
                 buy_note = (f"可用现金仅 {cash_after_sells:,.0f} 元（<{MIN_BUY:.0f} 元），"
                             f"暂不买入；请补充可用现金或减少持仓")
-            elif per_buy and per_buy < MIN_BUY:
-                buy_note = (f"单笔预算 {per_buy:,.0f} 元低于 {MIN_BUY:.0f} 元最低买入额，"
-                            f"请调大总资金/现金")
+            elif share and cash_after_sells < share:
+                buy_note = (f"可用现金 {cash_after_sells:,.0f} 元低于每份 {share:,.0f} 元"
+                            f"（现金÷{slots_now}槽），暂不买入")
             else:
                 buy_note = "候选均未达到买入条件，建议检查现金与门槛"
 
@@ -1499,9 +1502,9 @@ def rebalance():
             warnings.append(w)
         else:
             warnings.append(f"CPPI 风险预算：回撤≤-15%限6槽 / ≤-20%限3槽 / ≤-25%清仓（{cppi.get('reason','提供买入日期/成本后自动计算真实触发状态')}）")
-    # 现金不足
-    if buys and total_need > cash_after_sells:
-        warnings.append(f"可用现金 {cash_after_sells:,.0f} 元不足以按每槽 {per_slot:,.0f} 元填满 {len(candidates)} 个候选，已按均分 {per_buy:,.0f} 元/只 调整；可追加现金或减少持仓")
+    # 现金不足提示（V3.9 等权槽位：每份=share，剩余现金保留）
+    if buys and per_slot > 0 and per_slot * len(candidates) > cash_after_sells:
+        warnings.append(f"可用现金 {cash_after_sells:,.0f} 元不足以按每槽 {per_slot:,.0f} 元买满候选，已按每份 {share:,.0f} 元买入 {len(buys)} 只，剩余现金保留（吃 {STRAT_CASH_YIELD*100:.1f}% 现金收益）")
     # 空槽
     if free_slots==0 and not crisis_active and num_keep_after < STRAT_SLOTS:
         pass
