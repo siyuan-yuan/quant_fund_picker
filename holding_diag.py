@@ -71,36 +71,48 @@ def parse_user_inputs(rec):
     return out
 
 
-def infer_entry_date(adj, ret_pct, tol_base=0.03):
+def infer_entry_date(adj, ret_pct, tol_base=0.03, return_info=False):
     """由持有收益率反推买入日。
 
     复权净值比 adj_now/adj_d - 1 应 ≈ 持有收益率。找误差最小的日期；
     误差容忍 max(3pp, 3×最小误差+0.5pp)，多个近优候选取**最晚**（最近期
     入场，对止损提示最不易误报；如有多笔/定投，近似为最近一笔）。
     返回 (date, err)；无匹配返回 (None, None)。
+    return_info=True 时返回 (date, err, span_days)：
+      span_days = 近优候选日期区间的跨度(天)。多笔买入/定投/中途卖出时，同一
+      持有收益率往往在净值曲线上有多个相距甚远的匹配日 → 反推的单一日期的
+      "入场高点回撤"不可靠，调用方应提示用户改用操作台账(每笔买卖)精确诊断。
     """
     if ret_pct is None or adj is None or len(adj) < 10:
-        return None, None
+        return (None, None, 0) if return_info else (None, None)
     try:
         r = float(ret_pct) / 100.0
     except Exception:
-        return None, None
+        return (None, None, 0) if return_info else (None, None)
     now = float(adj.iloc[-1])
     if now <= 0:
-        return None, None
+        return (None, None, 0) if return_info else (None, None)
     err = now / adj.values - (1.0 + r)
     abs_err = np.abs(err)
     i_min = int(np.nanargmin(abs_err))
     min_err = float(abs_err[i_min])
     if min_err > tol_base:
-        return None, None
+        return (None, None, 0) if return_info else (None, None)
     # 候选 = 误差 ≤ min(最优误差+2pp, 3pp) 的日期，取其中**最晚**者：
     # 净值走平/多笔买入时存在多个同日收益率的日期，按最近一笔近似（对止损判断偏保守不误报）
     cand = np.where(abs_err <= min(min_err + 0.02, tol_base))[0]
     if len(cand) == 0:
         cand = np.array([i_min])
     i = int(cand.max())
+    span = int((adj.index[int(cand.max())] - adj.index[int(cand.min())]).days) if len(cand) > 1 else 0
+    if return_info:
+        return adj.index[i], float(err[i]), span
     return adj.index[i], float(err[i])
+
+
+# 反推入场日不可靠阈值：近优候选日期跨度超过该天数 → 判定"疑似多笔/定投/中途卖出"
+# （此时只输入一个总市值+收益率的单日近似，入场高点回撤会系统性失真）
+INFER_AMBIGUOUS_SPAN_DAYS = 60
 
 
 def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15):
@@ -248,14 +260,15 @@ def fund_stop_diag(rec, nav_df, stop=0.20, warn_dd=0.15):
         last_date = pd.Timestamp(nav_df["date"].iloc[-1]).date()
     out = dict(
         computable=False, status="no_data", reason="",
-        entry_date=None, entry_nav=None, inferred=False, days_held=None,
-        peak=None, peak_date=None, dd=None, trigger_nav=None,
+        entry_date=None, entry_nav=None, inferred=False, infer_ambiguous=False,
+        days_held=None, peak=None, peak_date=None, dd=None, trigger_nav=None,
         ret_held=None, ret_user=ui["ret_pct"], stop=float(stop), last_date=last_date,
         amount=ui["amount"], cost=ui["cost"],
     )
     if len(adj) < 30:
         out["reason"] = "净值历史不足，无法计算入场高点回撤"
         return out
+    ambig_reason = None
     entry = ui["buy_date"]
     if entry is None:
         # 用持有收益率反推入场日；未给收益率但给了市值+成本 → 隐含收益率 = 市值/成本-1
@@ -267,12 +280,22 @@ def fund_stop_diag(rec, nav_df, stop=0.20, warn_dd=0.15):
             out["status"] = "need_entry"
             out["reason"] = "缺少买入日期/成本/收益率，无法定位入场高点（输入 代码 市值 买入日期，或 代码 市值 收益率%，或 代码 市值 成本）"
             return out
-        entry, infer_err = infer_entry_date(adj, r_infer)
+        entry, infer_err, infer_span = infer_entry_date(adj, r_infer, return_info=True)
         if entry is None:
             out["status"] = "need_entry"
             out["reason"] = "持有收益率与净值曲线无法匹配（多笔买入/转换/申赎费差异），请在支付宝交易记录中查买入日期后填写"
             return out
         out["inferred"] = True
+        # 多笔买入/定投/中途卖出：同一收益率在净值曲线上有多个相距很远的匹配日，
+        # 单日近似会把"入场高点回撤"算歪（可能严重低估，止损形同虚设）→ 明确提示
+        if infer_span > INFER_AMBIGUOUS_SPAN_DAYS:
+            out["infer_ambiguous"] = True
+            ambig_reason = (f"持有收益率在净值曲线上匹配到跨度约 {infer_span} 天的多个日期"
+                            f"（疑似多笔买入/定投/中途卖出），入场日与回撤按最近一笔近似、"
+                            f"仅供粗略参考；建议在操作台账记录每笔买卖（代码 买/卖 日期 金额）"
+                            f"后重新诊断，可获得精确的 FIFO 成本与真实回撤")
+        else:
+            ambig_reason = None
     # 单笔买入 → 复用多笔引擎（曲线锚定到用户市值，成本=市值或成本）
     cost = ui["cost"] if (ui["cost"] or 0) > 0 else (ui["amount"] or 0)
     lots = [(pd.Timestamp(entry), "buy", cost)]
@@ -280,6 +303,9 @@ def fund_stop_diag(rec, nav_df, stop=0.20, warn_dd=0.15):
                        stop=stop, warn_dd=warn_dd)
     out.update(d)
     out["inferred"] = bool(ui["buy_date"] is None and out.get("entry_date"))
+    # fund_lots_diag 成功路径 reason="" 会覆盖反推警告 → 重新挂上
+    if ambig_reason:
+        out["reason"] = ambig_reason
     return out
 
 

@@ -17,9 +17,14 @@ import akshare as ak
 
 import provider
 from engine import score_fund, finalize
-from config import OUTPUT_DIR, CACHE_DIR, YOUNG_TOP_N
+from config import OUTPUT_DIR, CACHE_DIR, YOUNG_TOP_N, SCAN_INCLUDE_OVERSEAS_INDEX
 
+# 扫描目标类型白名单（A股四类 + 可选海外指数QDII通道）
+# 016452 南方纳斯达克100(QDII)A 等"指数型-海外股票"此前因此白名单被排除在全部扫描模式外，
+# 但引擎本身支持境外评分(panel_mode=overseas) → 由 SCAN_INCLUDE_OVERSEAS_INDEX 控制并入。
 TARGET_TYPES = {"混合型-偏股", "股票型", "指数型-股票", "混合型-灵活"}
+if SCAN_INCLUDE_OVERSEAS_INDEX:
+    TARGET_TYPES = TARGET_TYPES | {"指数型-海外股票"}
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
@@ -42,6 +47,10 @@ def _load_target_funds() -> pd.DataFrame:
     df = df[df["基金类型"].isin(TARGET_TYPES)].copy()
     # 剔除C/E类份额(同策略重复), 保留A或基础份额
     df = df[~df["基金简称"].str.strip().str.endswith(("C", "E"))].copy()
+    if SCAN_INCLUDE_OVERSEAS_INDEX:
+        n_ovs = int((df["基金类型"] == "指数型-海外股票").sum())
+        print(f"[漏斗] 海外指数QDII通道已开启: 纳入 {n_ovs} 只指数型-海外股票"
+              f"（含 016452 南方纳斯达克100(QDII)A 等，config.SCAN_INCLUDE_OVERSEAS_INDEX）")
     for c in ["近3年", "近1年", "近6月"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")

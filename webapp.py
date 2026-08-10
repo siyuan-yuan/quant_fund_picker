@@ -1037,7 +1037,9 @@ def rebalance():
             dd_txt = f"{st['dd']*100:.1f}%" if st.get("dd") is not None else "—"
             h["action_reason"] = (f"自入场日({st.get('entry_date')})高点 {st.get('peak')} 回撤 {dd_txt}，"
                                   f"已击穿20%移动止损线（触发价 {st.get('trigger_nav')}）→ 清仓"
-                                  + ("（买入日由收益率推断）" if st.get("inferred") else ""))
+                                  + ("（买入日由收益率推断）" if st.get("inferred") else "")
+                                  + ("；⚠ 反推疑似多笔/定投买入，回撤为近似值，建议先在操作台账核对每笔买卖再执行"
+                                     if st.get("infer_ambiguous") else ""))
             h["target_amount"] = 0.0
             h["sell_amount"] = h["amount"]
             sells.append(h)

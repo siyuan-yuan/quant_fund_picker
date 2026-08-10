@@ -75,6 +75,39 @@ def test_fund_stop_diag():
     print("test_fund_stop_diag OK")
 
 
+def test_infer_ambiguous():
+    """多笔买入+中途卖出：只输总市值+总收益率 → 反推的单日入场不可靠 → infer_ambiguous 告警。"""
+    # 净值: 爬升至1.5见顶 → 回落到1.19（与真实案例同构）
+    dates = pd.date_range("2024-01-01", periods=200, freq="D")
+    vals = np.linspace(1.0, 1.5, 100).tolist() + np.linspace(1.5, 1.19, 100).tolist()
+    rets = [0.0] + [vals[i] / vals[i - 1] - 1 for i in range(1, len(vals))]
+    df = mk_nav([str(d.date()) for d in dates], rets)
+
+    # 真实场景: 两笔买入 + 一笔部分卖出 → FIFO 真实持有收益/市值
+    lots = [("2024-02-19", "buy", 10000.0), ("2024-05-29", "buy", 10000.0),
+            ("2024-06-08", "sell", 5000.0)]
+    true = hd.fund_lots_diag(lots, df)
+    assert true["computable"]
+
+    # 只输 总市值+总收益率 → 必须给出"不可靠"告警（单日近似会严重低估真实回撤）
+    d = hd.fund_stop_diag(dict(code="X", amount=true["mv_now"],
+                               ret_pct=round(true["ret_held"] * 100, 2)), df)
+    assert d["computable"] and d["inferred"] and d["infer_ambiguous"], d
+    assert "台账" in (d.get("reason") or "")
+
+    # 提供明确买入日期 → 不告警（用户自查过交易记录）
+    d2 = hd.fund_stop_diag(dict(code="X", amount=true["mv_now"], buy_date="2024-02-19"), df)
+    assert d2["computable"] and not d2["infer_ambiguous"]
+
+    # return_info 向后兼容: 默认二元组, 显式开启才返回三元素
+    adj = hd.adj_series(df)
+    r2 = hd.infer_entry_date(adj, -5.6)
+    assert isinstance(r2, tuple) and len(r2) == 2
+    r3 = hd.infer_entry_date(adj, -5.6, return_info=True)
+    assert len(r3) == 3 and r3[2] > hd.INFER_AMBIGUOUS_SPAN_DAYS
+    print("test_infer_ambiguous OK")
+
+
 def test_cppi_tier_sim():
     # 全路径: 触发-15(6槽) → 触发-20(3槽) → 回补-18(6槽) → 新高(满槽)
     v = np.array([100.0, 88.0, 90.0, 84.0, 86.0, 78.0, 80.0, 81.0, 82.0, 83.0, 84.0, 86.0, 100.5])
@@ -242,7 +275,7 @@ def test_webapp_endpoint():
 
 
 if __name__ == "__main__":
-    for fn in [test_adj_series, test_infer_entry_date, test_fund_stop_diag, test_fund_lots_diag, test_portfolio_cppi_curve_input, test_portfolio_cppi_auto_start,
+    for fn in [test_adj_series, test_infer_entry_date, test_infer_ambiguous, test_fund_stop_diag, test_fund_lots_diag, test_portfolio_cppi_curve_input, test_portfolio_cppi_auto_start,
                test_cppi_tier_sim, test_portfolio_cppi, test_webapp_endpoint]:
         fn()
     print("\nALL TESTS PASSED")

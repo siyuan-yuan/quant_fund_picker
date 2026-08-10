@@ -744,8 +744,9 @@ function stopCell(h){
   if(!st.computable) return `<td class="mono faint">—</td><td class="mono faint">—</td><td><span class="badge b-mute">${st.status==='need_entry'?'需日期/收益率':'—'}</span></td>`;
   const dd=st.dd==null?'—':fmtPct(st.dd);
   const col=st.status==='triggered'?'var(--danger)':(st.status==='near'?'var(--warn)':'var(--muted)');
-  const tip=`入场 ${st.entry_date||'?'}${st.inferred?'（收益率推断）':''} · 入场后高点 ${st.peak}（${st.peak_date}）· 20%触发价 ${st.trigger_nav} · 真实持有收益 ${fmtPct(st.ret_held)}`;
-  return `<td class="mono" style="color:var(--muted)" title="${tip}">${st.entry_date||'—'}${st.inferred?'*':''}</td><td class="mono" style="color:${col};font-weight:600" title="${tip}">${dd}</td><td title="${tip}">${stopBadge(st)}</td>`;
+  const tip=`入场 ${st.entry_date||'?'}${st.inferred?'（收益率推断）':''} · 入场后高点 ${st.peak}（${st.peak_date}）· 20%触发价 ${st.trigger_nav} · 真实持有收益 ${fmtPct(st.ret_held)}${st.infer_ambiguous?' · ⚠疑似多笔/定投买入：入场日与回撤为近似值，建议在操作台账记录每笔买卖后重新诊断':''}`;
+  const mark=st.infer_ambiguous?' ⚠':(st.inferred?'*':'');
+  return `<td class="mono" style="color:${st.infer_ambiguous?'var(--warn)':'var(--muted)'}" title="${tip}">${st.entry_date||'—'}${mark}</td><td class="mono" style="color:${col};font-weight:600" title="${tip}">${dd}</td><td title="${tip}">${stopBadge(st)}</td>`;
 }
 function cppiPanelHtml(cp,s){
   if(!cp || !cp.computable) return '';

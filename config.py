@@ -58,6 +58,14 @@ OVERSEAS_SRCS = {"us_sina", "hk_sina"}
 OVERSEAS_NAMES = {x[2] for x in RBSA_INDICES if x[0] in OVERSEAS_SRCS}
 # 海外类型基金的"借壳"判定: 统一面板预筛境外权重≥此值 → 切换纯境外面板
 OVERSEAS_SWITCH_THRESHOLD = 0.25
+# ============ 扫描池: 海外指数(QDII)通道 ============
+# 打分引擎自 V3.3 起已完整支持境外基金(境外腿RBSA面板 + 纯境外面板 panel_mode=overseas
+# + 估值盲区标记 valuation_blind)，但扫描白名单历史上只含 A 股四类基金类型，
+# 导致"指数型-海外股票"(被动QDII指数, 如纳斯达克100/标普500/德国DAX等)在全部扫描模式
+# 下都进不了池 —— 单基透视/批量评分可以, 榜单永远没有。
+# True: 把"指数型-海外股票"并入扫描目标类型(约+91只近3年完整主池基金, 全部为被动指数)。
+# 主动型QDII(QDII-普通股票/混合偏股等, 风格归因差)仍保持排除, 不并入。
+SCAN_INCLUDE_OVERSEAS_INDEX = True
 
 # ============ RBSA 参数 ============
 RBSA_WINDOW = 60                 # 主窗口: 近60个交易日
