@@ -26,7 +26,7 @@ from config import (
     STRAT_CPPI_DD3, STRAT_CPPI_SLOTS3,
     STRAT_CPPI_HYSTERESIS, STRAT_STYLE_CAP,
     STRAT_OVERLAP_SKIP, STRAT_OVERSEAS_SLOT_CAP,
-    STRAT_INDEX_TOP1, STRAT_INDEX_PORT, STRAT_CLUSTER_MAX,
+    STRAT_INDEX_TOP1, STRAT_INDEX_PORT, STRAT_CLUSTER_MAX, STRAT_CLONE_L1,
     OVERSEAS_FUND_TYPES,
 )
 
@@ -1225,9 +1225,12 @@ def rebalance():
 
     # ---- 候选买入池（V3.9）：分市场配额 + 组合重复度过滤 + 顺位推荐 ----
     # 原则：① 不跨市场混比——A股/海外各自按 S 降序；② 海外(美股QDII)最多占
-    #       STRAT_OVERSEAS_SLOT_CAP 槽（防单边堆满）；③ 候选与"组合已有暴露 +
-    #       已选候选"的 RBSA 重叠 ≥ STRAT_OVERLAP_SKIP → 判为高度类似, 跳过,
-    #       顺位推荐下一只；④ 全部满足后仍按 S 高者优先（市场内）。
+    #       STRAT_OVERSEAS_SLOT_CAP 槽（防单边堆满）；③ 重复度三档规则（详见 config）：
+    #         Tier0 复制盘：候选与任一持仓/已选候选的 RBSA 暴露 L1 ≤ STRAT_CLONE_L1
+    #               → 同策略孪生产品（如 001801 达欣 vs 001417 医疗服务），必排除；
+    #         Tier1 指数级：候选 top1≥0.40 且该风格组合已实质持有 → 必排除（同指数）；
+    #         Tier2 簇上限：同 top1 风格最多 STRAT_CLUSTER_MAX 只 → 第2只起顺位换风格；
+    #       ④ 全部满足后仍按 S 高者优先（市场内）。
     candidates = []
     dup_skips = []
     scan_msg = ""
@@ -1313,10 +1316,20 @@ def rebalance():
                     continue
                 if t1w >= STRAT_INDEX_TOP1:
                     cluster_count[t1[0]] = cluster_count.get(t1[0], 0) + 1
+            # 复制盘参照池：保留持仓的 RBSA 暴露（top1 未达 0.40 的主动基金此前
+            # 不进簇、两档规则均检不出其孪生产品，由 Tier0 逐对 L1 距离兜底）；
+            # 每选中一只候选也并入参照池，候选之间同样互查
+            clone_refs = []
+            for h in keeps:
+                rb_h = _safe_dict(h.get("rbsa"))
+                if rb_h:
+                    clone_refs.append((h["code"], h.get("name") or h["code"], rb_h))
             # 贪心选取：市场内保持 S 降序；跨市场按 S 高者优先（海外受配额限制）；
-            # 重复度两档规则（详见 config）：
-            #   ① 指数级重复：候选 top1≥0.40 且该风格组合已实质持有 → 必排除（同指数）
-            #   ② 簇上限：同 top1 风格最多 STRAT_CLUSTER_MAX 只 → 第2只起顺位换风格
+            # 重复度三档规则（详见 config）：
+            #   Tier0 复制盘：候选与任一持仓/已选候选 RBSA 暴露 L1≤STRAT_CLONE_L1
+            #         → 同一策略孪生产品（复制盘），必排除，只留一只；
+            #   Tier1 指数级重复：候选 top1≥0.40 且该风格组合已实质持有 → 必排除（同指数）
+            #   Tier2 簇上限：同 top1 风格最多 STRAT_CLUSTER_MAX 只 → 第2只起顺位换风格
             # 被排除的记入 dup_skips（前端展示原因）
             ov_cap = min(STRAT_OVERSEAS_SLOT_CAP, free_slots)
             ov_used = 0
@@ -1327,15 +1340,22 @@ def rebalance():
                 if ca is None and co is None:
                     break
                 if co is not None and (ca is None or co["S_total"] >= (ca["S_total"] or 0)):
-                    cand = co; ib += 1; ov_used += 1
+                    cand = co; ib += 1; cand_overseas = True
                 else:
-                    cand = ca; ia += 1
+                    cand = ca; ia += 1; cand_overseas = False
                 cand["overlap"] = None
                 cand["dup_reason"] = ""
                 if has_rbsa and cand.get("rbsa"):
                     rb = cand["rbsa"]
                     top1_style, top1_w = max(rb.items(), key=lambda kv: kv[1])
                     cand["overlap"] = round(top1_w, 3)
+                    # Tier0 复制盘：与任一持仓/已选候选暴露逐格几乎一致 → 只留一只
+                    clone_ref, clone_l1 = holding_diag.find_clone_exposure(rb, clone_refs, STRAT_CLONE_L1)
+                    if clone_ref is not None:
+                        cand["dup_reason"] = (f"复制盘重复（与 {clone_ref['code']} {clone_ref['name']} "
+                                              f"暴露几乎一致，L1={clone_l1:.3f}）")
+                        dup_skips.append(cand)
+                        continue
                     if top1_w >= STRAT_INDEX_TOP1 and port_expo.get(top1_style, 0.0) >= STRAT_INDEX_PORT:
                         cand["dup_reason"] = f"同指数重复（{top1_style} 已持有）"
                         dup_skips.append(cand)
@@ -1345,6 +1365,7 @@ def rebalance():
                         dup_skips.append(cand)
                         continue
                     cluster_count[top1_style] = cluster_count.get(top1_style, 0) + 1
+                    clone_refs.append((cand["code"], cand.get("name") or cand["code"], rb))
                     # 已选候选也并入暴露池（供①的"已实质持有"判断）
                     for k, v in rb.items():
                         try:
@@ -1353,6 +1374,10 @@ def rebalance():
                             continue
                         if fv > 0:
                             port_expo[k] = port_expo.get(k, 0.0) + fv
+                # 海外配额只计"真正入选"的候选——被去重跳过的海外候选不占配额，
+                # 让位给顺位下的下一只海外候选
+                if cand_overseas:
+                    ov_used += 1
                 candidates.append(cand)
             if cand_stats is not None:
                 cand_stats["dup"] = len(dup_skips)
@@ -1362,7 +1387,7 @@ def rebalance():
                 n_a = sum(1 for c in candidates if c["region"] == "A股")
                 n_ov = len(candidates) - n_a
                 scan_msg = (f"候选 {len(candidates)} 只（A股 {n_a} / 海外 {n_ov}，海外≤{STRAT_OVERSEAS_SLOT_CAP}槽）："
-                            f"市场内按 S 排序 + 重复度过滤（同指数/同风格自动顺位）")
+                            f"市场内按 S 排序 + 重复度过滤（复制盘/同指数/同风格自动顺位）")
                 if not has_rbsa:
                     scan_msg += "；旧榜单无暴露数据，重复度过滤未生效（重新扫描后自动开启）"
         except Exception as e:
@@ -1548,6 +1573,7 @@ def rebalance():
             overlap_skip=STRAT_OVERLAP_SKIP,
             cluster_max=STRAT_CLUSTER_MAX,
             index_top1=STRAT_INDEX_TOP1,
+            clone_l1=STRAT_CLONE_L1,
             cppi_rules=[
                 dict(dd=STRAT_CPPI_DD1, slots=STRAT_CPPI_SLOTS1),
                 dict(dd=STRAT_CPPI_DD2, slots=STRAT_CPPI_SLOTS2),
