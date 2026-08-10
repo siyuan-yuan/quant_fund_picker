@@ -1228,6 +1228,7 @@ def rebalance():
     candidates = []
     dup_skips = []
     scan_msg = ""
+    cand_stats = None     # 建议买入统计: gt70=榜单S>70总数, total=未持有候选数, dup=已排除重复数
     scan_file = _latest_scan()
     if scan_file and free_slots>0:
         try:
@@ -1255,6 +1256,11 @@ def rebalance():
             held_codes = set(h["code"] for h in holdings_detail)
             filt = df_scan[(pd.to_numeric(df_scan["S_total"], errors="coerce") > STRAT_BUY_TH)
                            & (~df_scan["code"].isin(list(held_codes)))].copy()
+            cand_stats = dict(
+                gt70=int((pd.to_numeric(df_scan["S_total"], errors="coerce") > STRAT_BUY_TH).sum()),
+                total=int(len(filt)),
+                dup=0,
+            )
             if has_rbsa:
                 filt["rbsa"] = filt["rbsa"].map(_parse_rbsa)
             else:
@@ -1344,6 +1350,8 @@ def rebalance():
                         if fv > 0:
                             port_expo[k] = port_expo.get(k, 0.0) + fv
                 candidates.append(cand)
+            if cand_stats is not None:
+                cand_stats["dup"] = len(dup_skips)
             if not candidates and not dup_skips:
                 scan_msg = "扫描榜单中暂无 S>70 的候选（或均已持有），建议等待新扫描或放宽槽位"
             else:
@@ -1531,6 +1539,7 @@ def rebalance():
         buys=clean(buys),
         candidates=clean(candidates),
         dup_skips=clean(dup_skips),
+        cand_stats=cand_stats,
         allocation=clean(allocation),
         orders=clean(orders),
         warnings=warnings,

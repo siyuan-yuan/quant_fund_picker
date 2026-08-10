@@ -723,6 +723,10 @@ async function ledRecordBuy(code){
   const inp=document.getElementById('led-buy-'+code);
   await ledRecord(code,'buy',inp?inp.value:null,'诊断买入');
 }
+async function ledRecordSell(code){
+  const inp=document.getElementById('led-sell-'+code);
+  await ledRecord(code,'sell',inp?inp.value:null,'诊断卖出');
+}
 function renderLedger(j){
   window._lastLedger=j;
   const txns=j.txns||[], funds=j.funds||[];
@@ -864,20 +868,19 @@ function renderRebalance(j){
   const hRows=holdings.map(h=>{
     if(h.is_error){
       const canRetry=h.retryable!==false;
-      return `<tr style="background:${canRetry?'#fffbeb':'#f5f5f4'}"><td>${h.code}</td><td class="name">${h.name}</td><td style="text-align:right">${fmtYuanFull(h.amount)}</td><td class="mono faint">—</td><td class="mono faint">—</td><td class="mono faint">—</td><td>—</td><td><span class="badge ${canRetry?'b-amber':'b-mute'}">${canRetry?'待重试':'观察仓'}</span></td><td><span class="badge b-mute">—</span></td><td style="max-width:240px;white-space:normal;font:12px var(--sans);color:var(--muted)">${h.error||''}</td><td>${canRetry?`<button class="btn btn-ghost" style="padding:4px 8px;font-size:11px" onclick="retryRebalanceSingle('${h.code}')">重试</button>`:`<span class="mono faint">—</span>`}</td><td><span class="mono faint">—</span></td></tr>`;
+      return `<tr style="background:${canRetry?'#fffbeb':'#f5f5f4'}"><td>${h.code}</td><td class="name">${h.name}</td><td style="text-align:right">${fmtYuanFull(h.amount)}</td><td class="mono faint">—</td><td class="mono faint">—</td><td class="mono faint">—</td><td>—</td><td><span class="badge ${canRetry?'b-amber':'b-mute'}">${canRetry?'待重试':'观察仓'}</span></td><td><span class="badge b-mute">—</span></td><td style="max-width:240px;white-space:normal;font:12px var(--sans);color:var(--muted)">${h.error||''}</td><td>${canRetry?`<button class="btn btn-ghost" style="padding:4px 8px;font-size:11px" onclick="retryRebalanceSingle('${h.code}')">重试</button>`:`<span class="mono faint">—</span>`}</td></tr>`;
     }
     const act=h.action==='sell'?'卖出':'持有';
-    const ledBtn=h.action==='sell'&&h.amount>0
-      ? `<button class="btn btn-ghost" style="padding:3px 8px;font-size:11px" onclick="ledRecord('${h.code}','sell',${h.amount},'诊断卖出')">卖出→台账</button>`
-      : `<span class="mono faint">—</span>`;
-    return `<tr><td>${h.code}</td><td class="name">${h.name}</td><td style="text-align:right">${fmtYuanFull(h.amount)}</td>${stopCell(h)}<td class="score">${h.S_total??'—'}</td><td>${ratingCell(h)}</td><td>${sigOf(h)}</td><td>${h.action_label||act}</td><td style="text-align:right">${fmtYuanFull(h.target_amount)}</td><td>${ledBtn}</td></tr>`;
+    return `<tr><td>${h.code}</td><td class="name">${h.name}</td><td style="text-align:right">${fmtYuanFull(h.amount)}</td>${stopCell(h)}<td class="score">${h.S_total??'—'}</td><td>${ratingCell(h)}</td><td>${sigOf(h)}</td><td>${h.action_label||act}</td><td style="text-align:right">${fmtYuanFull(h.target_amount)}</td></tr>`;
   }).join('');
-  const hTable=`<div style="margin-top:14px"><div class="table-wrap"><table><thead><tr><th>代码</th><th>名称</th><th>金额</th><th>入场日</th><th>高点回撤</th><th>20%止损</th><th>总分</th><th>评级</th><th>信号</th><th>操作</th><th>目标</th><th>台账</th></tr></thead><tbody>${hRows}</tbody></table></div></div>`;
+  const hTable=`<div style="margin-top:14px"><div class="table-wrap"><table><thead><tr><th>代码</th><th>名称</th><th>金额</th><th>入场日</th><th>高点回撤</th><th>20%止损</th><th>总分</th><th>评级</th><th>信号</th><th>操作</th><th>目标</th></tr></thead><tbody>${hRows}</tbody></table></div></div>`;
   // 重复度过滤在服务端静默执行（同指数/同风格顺位推荐），不展示明细
+  const nBuyOrders=orders.filter(o=>o.side==='BUY').length;
+  const statsHtml=(j.cand_stats&&j.cand_stats.total>0)? `<div style="margin-top:10px;font:12px var(--sans);color:var(--faint);line-height:1.7">建议买入 · 榜单 S>70 共 <b style="color:var(--muted)">${j.cand_stats.gt70}</b> 只 · 未持有候选 <b style="color:var(--muted)">${j.cand_stats.total}</b> 只 · 已排除重复 <b style="color:var(--muted)">${j.cand_stats.dup}</b> 只 · 本次推荐 ${nBuyOrders} 只</div>`:'';
   const orderHtml=orders.length? `<div style="margin-top:14px"><div class="orders">${orders.map(o=>{
-    const buyLed=o.side==='BUY'?`<div style="display:flex;gap:6px;align-items:center;margin-left:8px"><input id="led-buy-${o.code}" class="mono" style="width:110px;background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font:12px var(--mono);text-align:right" value="${fmtYuan(o.amount)}"><button class="btn btn-ghost" style="padding:4px 8px;font-size:11px" onclick="ledRecordBuy('${o.code}')">买入→台账</button></div>`:'';
+    const buyLed=o.side==='BUY'?`<div style="display:flex;gap:6px;align-items:center;margin-left:8px"><input id="led-buy-${o.code}" class="mono" style="width:110px;background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font:12px var(--mono);text-align:right" value="${fmtYuan(o.amount)}"><button class="btn btn-ghost" style="padding:4px 8px;font-size:11px" onclick="ledRecordBuy('${o.code}')">买入→台账</button></div>`:`<div style="display:flex;gap:6px;align-items:center;margin-left:8px"><input id="led-sell-${o.code}" class="mono" style="width:110px;background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font:12px var(--mono);text-align:right" value="${fmtYuan(o.amount)}"><button class="btn btn-ghost" style="padding:4px 8px;font-size:11px" onclick="ledRecordSell('${o.code}')">卖出→台账</button></div>`;
     return `<div class="order ${o.side==='SELL'?'sell':'buy'}"><span class="side">${o.side==='SELL'?'卖出':'买入'}</span><div class="meta"><b>${o.code} ${o.name}</b><div>${o.reason||''}</div></div><div class="amt">${fmtYuanFull(o.amount)}</div>${buyLed}</div>`;
-  }).join('')}</div><div style="margin-top:8px;display:flex;gap:8px"><button class="btn btn-ghost" style="padding:6px 12px;font-size:12px" onclick="copyOrders()">复制</button><button class="btn btn-ghost" style="padding:6px 12px;font-size:12px" onclick="downloadOrders()">导出</button></div></div>`:`<div class="empty" style="margin-top:12px">${j.scan_msg||'无操作'}</div>`;
+  }).join('')}</div>${statsHtml}<div style="margin-top:8px;display:flex;gap:8px"><button class="btn btn-ghost" style="padding:6px 12px;font-size:12px" onclick="copyOrders()">复制</button><button class="btn btn-ghost" style="padding:6px 12px;font-size:12px" onclick="downloadOrders()">导出</button></div></div>`:`<div class="empty" style="margin-top:12px">${j.scan_msg||'无操作'}</div>`;
   const allocHtml=alloc.length? `<div style="margin-top:14px"><div class="alloc-bar">${alloc.map((a,i)=>`<i style="width:${a.pct}%;background:${['#0c0a09','#57534e','#a8a29e','#d6d3d1','#e7e5e4'][i%5]}"></i>`).join('')}<i style="width:${s.cash_pct_after||0}%;background:var(--surface-2);border:1px dashed var(--line)"></i></div><div class="legend">${alloc.map((a,i)=>`<span><em style="background:${['#0c0a09','#57534e','#a8a29e'][i%3]}"></em>${a.code} ${a.pct}%</span>`).join('')}<span><em style="background:var(--surface-2);border:1px solid var(--line)"></em>现金 ${s.cash_pct_after||0}%</span></div></div>`:'';
   document.getElementById('rb-out').innerHTML=kpis+cppiHtml+errBanner+hTable+orderHtml+allocHtml;
   window._lastRebalance=j;
