@@ -126,6 +126,9 @@ def test_dca_dates_lots_infer():
     # 周频: 2024-03-01(周五) 起 5 期
     d3 = hd.dca_dates("2024-03-01", "weekly", "2024-03-31")
     assert len(d3) == 5 and str(d3[0]) == "2024-03-01"
+    # 每日定投: 连续自然日
+    d6 = hd.dca_dates("2024-03-01", "daily", "2024-03-05")
+    assert [str(d) for d in d6] == ["2024-03-01", "2024-03-02", "2024-03-03", "2024-03-04", "2024-03-05"], d6
     # 两周期
     d4 = hd.dca_dates("2024-03-01", "biweekly", "2024-04-30")
     assert len(d4) == 5
@@ -147,6 +150,44 @@ def test_dca_dates_lots_infer():
     r2 = hd.infer_dca([("2024-04-10", "buy", 10000.0)], 1000.0, adj, freqs=("monthly",))
     assert not r2["ok"] and "超过" in r2["reason"]
     print("test_dca_dates_lots_infer OK")
+
+
+def test_exposure_overlap():
+    """RBSA 暴露重叠度：用于买入候选的重复度过滤（与组合/已选重叠≥60%判为类似）。"""
+    nasdaq = {"纳斯达克100": 0.55, "标普500": 0.25, "恒生科技": 0.20}
+    a_tech = {"沪深300": 0.3, "中证1000": 0.2, "全指信息": 0.5}
+    port_nasdaq = {"纳斯达克100": 0.6, "标普500": 0.3}   # 已持有纳指ETF等
+    # 纳指候选 vs 纳指组合 → 高重叠（应跳过）
+    assert hd.exposure_overlap(nasdaq, port_nasdaq) >= 0.8
+    # A股科技 vs 纳指组合 → 低重叠（不跳过）
+    assert hd.exposure_overlap(a_tech, port_nasdaq) < 0.05
+    # 空暴露 → 0
+    assert hd.exposure_overlap({}, port_nasdaq) == 0.0
+    assert hd.exposure_overlap(nasdaq, {}) == 0.0
+    # 组合暴露=0.55纳指（部分覆盖候选的0.55）→ 覆盖度=0.55/1.0=0.55 <0.6 不跳过
+    partial = {"纳斯达克100": 0.55}
+    ov = hd.exposure_overlap(nasdaq, partial)
+    assert abs(ov - 0.55) < 1e-9, ov
+    # 分散型持仓不误杀: 组合全风格小额暴露(实质配置=仅≥15%的风格) → 医疗候选不被判重复
+    diversified = {"沪深300": 0.20, "中证500": 0.13, "全指信息": 0.11,
+                   "全指消费": 0.10, "全指医药": 0.09, "中证1000": 0.08}
+    medical = {"全指医药": 0.60, "全指消费": 0.20, "创业板50": 0.10, "沪深300": 0.05}
+    assert hd.exposure_overlap(medical, diversified) < 0.10, "分散持仓不应挡住医疗候选"
+    # 但组合实质持有医药(≥15%) → 医疗候选判重复
+    med_port = {"全指医药": 0.45, "全指消费": 0.20, "沪深300": 0.15}
+    assert hd.exposure_overlap(medical, med_port) >= 0.8
+    # 两档规则: 指数级重复(候选top1≥40%且组合已实质持有该风格) → 必排除
+    nasdaq2 = {"纳斯达克100": 0.85, "标普500": 0.10, "恒生科技": 0.05}
+    is_dup, ov, reason = hd.exposure_dup(nasdaq2, port_nasdaq)
+    assert is_dup and "同指数" in reason and ov >= 0.8
+    # 主动基金近同质: 整体暴露重叠≥0.70 → 排除; 不同风格主动基金不排除
+    tech_a = {"全指信息": 0.30, "创业板50": 0.25, "中证500": 0.20, "中证1000": 0.15, "沪深300": 0.10}
+    tech_b = {"全指信息": 0.32, "创业板50": 0.27, "中证500": 0.18, "中证1000": 0.13, "沪深300": 0.10}
+    is_dup2, ov2, _ = hd.exposure_dup(tech_b, tech_a)
+    assert is_dup2 and ov2 >= 0.9, (is_dup2, ov2)
+    is_dup3, ov3, _ = hd.exposure_dup(medical, tech_a)
+    assert not is_dup3 and ov3 < 0.15
+    print("test_exposure_overlap OK")
 
 
 def test_cppi_tier_sim():
@@ -317,6 +358,6 @@ def test_webapp_endpoint():
 
 if __name__ == "__main__":
     for fn in [test_adj_series, test_infer_entry_date, test_infer_ambiguous, test_fund_stop_diag, test_fund_lots_diag, test_portfolio_cppi_curve_input, test_portfolio_cppi_auto_start,
-               test_dca_dates_lots_infer, test_cppi_tier_sim, test_portfolio_cppi, test_webapp_endpoint]:
+               test_dca_dates_lots_infer, test_exposure_overlap, test_cppi_tier_sim, test_portfolio_cppi, test_webapp_endpoint]:
         fn()
     print("\nALL TESTS PASSED")

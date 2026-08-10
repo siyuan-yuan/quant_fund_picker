@@ -382,6 +382,7 @@
           <div class="field"><label>开始定投日期</label><input id="dca-start" class="mono" placeholder="2023-06-15"></div>
           <div class="field"><label>每期金额</label><input id="dca-amt" class="mono" placeholder="1000"></div>
           <div class="field"><label>频率</label><select id="dca-freq" style="padding:8px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2);font:13px var(--sans)">
+            <option value="daily">每日</option>
             <option value="monthly" selected>每月</option>
             <option value="biweekly">每两周</option>
             <option value="weekly">每周</option></select></div>
@@ -952,7 +953,9 @@ function renderRebalance(j){
     return `<tr><td>${h.code}</td><td class="name">${h.name}</td><td style="text-align:right">${fmtYuanFull(h.amount)}</td>${stopCell(h)}<td class="score">${h.S_total??'—'}</td><td>${ratingCell(h)}</td><td>${sigOf(h)}</td><td>${h.action_label||act}</td><td style="text-align:right">${fmtYuanFull(h.target_amount)}</td><td>${ledBtn}</td></tr>`;
   }).join('');
   const hTable=`<div style="margin-top:14px"><div class="table-wrap"><table><thead><tr><th>代码</th><th>名称</th><th>金额</th><th>入场日</th><th>高点回撤</th><th>20%止损</th><th>总分</th><th>评级</th><th>信号</th><th>操作</th><th>目标</th><th>台账</th></tr></thead><tbody>${hRows}</tbody></table></div></div>`;
-  const orderHtml=orders.length? `<div style="margin-top:14px"><div class="orders">${orders.map(o=>{
+  const skips=j.dup_skips||[];
+  const skipHtml=skips.length? `<div style="margin-top:10px;padding:8px 12px;border:1px dashed var(--line);border-radius:8px;font:12px var(--sans);color:var(--muted);line-height:1.8"><b style="color:var(--warn)">已排除 ${skips.length} 只重复候选</b>（同指数重复必排除；同 top1 风格最多 ${j.strategy&&j.strategy.cluster_max||2} 只，顺位推荐其它风格的基金）：<br>${skips.map(s=>`<span class="mono">${s.code}</span> ${s.name} · S=${s.S_total} · ${s.dup_reason||('重叠'+(s.overlap*100).toFixed(0)+'%')} · ${s.region==='海外'?'🌐':'🇨🇳'}`).join('<br>')}</div>`:'';
+  const orderHtml=orders.length? `<div style="margin-top:14px">${skipHtml}<div class="orders">${orders.map(o=>{
     const buyLed=o.side==='BUY'?`<div style="display:flex;gap:6px;align-items:center;margin-left:8px"><input id="led-buy-${o.code}" class="mono" style="width:110px;background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font:12px var(--mono);text-align:right" value="${fmtYuan(o.amount)}"><button class="btn btn-ghost" style="padding:4px 8px;font-size:11px" onclick="ledRecordBuy('${o.code}')">买入→台账</button></div>`:'';
     return `<div class="order ${o.side==='SELL'?'sell':'buy'}"><span class="side">${o.side==='SELL'?'卖出':'买入'}</span><div class="meta"><b>${o.code} ${o.name}</b><div>${o.reason||''}</div></div><div class="amt">${fmtYuanFull(o.amount)}</div>${buyLed}</div>`;
   }).join('')}</div><div style="margin-top:8px;display:flex;gap:8px"><button class="btn btn-ghost" style="padding:6px 12px;font-size:12px" onclick="copyOrders()">复制</button><button class="btn btn-ghost" style="padding:6px 12px;font-size:12px" onclick="downloadOrders()">导出</button></div></div>`:`<div class="empty" style="margin-top:12px">${j.scan_msg||'无操作'}</div>`;

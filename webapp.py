@@ -25,6 +25,9 @@ from config import (
     STRAT_CPPI_DD2, STRAT_CPPI_SLOTS2,
     STRAT_CPPI_DD3, STRAT_CPPI_SLOTS3,
     STRAT_CPPI_HYSTERESIS, STRAT_STYLE_CAP,
+    STRAT_OVERLAP_SKIP, STRAT_OVERSEAS_SLOT_CAP,
+    STRAT_INDEX_TOP1, STRAT_INDEX_PORT, STRAT_CLUSTER_MAX,
+    OVERSEAS_FUND_TYPES,
 )
 
 app = Flask(__name__)
@@ -438,8 +441,8 @@ def dca_preview():
     start = _parse_date(body.get("start_date"))
     amt = _parse_yuan(body.get("amount"))
     freq = str(body.get("freq") or "monthly").lower()
-    if freq not in ("monthly", "biweekly", "weekly"):
-        return jsonify({"ok": False, "message": "频率仅支持 monthly / biweekly / weekly"}), 400
+    if freq not in ("daily", "monthly", "biweekly", "weekly"):
+        return jsonify({"ok": False, "message": "频率仅支持 daily / monthly / biweekly / weekly"}), 400
     if not re.fullmatch(r"\d{6}", code) or not start or not amt or amt <= 0:
         return jsonify({"ok": False, "message": "需要 基金代码 + 开始日期 + 每期金额"}), 400
     try:
@@ -1217,8 +1220,13 @@ def rebalance():
     if crisis_active:
         free_slots = 0
 
-    # ---- 候选买入池：从最新扫描榜单取 S>70 且不在持仓的 Top ----
+    # ---- 候选买入池（V3.9）：分市场配额 + 组合重复度过滤 + 顺位推荐 ----
+    # 原则：① 不跨市场混比——A股/海外各自按 S 降序；② 海外(美股QDII)最多占
+    #       STRAT_OVERSEAS_SLOT_CAP 槽（防单边堆满）；③ 候选与"组合已有暴露 +
+    #       已选候选"的 RBSA 重叠 ≥ STRAT_OVERLAP_SKIP → 判为高度类似, 跳过,
+    #       顺位推荐下一只；④ 全部满足后仍按 S 高者优先（市场内）。
     candidates = []
+    dup_skips = []
     scan_msg = ""
     scan_file = _latest_scan()
     if scan_file and free_slots>0:
@@ -1227,13 +1235,33 @@ def rebalance():
             # 过滤错误行
             if "error" in df_scan:
                 df_scan = df_scan[df_scan["error"].isna()]
+            # 旧榜单无 region → 按基金类型归类；无 rbsa → 重复度过滤自动降级
+            if "region" not in df_scan:
+                df_scan["region"] = np.where(df_scan["ftype"].isin(OVERSEAS_FUND_TYPES), "海外", "A股")
+            has_rbsa = "rbsa" in df_scan.columns
+
+            def _parse_rbsa(v):
+                if isinstance(v, dict):
+                    return v
+                if isinstance(v, str):
+                    v = v.strip()
+                    if v.startswith("{"):
+                        try:
+                            return json.loads(v)
+                        except Exception:
+                            return {}
+                return {}
+
             held_codes = set(h["code"] for h in holdings_detail)
-            # S>70 且不在持仓
-            filt = df_scan[(pd.to_numeric(df_scan["S_total"], errors="coerce") > STRAT_BUY_TH) & (~df_scan["code"].isin(list(held_codes)))]
-            filt = filt.sort_values("S_total", ascending=False).head(free_slots*3)  # 多取 3 倍，现金不够时再筛
-            # 按 S 降序取前 free_slots
-            for _, r in filt.head(free_slots).iterrows():
-                candidates.append({
+            filt = df_scan[(pd.to_numeric(df_scan["S_total"], errors="coerce") > STRAT_BUY_TH)
+                           & (~df_scan["code"].isin(list(held_codes)))].copy()
+            if has_rbsa:
+                filt["rbsa"] = filt["rbsa"].map(_parse_rbsa)
+            else:
+                filt["rbsa"] = {}
+            rows_cand = []
+            for _, r in filt.iterrows():
+                rows_cand.append({
                     "code": str(r["code"]).zfill(6),
                     "name": r.get("name",""),
                     "S_total": float(r["S_total"]) if pd.notna(r["S_total"]) else None,
@@ -1246,11 +1274,87 @@ def rebalance():
                     "channel": r.get("channel",""),
                     "penalty_str": r.get("penalty_str","") or "",
                     "last_date": r.get("last_date",""),
+                    "region": r.get("region", "A股"),
+                    "rbsa": _parse_rbsa(r.get("rbsa")) if has_rbsa else {},
                 })
-            if not candidates:
+            rows_cand.sort(key=lambda c: -(c["S_total"] or 0))
+            a_rows = [c for c in rows_cand if c["region"] == "A股"]
+            ov_rows = [c for c in rows_cand if c["region"] == "海外"]
+            # 组合已有暴露 = 保留持仓 RBSA 暴露加总（被卖出的不占）
+            port_expo = {}
+            for h in keeps:
+                for k, v in (_safe_dict(h.get("rbsa")) or {}).items():
+                    try:
+                        fv = float(v)
+                    except (TypeError, ValueError):
+                        continue
+                    if fv > 0:
+                        port_expo[k] = port_expo.get(k, 0.0) + fv
+            # 持仓中已是"单一指数/主题"的（top1≥0.40）→ 其 top1 风格簇被占用 1 个名额
+            cluster_count = {}
+            for h in keeps:
+                rb = _safe_dict(h.get("rbsa"))
+                if not rb:
+                    continue
+                t1 = max(rb.items(), key=lambda kv: kv[1])
+                try:
+                    t1w = float(t1[1])
+                except (TypeError, ValueError):
+                    continue
+                if t1w >= STRAT_INDEX_TOP1:
+                    cluster_count[t1[0]] = cluster_count.get(t1[0], 0) + 1
+            # 贪心选取：市场内保持 S 降序；跨市场按 S 高者优先（海外受配额限制）；
+            # 重复度两档规则（详见 config）：
+            #   ① 指数级重复：候选 top1≥0.40 且该风格组合已实质持有 → 必排除（同指数）
+            #   ② 簇上限：同 top1 风格最多 STRAT_CLUSTER_MAX 只 → 第3只起顺位换风格
+            # 被排除的记入 dup_skips（前端展示原因）
+            ov_cap = min(STRAT_OVERSEAS_SLOT_CAP, free_slots)
+            ov_used = 0
+            ia = ib = 0
+            while len(candidates) < free_slots:
+                ca = a_rows[ia] if ia < len(a_rows) else None
+                co = ov_rows[ib] if (ib < len(ov_rows) and ov_used < ov_cap) else None
+                if ca is None and co is None:
+                    break
+                if co is not None and (ca is None or co["S_total"] >= (ca["S_total"] or 0)):
+                    cand = co; ib += 1; ov_used += 1
+                else:
+                    cand = ca; ia += 1
+                cand["overlap"] = None
+                cand["dup_reason"] = ""
+                if has_rbsa and cand.get("rbsa"):
+                    rb = cand["rbsa"]
+                    top1_style, top1_w = max(rb.items(), key=lambda kv: kv[1])
+                    cand["overlap"] = round(top1_w, 3)
+                    if top1_w >= STRAT_INDEX_TOP1 and port_expo.get(top1_style, 0.0) >= STRAT_INDEX_PORT:
+                        cand["dup_reason"] = f"同指数重复（{top1_style} 已持有）"
+                        dup_skips.append(cand)
+                        continue
+                    if cluster_count.get(top1_style, 0) >= STRAT_CLUSTER_MAX:
+                        cand["dup_reason"] = f"同风格重复（{top1_style} 已选{STRAT_CLUSTER_MAX}只）"
+                        dup_skips.append(cand)
+                        continue
+                    cluster_count[top1_style] = cluster_count.get(top1_style, 0) + 1
+                    # 已选候选也并入暴露池（供①的"已实质持有"判断）
+                    for k, v in rb.items():
+                        try:
+                            fv = float(v)
+                        except (TypeError, ValueError):
+                            continue
+                        if fv > 0:
+                            port_expo[k] = port_expo.get(k, 0.0) + fv
+                candidates.append(cand)
+            if not candidates and not dup_skips:
                 scan_msg = "扫描榜单中暂无 S>70 的候选（或均已持有），建议等待新扫描或放宽槽位"
             else:
-                scan_msg = f"已从扫描榜单挑选 Top{len(candidates)} 候选"
+                n_a = sum(1 for c in candidates if c["region"] == "A股")
+                n_ov = len(candidates) - n_a
+                scan_msg = (f"候选 {len(candidates)} 只（A股 {n_a} / 海外 {n_ov}，海外≤{STRAT_OVERSEAS_SLOT_CAP}槽）："
+                            f"市场内按 S 排序 + 组合重复度过滤"
+                            + (f"，排除 {len(dup_skips)} 只重复候选（同指数重复 / 同风格超{STRAT_CLUSTER_MAX}只）"
+                               if dup_skips else ""))
+                if not has_rbsa:
+                    scan_msg += "；⚠ 旧榜单无暴露数据，重复度过滤未生效（重新扫描后自动开启）"
         except Exception as e:
             scan_msg = f"读取扫描榜单失败：{str(e)[:80]}"
     elif free_slots==0 and not crisis_active:
@@ -1297,13 +1401,16 @@ def rebalance():
             c["target_pct"] = round(buy_amt/total_capital*100,2) if total_capital>0 else 0
             buys.append(c)
             cash_remaining = round(cash_remaining - buy_amt,2)
+            ov_txt = "🌐海外" if c.get("region") == "海外" else "🇨🇳A股"
+            dup_txt = f" · 与组合重叠 {c['overlap']*100:.0f}%" if c.get("overlap") is not None else ""
             orders.append({
                 "side": "BUY",
                 "code": c["code"],
                 "name": c["name"],
                 "amount": round(buy_amt,2),
-                "reason": f"S={c['S_total']:.1f} 候选买入 · {c.get('rating','')}",
+                "reason": f"S={c['S_total']:.1f} 候选买入 · {c.get('rating','')} · {ov_txt}{dup_txt}",
                 "S": c["S_total"],
+                "region": c.get("region", "A股"),
             })
         # 若现金有剩余，说明槽位未填满，提示
         if buys and cash_remaining > 1000:
@@ -1404,6 +1511,10 @@ def rebalance():
             cash_yield=STRAT_CASH_YIELD,
             trail_stop=STRAT_TRAIL_STOP,
             rebalance=STRAT_REBALANCE,
+            overseas_slot_cap=STRAT_OVERSEAS_SLOT_CAP,
+            overlap_skip=STRAT_OVERLAP_SKIP,
+            cluster_max=STRAT_CLUSTER_MAX,
+            index_top1=STRAT_INDEX_TOP1,
             cppi_rules=[
                 dict(dd=STRAT_CPPI_DD1, slots=STRAT_CPPI_SLOTS1),
                 dict(dd=STRAT_CPPI_DD2, slots=STRAT_CPPI_SLOTS2),
@@ -1421,6 +1532,7 @@ def rebalance():
         keeps=clean(keeps),
         buys=clean(buys),
         candidates=clean(candidates),
+        dup_skips=clean(dup_skips),
         allocation=clean(allocation),
         orders=clean(orders),
         warnings=warnings,

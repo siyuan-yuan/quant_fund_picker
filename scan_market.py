@@ -8,7 +8,7 @@ Step 2A — 全市场扫描器
   python scan_market.py --all-target      # 扫描全部目标类型(类型过滤+去C/E后的全量)
 """
 import argparse
-import time, datetime as dt, os
+import time, datetime as dt, os, json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
@@ -138,8 +138,13 @@ def main(right_n=400, left_n=150, workers=6, mode="default"):
             "F_value", "val_pct", "trend_ok", "trend_ma20", "bonus", "F_alpha",
             "ir_winrate", "down_capture", "F_momentum", "mom_4m1m", "mom_7m1m",
             "rank4", "rank7", "scale", "tenure_days", "is_passive", "penalty_str",
-            "water", "weights_mode", "last_date", "error"]
-    df[[k for k in keep if k in df]].to_csv(out_csv, index=False, encoding="utf-8-sig")
+            "water", "weights_mode", "last_date", "rbsa", "error"]
+    out = df[[k for k in keep if k in df]].copy()
+    # rbsa 为 dict → JSON 串落盘（买入候选重复度过滤用；读侧 json.loads 解析）
+    if "rbsa" in out:
+        out["rbsa"] = out["rbsa"].apply(
+            lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, dict) else "")
+    out.to_csv(out_csv, index=False, encoding="utf-8-sig")
 
     ok = df[df["error"].isna()]
     print(f"\n[完成] 深算 {len(df)} 只 | 成功 {len(ok)} 只 | 用时 {time.time()-t0:.0f}s")

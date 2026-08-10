@@ -116,8 +116,8 @@ INFER_AMBIGUOUS_SPAN_DAYS = 60
 
 
 # ================= 定投 (DCA) 生成与混合持仓反推 =================
-DCA_FREQ_LABELS = {"monthly": "每月", "biweekly": "每两周", "weekly": "每周"}
-_DCA_FREQ_DAYS = {"monthly": None, "biweekly": 14, "weekly": 7}
+DCA_FREQ_LABELS = {"daily": "每日", "monthly": "每月", "biweekly": "每两周", "weekly": "每周"}
+_DCA_FREQ_DAYS = {"daily": 1, "monthly": None, "biweekly": 14, "weekly": 7}
 # 反推时每月扣款日的候选日（覆盖发薪日/常见定投日；均 ≤28，避免大小月问题）
 DCA_DAY_OF_MONTH_GRID = (1, 5, 10, 15, 20, 25, 28)
 
@@ -142,7 +142,7 @@ def dca_dates(start, freq="monthly", end=None):
             if start <= d <= end:          # 双向钳制：首期不早于开始日，末期不晚于结束日
                 out.append(d.date())
         return out
-    step = _DCA_FREQ_DAYS.get(freq, 7)
+    step = _DCA_FREQ_DAYS.get(freq, 7)     # daily=1 / weekly=7 / biweekly=14
     return [d.date() for d in pd.date_range(start, end, freq=f"{step}D")]
 
 
@@ -260,6 +260,66 @@ def infer_dca(manual_lots, total_mv, adj, freqs=("monthly", "biweekly", "weekly"
             break
     out.update(ok=True, candidates=dedup)
     return out
+
+
+def exposure_overlap(cand_expo, port_expo, min_port_weight=0.15):
+    """候选基金与(组合+已选)的暴露相似度 0~1。
+
+    cand_expo: {"风格": 权重, ...}（候选基金 RBSA 暴露）
+    port_expo: {"风格": 权重, ...}（组合加总暴露，或已选候选的暴露）
+    相似度 = 候选暴露中落在"组合实质配置"风格上的权重占比：
+      - 组合实质配置 = 权重 ≥ min_port_weight 的风格（防止分散型/宽基持仓把
+        所有风格都"覆盖"一遍导致误杀一切候选）；
+      - 候选侧按全部正权重计（权重越集中在被覆盖的风格上，相似度越高）。
+    用于买入候选的"高度类似"排除（配合 exposure_dup 的两档规则使用）。
+    """
+    if not cand_expo or not port_expo:
+        return 0.0
+    cw = {}
+    for k, v in cand_expo.items():
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        if fv > 0:
+            cw[k] = fv
+    if not cw:
+        return 0.0
+    meaningful = {}
+    for k, v in port_expo.items():
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        if fv >= min_port_weight:
+            meaningful[k] = fv
+    if not meaningful:
+        return 0.0
+    covered = sum(v for k, v in cw.items() if k in meaningful)
+    return covered / sum(cw.values())
+
+
+def exposure_dup(cand_expo, port_expo, skip=0.70, index_top1=0.40, min_port_weight=0.15):
+    """候选是否与(组合+已选)高度类似 → (是否重复, 重叠度, 理由)。
+
+    两档规则（防误杀主动基金）：
+      Tier1 指数级重复: 候选是单一指数/主题产品(top1风格权重≥index_top1)且该风格
+        组合已实质持有(≥min_port_weight) → 重复（如 2 只纳指100、2 只白酒指数）。
+      Tier2 近同质主动基金: 整体暴露重叠 ≥ skip(0.70) → 重复（RBSA 轮廓几乎相同）。
+    返回的 overlap 即曝光给用户的重叠度。
+    """
+    if not cand_expo or not port_expo:
+        return False, 0.0, ""
+    cw = {k: float(v) for k, v in cand_expo.items() if v and float(v) > 0}
+    if not cw:
+        return False, 0.0, ""
+    top1_style, top1_w = max(cw.items(), key=lambda kv: kv[1])
+    if top1_w >= index_top1 and port_expo.get(top1_style, 0.0) >= min_port_weight:
+        return True, round(top1_w, 3), f"同指数重复（{top1_style} 已持有）"
+    ov = exposure_overlap(cw, port_expo, min_port_weight=min_port_weight)
+    if ov >= skip:
+        return True, round(ov, 3), "暴露高度重叠"
+    return False, round(ov, 3), ""
 
 
 def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15):
