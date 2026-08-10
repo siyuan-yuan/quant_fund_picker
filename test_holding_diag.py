@@ -190,6 +190,52 @@ def test_exposure_overlap():
     print("test_exposure_overlap OK")
 
 
+def test_clone_detection():
+    """Tier0 复制盘识别：RBSA 暴露逐格几乎一致的同策略孪生产品（两档重叠规则检不出）。
+
+    真实案例（2026-08-10 榜单）：持仓 001801 汇添富达欣 vs 候选 001417 汇添富医疗服务，
+    同一经理(张韡)、16 因子逐格差 ≤0.001、L1=0.003、近1年日收益相关 0.9997；
+    但 top1(全指医药)=0.225 < 0.40、聚合重叠度仅 0.225 → 原 Tier1/Tier2 均放行。
+    """
+    # 取自 scan_20260810 真实暴露（同经理孪生产品）
+    daxin = {"上证50": 0.068, "沪深300": 0.053, "中证500": 0.067, "中证1000": 0.055,
+             "创业板50": 0.047, "上证红利": 0.044, "全指材料": 0.072, "全指工业": 0.052,
+             "全指消费": 0.099, "全指医药": 0.225, "全指金融": 0.055, "全指信息": 0.041,
+             "纳斯达克100": 0.003, "标普500": 0.006, "恒生指数": 0.038, "恒生科技": 0.074}
+    yiliao = {"上证50": 0.067, "沪深300": 0.053, "中证500": 0.067, "中证1000": 0.055,
+              "创业板50": 0.047, "上证红利": 0.044, "全指材料": 0.073, "全指工业": 0.052,
+              "全指消费": 0.099, "全指医药": 0.225, "全指金融": 0.055, "全指信息": 0.041,
+              "纳斯达克100": 0.003, "标普500": 0.007, "恒生指数": 0.038, "恒生科技": 0.074}
+    refs = [("001801", "汇添富达欣混合A", daxin)]
+    # 两档重叠规则均检不出（复现缺陷前提）
+    assert not hd.exposure_dup(yiliao, daxin)[0]
+    # L1 距离 0.003，命中复制盘
+    l1 = hd.rbsa_l1_dist(yiliao, daxin)
+    assert abs(l1 - 0.003) < 1e-9, l1
+    ref, hit = hd.find_clone_exposure(yiliao, refs)
+    assert ref is not None and ref["code"] == "001801" and hit <= 0.02
+    # 反例①：同为医疗 top1 但暴露结构不同（医疗集中型主题基金）→ 非复制盘
+    med_conc = {"全指医药": 0.62, "全指消费": 0.18, "创业板50": 0.10, "沪深300": 0.05}
+    assert hd.find_clone_exposure(med_conc, refs)[0] is None
+    # 反例②：宽基暴露不同 → 非复制盘
+    broad = {"沪深300": 0.55, "上证50": 0.25, "中证500": 0.10, "上证红利": 0.05}
+    assert hd.find_clone_exposure(broad, refs)[0] is None
+    # 反例③：top1 相同(0.225)且残差分布相近但未达克隆精度（L1≈0.08）→ 不放行
+    near = dict(daxin); near["全指医药"] = 0.20; near["恒生科技"] = 0.114
+    assert hd.find_clone_exposure(near, refs)[0] is None
+    # 阈值与边界：更严阈值(0.001)下 001417 不命中；空输入安全
+    assert hd.find_clone_exposure(yiliao, refs, max_l1=0.001)[0] is None
+    assert hd.find_clone_exposure({}, refs)[0] is None
+    assert hd.find_clone_exposure(yiliao, [])[0] is None
+    assert hd.find_clone_exposure(yiliao, None)[0] is None
+    assert hd.rbsa_l1_dist(None, daxin) is None
+    # 多个参照时返回距离最近者
+    refs2 = [("999999", "不相关", broad), ("001801", "汇添富达欣混合A", daxin)]
+    ref2, _ = hd.find_clone_exposure(yiliao, refs2)
+    assert ref2["code"] == "001801"
+    print("test_clone_detection OK")
+
+
 def test_cppi_tier_sim():
     # 全路径: 触发-15(6槽) → 触发-20(3槽) → 回补-18(6槽) → 新高(满槽)
     v = np.array([100.0, 88.0, 90.0, 84.0, 86.0, 78.0, 80.0, 81.0, 82.0, 83.0, 84.0, 86.0, 100.5])
@@ -358,6 +404,6 @@ def test_webapp_endpoint():
 
 if __name__ == "__main__":
     for fn in [test_adj_series, test_infer_entry_date, test_infer_ambiguous, test_fund_stop_diag, test_fund_lots_diag, test_portfolio_cppi_curve_input, test_portfolio_cppi_auto_start,
-               test_dca_dates_lots_infer, test_exposure_overlap, test_cppi_tier_sim, test_portfolio_cppi, test_webapp_endpoint]:
+               test_dca_dates_lots_infer, test_exposure_overlap, test_clone_detection, test_cppi_tier_sim, test_portfolio_cppi, test_webapp_endpoint]:
         fn()
     print("\nALL TESTS PASSED")

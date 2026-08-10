@@ -322,6 +322,60 @@ def exposure_dup(cand_expo, port_expo, skip=0.70, index_top1=0.40, min_port_weig
     return False, round(ov, 3), ""
 
 
+def rbsa_l1_dist(a_expo, b_expo):
+    """两条 RBSA 暴露向量的 L1 距离（Σ|a_k − b_k|，键取并集、缺省补 0）。
+
+    用于"复制盘"识别：同一团队/同一策略的孪生产品，逐格暴露几乎一致
+    （如 001801 汇添富达欣 vs 001417 汇添富医疗服务：L1≈0.003，
+    近1年日收益相关 0.9997），而仅同风格的不同基金 L1 通常 ≥0.05。
+    返回值恒为 float；任一输入为空返回 None（表示无法判定）。
+    """
+    if not a_expo or not b_expo:
+        return None
+    def _clean(expo):
+        out = {}
+        for k, v in (expo or {}).items():
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                continue
+            out[k] = fv
+        return out
+    a, b = _clean(a_expo), _clean(b_expo)
+    if not a or not b:
+        return None
+    keys = set(a) | set(b)
+    return float(sum(abs(a.get(k, 0.0) - b.get(k, 0.0)) for k in keys))
+
+
+def find_clone_exposure(cand_expo, ref_list, max_l1=0.02):
+    """候选是否与参照池中的某只基金构成"复制盘"（暴露轮廓逐格几乎一致）。
+
+    与 exposure_dup 的"聚合暴露重叠"思路互补：这里做逐对(pairwise)向量距离，
+    专检同策略孪生产品——它们的 top1 往往未达指数级阈值(≥0.40)，
+    聚合重叠度也不高(弥散型主动基)，但 16 因子暴露逐格相同。
+
+    cand_expo: 候选基金 RBSA 暴露 dict
+    ref_list:  [(code, name, expo), ...] 持仓 + 已选候选
+    max_l1:    判定阈值（默认对齐 config.STRAT_CLONE_L1=0.02）
+    返回: (ref_dict, l1) —— 命中的最近参照；未命中返回 (None, None)
+    """
+    best_ref, best_l1 = None, None
+    for ref in ref_list or []:
+        try:
+            code, name, expo = ref
+        except (TypeError, ValueError):
+            continue
+        l1 = rbsa_l1_dist(cand_expo, expo)
+        if l1 is None:
+            continue
+        if best_l1 is None or l1 < best_l1:
+            best_ref, best_l1 = {"code": code, "name": name}, l1
+    if best_l1 is not None and best_l1 <= max_l1:
+        return best_ref, best_l1
+    return None, None
+
+
 def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15):
     """多笔买入/卖出 → 单基金持仓诊断（FIFO 成本 + 持仓市值曲线 + 入场高点回撤）。
 
