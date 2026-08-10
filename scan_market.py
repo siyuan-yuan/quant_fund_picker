@@ -113,6 +113,7 @@ def main(right_n=400, left_n=150, workers=6, mode="default"):
     t0 = time.time()
     pool = build_universe(right_n, left_n, mode=mode)
     chan = dict(zip(pool["基金代码"], pool["channel"]))
+    reg = dict(zip(pool["基金代码"], pool["region"]))
     rows = []
     codes = pool["基金代码"].tolist()
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -125,6 +126,7 @@ def main(right_n=400, left_n=150, workers=6, mode="default"):
                 r = {"code": c, "name": c, "error": str(e)[:100]}
                 print(f"    !! {c}: {r['error']}")
             r["channel"] = chan.get(c)
+            r["region"] = reg.get(c, "A股")
             rows.append(r)
             if i % 50 == 0:
                 print(f"    ... deep-scored {i}/{len(codes)} ({time.time()-t0:.0f}s)", flush=True)
