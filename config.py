@@ -158,9 +158,11 @@ STRAT_STYLE_CAP = 0.35       # 组合级单一RBSA板块暴露上限 (批判清�
 STRAT_OVERLAP_SKIP = 0.70
 STRAT_INDEX_TOP1 = 0.40
 STRAT_INDEX_PORT = 0.15
-# 规则②: 同 top1 风格(簇)最多允许 STRAT_CLUSTER_MAX 只 —— 同风格最多 1 只,
-#   第 2 只起顺位推荐其它风格的基金（强分散）
-STRAT_CLUSTER_MAX = 1
+# 规则②: 同 top1 风格(簇)最多允许 STRAT_CLUSTER_MAX 只 —— 同风格最多 2 只,
+#   第 3 只起顺位推荐其它风格的基金（强分散；与 docs/016452与持仓诊断分析.md 一致）
+#   2026-08-10 实测：簇上限 1 在 S>70 池(56只信息风格)中仅能选 3 只即占满 10 槽的 30%，槽位利用率过低；
+#   2 可选 5 只（1海外+2信息+2医药），在保持风格分散的同时显著提升槽位利用率与 Alpha 捕获
+STRAT_CLUSTER_MAX = 2
 # 海外(美股等QDII)候选最多占用的槽位数: 10槽中最多3槽(≈30%)——跨市场配置上限,
 # 防止"全是纳指"或"A股/海外信号都好"时单边堆满
 STRAT_OVERSEAS_SLOT_CAP = 3

@@ -1314,10 +1314,12 @@ def rebalance():
                 if t1w >= STRAT_INDEX_TOP1:
                     cluster_count[t1[0]] = cluster_count.get(t1[0], 0) + 1
             # 贪心选取：市场内保持 S 降序；跨市场按 S 高者优先（海外受配额限制）；
-            # 重复度两档规则（详见 config）：
-            #   ① 指数级重复：候选 top1≥0.40 且该风格组合已实质持有 → 必排除（同指数）
-            #   ② 簇上限：同 top1 风格最多 STRAT_CLUSTER_MAX 只 → 第2只起顺位换风格
-            # 被排除的记入 dup_skips（前端展示原因）
+            # 重复度三档规则（V3.9.1 华尔街级增强，持仓全量参与）：
+            #   ① 指数级重复：候选 top1≥0.40 且该风格组合已实质持有(≥0.15) → 必排除（同指数，如 2 只纳指100）
+            #   ② 簇上限：同 top1 风格最多 STRAT_CLUSTER_MAX 只(现为 2) → 第 3 只起顺位换风格（防单风格堆积）
+            #   ③ 整体相似度：候选 RBSA 向量与组合（含已选）整体重叠 ≥0.70 → 排除（近同质主动基金，holding_diag.exposure_dup）
+            # 全部三档均与“已持仓的保留仓(keep)”+“已选候选”累计暴露对比，绝非仅候选内自比
+            # 被排除的记入 dup_skips（前端展示代码/重叠度/原因，便于审计）
             ov_cap = min(STRAT_OVERSEAS_SLOT_CAP, free_slots)
             ov_used = 0
             ia = ib = 0
@@ -1334,18 +1336,37 @@ def rebalance():
                 cand["dup_reason"] = ""
                 if has_rbsa and cand.get("rbsa"):
                     rb = cand["rbsa"]
+                    # ——— ① 指数级重复（与持仓/已选的实质持有对比，阈值见 config） ———
                     top1_style, top1_w = max(rb.items(), key=lambda kv: kv[1])
                     cand["overlap"] = round(top1_w, 3)
                     if top1_w >= STRAT_INDEX_TOP1 and port_expo.get(top1_style, 0.0) >= STRAT_INDEX_PORT:
                         cand["dup_reason"] = f"同指数重复（{top1_style} 已持有）"
+                        # 暴露重叠度按 holding_diag 标准回填（top1 权重即为该档重叠度）
                         dup_skips.append(cand)
                         continue
+                    # ——— ② 簇上限（同风格数量控制） ———
                     if cluster_count.get(top1_style, 0) >= STRAT_CLUSTER_MAX:
                         cand["dup_reason"] = f"同风格重复（{top1_style} 已选{STRAT_CLUSTER_MAX}只）"
                         dup_skips.append(cand)
                         continue
+                    # ——— ③ 整体 RBSA 相似度（华尔街级：向量级去重，防“换皮”同质基金） ———
+                    # 仅对非指数型（top1<0.40）的分散型主动基金生效：若其整体暴露与组合重叠≥0.70，
+                    # 说明 RBSA 轮廓几乎重合，即使顶格风格不同也属同质（holding_diag.exposure_dup 第二档）
+                    # 例：两只全指信息 22%+创业板 17% 的科技基金，重叠 0.65<0.70 放行；0.85 则拦截
+                    try:
+                        is_dup, ov, reason = holding_diag.exposure_dup(
+                            rb, port_expo, skip=STRAT_OVERLAP_SKIP,
+                            index_top1=STRAT_INDEX_TOP1, min_port_weight=STRAT_INDEX_PORT)
+                        # exposure_dup 第一档已在 ① 中处理，此处仅关心第二档“暴露高度重叠”
+                        if is_dup and "同指数" not in reason:
+                            cand["overlap"] = round(ov, 3)
+                            cand["dup_reason"] = f"暴露高度重叠（{ov*100:.0f}%）"
+                            dup_skips.append(cand)
+                            continue
+                    except Exception:
+                        pass
+                    # 通过全部三档 → 正式入选，并累加暴露与簇计数供后续候选对比
                     cluster_count[top1_style] = cluster_count.get(top1_style, 0) + 1
-                    # 已选候选也并入暴露池（供①的"已实质持有"判断）
                     for k, v in rb.items():
                         try:
                             fv = float(v)
