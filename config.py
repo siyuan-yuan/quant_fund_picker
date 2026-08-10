@@ -58,6 +58,20 @@ OVERSEAS_SRCS = {"us_sina", "hk_sina"}
 OVERSEAS_NAMES = {x[2] for x in RBSA_INDICES if x[0] in OVERSEAS_SRCS}
 # 海外类型基金的"借壳"判定: 统一面板预筛境外权重≥此值 → 切换纯境外面板
 OVERSEAS_SWITCH_THRESHOLD = 0.25
+# 海外/跨境基金类型集合（用于榜单分市场 A股/海外 与跨市场可比性提示）
+# 说明: 扫描池目前只并入"指数型-海外股票"(被动QDII指数)；主动型QDII(QDII-*混合/股票)
+# 仍被排除在扫描外, 但用户自选/持仓里可能持有 → 分市场标签按完整集合归类。
+OVERSEAS_FUND_TYPES = {"指数型-海外股票", "QDII-普通股票", "QDII-混合偏股", "QDII-混合灵活",
+                       "QDII-混合平衡", "QDII-混合债", "QDII-纯债", "QDII-商品",
+                       "QDII-FOF", "QDII-REITs"}
+# ============ 扫描池: 海外指数(QDII)通道 ============
+# 打分引擎自 V3.3 起已完整支持境外基金(境外腿RBSA面板 + 纯境外面板 panel_mode=overseas
+# + 估值盲区标记 valuation_blind)，但扫描白名单历史上只含 A 股四类基金类型，
+# 导致"指数型-海外股票"(被动QDII指数, 如纳斯达克100/标普500/德国DAX等)在全部扫描模式
+# 下都进不了池 —— 单基透视/批量评分可以, 榜单永远没有。
+# True: 把"指数型-海外股票"并入扫描目标类型(约+91只近3年完整主池基金, 全部为被动指数)。
+# 主动型QDII(QDII-普通股票/混合偏股等, 风格归因差)仍保持排除, 不并入。
+SCAN_INCLUDE_OVERSEAS_INDEX = True
 
 # ============ RBSA 参数 ============
 RBSA_WINDOW = 60                 # 主窗口: 近60个交易日
@@ -141,6 +155,18 @@ STRAT_CPPI_HYSTERESIS = 0.02
 STRAT_HI_WATER = 0.90        # 大盘水位≥90% → 持仓侧强制瘦身（历史变体中多为休眠）
 STRAT_HI_WATER_SLOTS = 5
 STRAT_STYLE_CAP = 0.35       # 组合级单一RBSA板块暴露上限 (批判清单⑧, 批算页警示)
+# ---- V3.9 买入候选: 重复度过滤 + 海外配额 ----
+# 规则①: 指数级重复 —— 候选 top1 风格权重≥0.40(单一指数/主题产品) 且该风格组合
+#   已实质持有(≥0.15) → 必排除（如 2 只纳指100、2 只白酒指数）
+STRAT_OVERLAP_SKIP = 0.70
+STRAT_INDEX_TOP1 = 0.40
+STRAT_INDEX_PORT = 0.15
+# 规则②: 同 top1 风格(簇)最多允许 STRAT_CLUSTER_MAX 只 —— 同风格不同经理的
+#   主动基金允许最多2只, 第3只起顺位推荐其它风格的基金
+STRAT_CLUSTER_MAX = 2
+# 海外(美股等QDII)候选最多占用的槽位数: 10槽中最多3槽(≈30%)——跨市场配置上限,
+# 防止"全是纳指"或"A股/海外信号都好"时单边堆满
+STRAT_OVERSEAS_SLOT_CAP = 3
 # 已数据否决、归档封死的执行层方案:
 #   MA20破位离场 / 15%移动止损 / 提前<60卖 / 单纯截面前10%强制买 / 单纯水位高估降仓
 

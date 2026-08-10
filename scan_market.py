@@ -8,7 +8,7 @@ Step 2A — 全市场扫描器
   python scan_market.py --all-target      # 扫描全部目标类型(类型过滤+去C/E后的全量)
 """
 import argparse
-import time, datetime as dt, os
+import time, datetime as dt, os, json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
@@ -17,10 +17,21 @@ import akshare as ak
 
 import provider
 from engine import score_fund, finalize
-from config import OUTPUT_DIR, CACHE_DIR, YOUNG_TOP_N
+from config import (OUTPUT_DIR, CACHE_DIR, YOUNG_TOP_N, SCAN_INCLUDE_OVERSEAS_INDEX,
+                    OVERSEAS_FUND_TYPES)
 
+# 扫描目标类型白名单（A股四类 + 可选海外指数QDII通道）
+# 016452 南方纳斯达克100(QDII)A 等"指数型-海外股票"此前因此白名单被排除在全部扫描模式外，
+# 但引擎本身支持境外评分(panel_mode=overseas) → 由 SCAN_INCLUDE_OVERSEAS_INDEX 控制并入。
 TARGET_TYPES = {"混合型-偏股", "股票型", "指数型-股票", "混合型-灵活"}
+if SCAN_INCLUDE_OVERSEAS_INDEX:
+    TARGET_TYPES = TARGET_TYPES | {"指数型-海外股票"}
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+def _region(ftypes) -> pd.Series:
+    """基金类型 → 市场标签（A股/海外），供榜单分市场视图。"""
+    return np.where(ftypes.isin(OVERSEAS_FUND_TYPES), "海外", "A股")
 
 
 def _load_rank_table() -> pd.DataFrame:
@@ -42,6 +53,10 @@ def _load_target_funds() -> pd.DataFrame:
     df = df[df["基金类型"].isin(TARGET_TYPES)].copy()
     # 剔除C/E类份额(同策略重复), 保留A或基础份额
     df = df[~df["基金简称"].str.strip().str.endswith(("C", "E"))].copy()
+    if SCAN_INCLUDE_OVERSEAS_INDEX:
+        n_ovs = int((df["基金类型"] == "指数型-海外股票").sum())
+        print(f"[漏斗] 海外指数QDII通道已开启: 纳入 {n_ovs} 只指数型-海外股票"
+              f"（含 016452 南方纳斯达克100(QDII)A 等，config.SCAN_INCLUDE_OVERSEAS_INDEX）")
     for c in ["近3年", "近1年", "近6月"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -62,6 +77,7 @@ def build_universe(right_n=400, left_n=150, mode="default") -> pd.DataFrame:
     if mode == "all_main":
         pool = main_df.copy()
         pool["channel"] = "全量-主池"
+        pool["region"] = _region(pool["基金类型"])
         pool = pool.drop_duplicates("基金代码").reset_index(drop=True)
         print(f"[漏斗] 全主池模式 | 近3年完整主池 {len(pool)}")
         return pool
@@ -72,6 +88,7 @@ def build_universe(right_n=400, left_n=150, mode="default") -> pd.DataFrame:
         pool = df.copy()
         pool["channel"] = np.where(main_mask, "全量-主池",
                              np.where(young_mask, "新星", "全量-次新/缺历史"))
+        pool["region"] = _region(pool["基金类型"])
         pool = pool.drop_duplicates("基金代码").reset_index(drop=True)
         print(f"[漏斗] 全目标类型模式 | 类型过滤+去C/E {len(pool)} | "
               f"主池 {int(main_mask.sum())} | 新星 {int(young_mask.sum())} | "
@@ -86,6 +103,7 @@ def build_universe(right_n=400, left_n=150, mode="default") -> pd.DataFrame:
     left_pool = main_df[(main_df["近1年"] < 0) & (~main_df.index.isin(right.index))]
     left = left_pool.nsmallest(left_n, "近1年").assign(channel="左侧")
     pool = pd.concat([right, left, ypool]).drop_duplicates("基金代码")
+    pool["region"] = _region(pool["基金类型"])
     print(f"[漏斗] 类型过滤后 {len(main_df)} | 右侧池 {len(right)} | 左侧池 {len(left)} | "
           f"🌱新星池 {len(ypool)} | 合计 {len(pool)}")
     return pool
@@ -95,6 +113,7 @@ def main(right_n=400, left_n=150, workers=6, mode="default"):
     t0 = time.time()
     pool = build_universe(right_n, left_n, mode=mode)
     chan = dict(zip(pool["基金代码"], pool["channel"]))
+    reg = dict(zip(pool["基金代码"], pool["region"]))
     rows = []
     codes = pool["基金代码"].tolist()
     with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -107,6 +126,7 @@ def main(right_n=400, left_n=150, workers=6, mode="default"):
                 r = {"code": c, "name": c, "error": str(e)[:100]}
                 print(f"    !! {c}: {r['error']}")
             r["channel"] = chan.get(c)
+            r["region"] = reg.get(c, "A股")
             rows.append(r)
             if i % 50 == 0:
                 print(f"    ... deep-scored {i}/{len(codes)} ({time.time()-t0:.0f}s)", flush=True)
@@ -114,12 +134,17 @@ def main(right_n=400, left_n=150, workers=6, mode="default"):
     df = finalize(rows)
     stamp = dt.date.today().strftime("%Y%m%d")
     out_csv = f"{OUTPUT_DIR}/scan_{stamp}.csv"
-    keep = ["code", "name", "ftype", "channel", "S_total", "rating",
+    keep = ["code", "name", "ftype", "region", "channel", "S_total", "rating",
             "F_value", "val_pct", "trend_ok", "trend_ma20", "bonus", "F_alpha",
             "ir_winrate", "down_capture", "F_momentum", "mom_4m1m", "mom_7m1m",
             "rank4", "rank7", "scale", "tenure_days", "is_passive", "penalty_str",
-            "water", "weights_mode", "last_date", "error"]
-    df[[k for k in keep if k in df]].to_csv(out_csv, index=False, encoding="utf-8-sig")
+            "water", "weights_mode", "last_date", "rbsa", "error"]
+    out = df[[k for k in keep if k in df]].copy()
+    # rbsa 为 dict → JSON 串落盘（买入候选重复度过滤用；读侧 json.loads 解析）
+    if "rbsa" in out:
+        out["rbsa"] = out["rbsa"].apply(
+            lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, dict) else "")
+    out.to_csv(out_csv, index=False, encoding="utf-8-sig")
 
     ok = df[df["error"].isna()]
     print(f"\n[完成] 深算 {len(df)} 只 | 成功 {len(ok)} 只 | 用时 {time.time()-t0:.0f}s")

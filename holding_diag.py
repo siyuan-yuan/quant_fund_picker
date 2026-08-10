@@ -71,36 +71,255 @@ def parse_user_inputs(rec):
     return out
 
 
-def infer_entry_date(adj, ret_pct, tol_base=0.03):
+def infer_entry_date(adj, ret_pct, tol_base=0.03, return_info=False):
     """由持有收益率反推买入日。
 
     复权净值比 adj_now/adj_d - 1 应 ≈ 持有收益率。找误差最小的日期；
     误差容忍 max(3pp, 3×最小误差+0.5pp)，多个近优候选取**最晚**（最近期
     入场，对止损提示最不易误报；如有多笔/定投，近似为最近一笔）。
     返回 (date, err)；无匹配返回 (None, None)。
+    return_info=True 时返回 (date, err, span_days)：
+      span_days = 近优候选日期区间的跨度(天)。多笔买入/定投/中途卖出时，同一
+      持有收益率往往在净值曲线上有多个相距甚远的匹配日 → 反推的单一日期的
+      "入场高点回撤"不可靠，调用方应提示用户改用操作台账(每笔买卖)精确诊断。
     """
     if ret_pct is None or adj is None or len(adj) < 10:
-        return None, None
+        return (None, None, 0) if return_info else (None, None)
     try:
         r = float(ret_pct) / 100.0
     except Exception:
-        return None, None
+        return (None, None, 0) if return_info else (None, None)
     now = float(adj.iloc[-1])
     if now <= 0:
-        return None, None
+        return (None, None, 0) if return_info else (None, None)
     err = now / adj.values - (1.0 + r)
     abs_err = np.abs(err)
     i_min = int(np.nanargmin(abs_err))
     min_err = float(abs_err[i_min])
     if min_err > tol_base:
-        return None, None
+        return (None, None, 0) if return_info else (None, None)
     # 候选 = 误差 ≤ min(最优误差+2pp, 3pp) 的日期，取其中**最晚**者：
     # 净值走平/多笔买入时存在多个同日收益率的日期，按最近一笔近似（对止损判断偏保守不误报）
     cand = np.where(abs_err <= min(min_err + 0.02, tol_base))[0]
     if len(cand) == 0:
         cand = np.array([i_min])
     i = int(cand.max())
+    span = int((adj.index[int(cand.max())] - adj.index[int(cand.min())]).days) if len(cand) > 1 else 0
+    if return_info:
+        return adj.index[i], float(err[i]), span
     return adj.index[i], float(err[i])
+
+
+# 反推入场日不可靠阈值：近优候选日期跨度超过该天数 → 判定"疑似多笔/定投/中途卖出"
+# （此时只输入一个总市值+收益率的单日近似，入场高点回撤会系统性失真）
+INFER_AMBIGUOUS_SPAN_DAYS = 60
+
+
+# ================= 定投 (DCA) 生成与混合持仓反推 =================
+DCA_FREQ_LABELS = {"daily": "每日", "monthly": "每月", "biweekly": "每两周", "weekly": "每周"}
+_DCA_FREQ_DAYS = {"daily": 1, "monthly": None, "biweekly": 14, "weekly": 7}
+# 反推时每月扣款日的候选日（覆盖发薪日/常见定投日；均 ≤28，避免大小月问题）
+DCA_DAY_OF_MONTH_GRID = (1, 5, 10, 15, 20, 25, 28)
+
+
+def dca_dates(start, freq="monthly", end=None):
+    """定投扣款日序列（自然日，升序）。
+
+    monthly: 每月与开始日同一天；该月无此日(如31号)取当月最后一天。
+    end 缺省 = 今天；返回 ≥ start 且 ≤ end 的期次。
+    """
+    start = pd.Timestamp(str(start)).normalize()
+    end = pd.Timestamp(str(end)).normalize() if end else pd.Timestamp.today().normalize()
+    if start > end:
+        return []
+    if freq == "monthly":
+        # 锚定"开始日所在月"的1号，保证首月期次不丢（如 1/31 开始 → 首期=1/31）
+        anchor = start.to_period("M").start_time
+        months = pd.date_range(anchor, end, freq="MS")
+        out = []
+        for m in months:
+            d = m + pd.Timedelta(days=min(start.day, m.days_in_month) - 1)
+            if start <= d <= end:          # 双向钳制：首期不早于开始日，末期不晚于结束日
+                out.append(d.date())
+        return out
+    step = _DCA_FREQ_DAYS.get(freq, 7)     # daily=1 / weekly=7 / biweekly=14
+    return [d.date() for d in pd.date_range(start, end, freq=f"{step}D")]
+
+
+def dca_lots(start, amount, freq="monthly", end=None, adj=None):
+    """生成定投买入记录 [(date_str, 'buy', amount), ...]。
+
+    adj 提供时裁剪到净值覆盖范围 [首个净值日, 最新净值日]（早于成立日的期次丢弃）。
+    """
+    amount = float(amount)
+    if amount <= 0:
+        return []
+    dates = dca_dates(start, freq, end)
+    if adj is not None and len(adj):
+        lo, hi = adj.index[0].date(), adj.index[-1].date()
+        dates = [d for d in dates if lo <= d <= hi]
+    return [(str(d), "buy", amount) for d in dates]
+
+
+def infer_dca(manual_lots, total_mv, adj, freqs=("monthly", "biweekly", "weekly"),
+              top_n=5, max_history_days=10 * 365):
+    """混合持仓反推定投参数：已知当前总市值 + 主动买入/卖出记录 → 反推(频率, 开始日, 每期金额)。
+
+    manual_lots: [(date, side, amount), ...]（定投之外的主动买卖，卖出为负贡献）。
+    原理: 定投贡献市值 V_d = 总市值 - 主动记录贡献；对每个候选(频率, 开始日)，
+    每期金额 a = V_d / Σ(now/adj(扣款日)) 可精确求解；再按金额整数度(百元整)、
+    频率先验(每月>两周>每周)、期数打分排序 → 返回 top_n 候选。
+    返回 dict: {ok, reason, candidates:[{freq, freq_label, start_date, amount,
+                periods, total_invested, score}...]}
+    """
+    out = dict(ok=False, reason="", candidates=[])
+    if total_mv is None or float(total_mv) <= 0:
+        out["reason"] = "需要当前总市值（支付宝持仓页可查）"
+        return out
+    if adj is None or len(adj) < 60:
+        out["reason"] = "净值历史不足，无法反推定投参数"
+        return out
+    now = float(adj.iloc[-1])
+    if now <= 0:
+        out["reason"] = "净值数据异常"
+        return out
+    idx = adj.index
+    n = len(idx)
+
+    def _mv(d, side, amt):
+        pos = int(min(max(int(idx.searchsorted(pd.Timestamp(d))), 0), n - 1))
+        return (amt if side == "buy" else -amt) * now / float(adj.iloc[pos])
+
+    v_manual = sum(_mv(d, s, a) for d, s, a in manual_lots if a and a > 0)
+    v_dca = float(total_mv) - v_manual
+    if v_dca < -max(1.0, 0.01 * float(total_mv)):
+        out["reason"] = (f"主动买卖按净值折算的市值约 {v_manual:,.0f} 元已超过总市值 "
+                         f"{float(total_mv):,.0f} 元，无法反推定投（请核对主动买入记录或市值）")
+        return out
+    if v_dca <= 0:
+        out["reason"] = "总市值≈主动买卖市值，未检测到定投贡献，无需反推"
+        return out
+    lo_date = max(idx[0].date(), (pd.Timestamp.today() - pd.Timedelta(days=max_history_days)).date())
+    hi_date = idx[-1].date()
+    if lo_date > hi_date:
+        out["reason"] = "净值历史不足"
+        return out
+
+    freq_prior = {"monthly": 1.0, "biweekly": 0.85, "weekly": 0.70}
+    common_amounts = (500, 1000, 1500, 2000, 3000, 5000, 8000, 10000)
+    cands = []
+    for freq in freqs:
+        if freq == "monthly":
+            starts = []
+            for m in pd.date_range(pd.Timestamp(lo_date), pd.Timestamp(hi_date), freq="MS"):
+                for day in DCA_DAY_OF_MONTH_GRID:
+                    d = m + pd.Timedelta(days=min(day, m.days_in_month) - 1)
+                    if d.date() >= lo_date:
+                        starts.append(d)
+        else:
+            starts = pd.date_range(lo_date, hi_date, freq=f"{_DCA_FREQ_DAYS.get(freq, 7)}D")
+        for s in starts:
+            dates = dca_dates(s, freq, hi_date)
+            if len(dates) < 2:
+                continue
+            pos = np.clip(idx.searchsorted(pd.DatetimeIndex(dates)), 0, n - 1)
+            W = float(np.sum(now / adj.values[pos]))
+            if W <= 0:
+                continue
+            a = v_dca / W
+            if a < 10 or a > 500000:
+                continue
+            # 金额整数度: 离整百越近越可信（定投金额习惯整百）→ 整百=1.0, 半百=0.0
+            frac = (a / 100.0) - np.floor(a / 100.0)
+            round_score = 1.0 - 2.0 * min(frac, 1.0 - frac)
+            score = round_score * freq_prior.get(freq, 1.0)
+            if any(abs(a - c) / c < 0.01 for c in common_amounts):
+                score += 0.05 * freq_prior.get(freq, 1.0)
+            k = len(dates)
+            if k < 3:
+                score *= 0.8
+            cands.append(dict(freq=freq, freq_label=DCA_FREQ_LABELS.get(freq, freq),
+                              start_date=str(s.date()), amount=round(a, 2),
+                              periods=k, total_invested=round(a * k, 2),
+                              score=round(score, 4)))
+    if not cands:
+        out["reason"] = "未找到合理的定投参数组合（请核对市值与主动记录）"
+        return out
+    cands.sort(key=lambda c: -c["score"])
+    dedup = []
+    for c in cands:
+        dup = False
+        for d0 in dedup:
+            if (c["freq"] == d0["freq"] and abs(c["amount"] - d0["amount"]) / d0["amount"] < 0.02
+                    and abs((pd.Timestamp(c["start_date"]) - pd.Timestamp(d0["start_date"])).days) <= 31):
+                dup = True
+                break
+        if not dup:
+            dedup.append(c)
+        if len(dedup) >= top_n:
+            break
+    out.update(ok=True, candidates=dedup)
+    return out
+
+
+def exposure_overlap(cand_expo, port_expo, min_port_weight=0.15):
+    """候选基金与(组合+已选)的暴露相似度 0~1。
+
+    cand_expo: {"风格": 权重, ...}（候选基金 RBSA 暴露）
+    port_expo: {"风格": 权重, ...}（组合加总暴露，或已选候选的暴露）
+    相似度 = 候选暴露中落在"组合实质配置"风格上的权重占比：
+      - 组合实质配置 = 权重 ≥ min_port_weight 的风格（防止分散型/宽基持仓把
+        所有风格都"覆盖"一遍导致误杀一切候选）；
+      - 候选侧按全部正权重计（权重越集中在被覆盖的风格上，相似度越高）。
+    用于买入候选的"高度类似"排除（配合 exposure_dup 的两档规则使用）。
+    """
+    if not cand_expo or not port_expo:
+        return 0.0
+    cw = {}
+    for k, v in cand_expo.items():
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        if fv > 0:
+            cw[k] = fv
+    if not cw:
+        return 0.0
+    meaningful = {}
+    for k, v in port_expo.items():
+        try:
+            fv = float(v)
+        except (TypeError, ValueError):
+            continue
+        if fv >= min_port_weight:
+            meaningful[k] = fv
+    if not meaningful:
+        return 0.0
+    covered = sum(v for k, v in cw.items() if k in meaningful)
+    return covered / sum(cw.values())
+
+
+def exposure_dup(cand_expo, port_expo, skip=0.70, index_top1=0.40, min_port_weight=0.15):
+    """候选是否与(组合+已选)高度类似 → (是否重复, 重叠度, 理由)。
+
+    两档规则（防误杀主动基金）：
+      Tier1 指数级重复: 候选是单一指数/主题产品(top1风格权重≥index_top1)且该风格
+        组合已实质持有(≥min_port_weight) → 重复（如 2 只纳指100、2 只白酒指数）。
+      Tier2 近同质主动基金: 整体暴露重叠 ≥ skip(0.70) → 重复（RBSA 轮廓几乎相同）。
+    返回的 overlap 即曝光给用户的重叠度。
+    """
+    if not cand_expo or not port_expo:
+        return False, 0.0, ""
+    cw = {k: float(v) for k, v in cand_expo.items() if v and float(v) > 0}
+    if not cw:
+        return False, 0.0, ""
+    top1_style, top1_w = max(cw.items(), key=lambda kv: kv[1])
+    if top1_w >= index_top1 and port_expo.get(top1_style, 0.0) >= min_port_weight:
+        return True, round(top1_w, 3), f"同指数重复（{top1_style} 已持有）"
+    ov = exposure_overlap(cw, port_expo, min_port_weight=min_port_weight)
+    if ov >= skip:
+        return True, round(ov, 3), "暴露高度重叠"
+    return False, round(ov, 3), ""
 
 
 def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15):
@@ -248,14 +467,15 @@ def fund_stop_diag(rec, nav_df, stop=0.20, warn_dd=0.15):
         last_date = pd.Timestamp(nav_df["date"].iloc[-1]).date()
     out = dict(
         computable=False, status="no_data", reason="",
-        entry_date=None, entry_nav=None, inferred=False, days_held=None,
-        peak=None, peak_date=None, dd=None, trigger_nav=None,
+        entry_date=None, entry_nav=None, inferred=False, infer_ambiguous=False,
+        days_held=None, peak=None, peak_date=None, dd=None, trigger_nav=None,
         ret_held=None, ret_user=ui["ret_pct"], stop=float(stop), last_date=last_date,
         amount=ui["amount"], cost=ui["cost"],
     )
     if len(adj) < 30:
         out["reason"] = "净值历史不足，无法计算入场高点回撤"
         return out
+    ambig_reason = None
     entry = ui["buy_date"]
     if entry is None:
         # 用持有收益率反推入场日；未给收益率但给了市值+成本 → 隐含收益率 = 市值/成本-1
@@ -267,12 +487,22 @@ def fund_stop_diag(rec, nav_df, stop=0.20, warn_dd=0.15):
             out["status"] = "need_entry"
             out["reason"] = "缺少买入日期/成本/收益率，无法定位入场高点（输入 代码 市值 买入日期，或 代码 市值 收益率%，或 代码 市值 成本）"
             return out
-        entry, infer_err = infer_entry_date(adj, r_infer)
+        entry, infer_err, infer_span = infer_entry_date(adj, r_infer, return_info=True)
         if entry is None:
             out["status"] = "need_entry"
             out["reason"] = "持有收益率与净值曲线无法匹配（多笔买入/转换/申赎费差异），请在支付宝交易记录中查买入日期后填写"
             return out
         out["inferred"] = True
+        # 多笔买入/定投/中途卖出：同一收益率在净值曲线上有多个相距很远的匹配日，
+        # 单日近似会把"入场高点回撤"算歪（可能严重低估，止损形同虚设）→ 明确提示
+        if infer_span > INFER_AMBIGUOUS_SPAN_DAYS:
+            out["infer_ambiguous"] = True
+            ambig_reason = (f"持有收益率在净值曲线上匹配到跨度约 {infer_span} 天的多个日期"
+                            f"（疑似多笔买入/定投/中途卖出），入场日与回撤按最近一笔近似、"
+                            f"仅供粗略参考；建议在操作台账记录每笔买卖（代码 买/卖 日期 金额）"
+                            f"后重新诊断，可获得精确的 FIFO 成本与真实回撤")
+        else:
+            ambig_reason = None
     # 单笔买入 → 复用多笔引擎（曲线锚定到用户市值，成本=市值或成本）
     cost = ui["cost"] if (ui["cost"] or 0) > 0 else (ui["amount"] or 0)
     lots = [(pd.Timestamp(entry), "buy", cost)]
@@ -280,6 +510,9 @@ def fund_stop_diag(rec, nav_df, stop=0.20, warn_dd=0.15):
                        stop=stop, warn_dd=warn_dd)
     out.update(d)
     out["inferred"] = bool(ui["buy_date"] is None and out.get("entry_date"))
+    # fund_lots_diag 成功路径 reason="" 会覆盖反推警告 → 重新挂上
+    if ambig_reason:
+        out["reason"] = ambig_reason
     return out
 
 
