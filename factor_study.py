@@ -115,7 +115,7 @@ def build_variants(df):
         "V1-alpha平滑": synth(fv_old, fa_new, fm_old),
         "V2-mom平滑M1": synth(fv_old, fa_old, fm_m1),
         "V3-mom平滑M2": synth(fv_old, fa_old, fm_m2),
-        "V4-value平滑": synth(fv_new, fa_old, fm_old),
+        "S4-value平滑": synth(fv_new, fa_old, fm_old),
         "V5-全平滑": None,
     }
     return out, dict(fv_new=fv_new, fa_new=fa_new, fm_m1=fm_m1, fm_m2=fm_m2, synth=synth, fa_old=fa_old)
@@ -124,7 +124,7 @@ def build_variants(df):
 def stats_table(df):
     print(f"[校验] V0复建 vs 引擎S: 相关 {df.Sx_V0.corr(df.S_eng):.4f} 最大差 {(df.Sx_V0-df.S_eng).abs().max():.1f}")
     res = []
-    for v in ["V0现行", "V1-alpha平滑", "V2-mom平滑M1", "V3-mom平滑M2", "V4-value平滑", "V5-全平滑"]:
+    for v in ["V0现行", "V1-alpha平滑", "V2-mom平滑M1", "V3-mom平滑M2", "S4-value平滑", "V5-全平滑"]:
         sc = f"Sx_{v[:2]}"
         df[f"rk_{v[:2]}"] = df.groupby("date")[sc].rank(pct=True)
         dd = df.dropna(subset=["fwd6", sc])
@@ -145,7 +145,7 @@ def main():
     outs, aux = build_variants(df)
     df["Sx_V0"] = outs["V0现行"]; df["Sx_V1"] = outs["V1-alpha平滑"]
     df["Sx_V2"] = outs["V2-mom平滑M1"]; df["Sx_V3"] = outs["V3-mom平滑M2"]
-    df["Sx_V4"] = outs["V4-value平滑"]
+    df["Sx_S4"] = outs["S4-value平滑"]
     # V5 = value平滑 + alpha平滑 + M1/M2里IC更好的那个, 先算M1版
     df["Sx_V5"] = aux["synth"](aux["fv_new"], aux["fa_new"], aux["fm_m1"])
     tbl = stats_table(df)
