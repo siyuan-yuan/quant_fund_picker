@@ -34,6 +34,123 @@ app = Flask(__name__)
 
 # ---------------- 操作台账（买卖记录持久化，output/ledger.json） ----------------
 LEDGER_FILE = os.path.join(OUTPUT_DIR, "ledger.json")
+# 定投状态（终止/忽略标记）单独持久化，避免与台账记录格式耦合。
+# 标记按「基金代码 + 该轮定投最后扣款日(lastDate)」唯一识别：同一轮已结束 → 不再反复询问；
+# 若之后重新开始新一轮定投（出现更晚的扣款记录），lastDate 变化 → 自动重新提醒，互不冲突。
+DCA_STATE_FILE = os.path.join(OUTPUT_DIR, "dca_state.json")
+
+
+def _load_dca_state() -> dict:
+    """读取定投终止/忽略/止盈标记；文件缺失/损坏返回空结构
+    返回: {"terminated": {code: {lastDate, terminatedDate, ts}},
+          "ignored": {code: {lastDate, ts}},
+          "take_profit": {code: {"plan": {threshold, mode}, "lots": {lotKey: {...}}}}}
+    """
+    empty = {"terminated": {}, "ignored": {}, "take_profit": {}}
+    try:
+        with open(DCA_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return empty
+        return {"terminated": data.get("terminated", {}) if isinstance(data.get("terminated"), dict) else {},
+                "ignored": data.get("ignored", {}) if isinstance(data.get("ignored"), dict) else {},
+                "take_profit": data.get("take_profit", {}) if isinstance(data.get("take_profit"), dict) else {}}
+    except Exception:
+        return empty
+
+
+def _save_dca_state(state: dict) -> bool:
+    """原子写定投状态（tmp+rename 防半写损坏）"""
+    try:
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        tmp = DCA_STATE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"version": 1,
+                       "terminated": state.get("terminated", {}),
+                       "ignored": state.get("ignored", {}),
+                       "take_profit": state.get("take_profit", {})},
+                      f, ensure_ascii=False, indent=1)
+        os.replace(tmp, DCA_STATE_FILE)
+        return True
+    except Exception:
+        return False
+
+
+def _norm_dca_marker(code, m) -> dict:
+    """规范化定投终止/忽略标记 → 合法标记或 None（lastDate 必填，终止日可选）"""
+    if not isinstance(m, dict):
+        return None
+    if not re.fullmatch(r"\d{6}", str(code)):
+        return None
+    last = _parse_date(m.get("lastDate"))
+    if not last:
+        return None
+    out = {"lastDate": last, "ts": int(time.time() * 1000)}
+    term = _parse_date(m.get("terminatedDate"))
+    if term:
+        out["terminatedDate"] = term
+    return out
+
+
+def _norm_tp_plan(p) -> dict:
+    """规范化定投止盈计划参数 → 合法计划或 None"""
+    if not isinstance(p, dict):
+        return None
+    try:
+        thr = float(p.get("threshold", 20))
+    except (TypeError, ValueError):
+        thr = 20.0
+    thr = min(100.0, max(1.0, thr))
+    mode = str(p.get("mode") or "keep_cost")
+    if mode not in ("keep_cost", "keep_profit"):
+        mode = "keep_cost"
+    return {"threshold": thr, "mode": mode}
+
+
+def _norm_tp_lot(m) -> dict:
+    """规范化单批次止盈卖出记录 → 合法记录或 None（卖出金额/日期必填）"""
+    if not isinstance(m, dict):
+        return None
+    amt = _parse_yuan(m.get("soldAmount"))
+    if not amt or amt <= 0:
+        return None
+    sd = _parse_date(m.get("soldDate"))
+    if not sd:
+        return None
+    out = {"mode": str(m.get("mode") or "keep_cost"),
+           "soldAmount": round(float(amt), 2), "soldDate": sd}
+    if m.get("costNav") is not None:
+        try:
+            out["costNav"] = round(float(m["costNav"]), 4)
+        except (TypeError, ValueError):
+            pass
+    if m.get("nav") is not None:
+        try:
+            out["nav"] = round(float(m["nav"]), 4)
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def _norm_tp_plan_entry(code, entry) -> dict:
+    """规范化一只基金的止盈计划条目 {"plan": ..., "lots": {lotKey: {...}}} → 合法条目或 None"""
+    if not isinstance(entry, dict):
+        return None
+    if not re.fullmatch(r"\d{6}", str(code)):
+        return None
+    plan = _norm_tp_plan(entry.get("plan"))
+    lots = {}
+    raw_lots = entry.get("lots")
+    if isinstance(raw_lots, dict):
+        for key, m in raw_lots.items():
+            if not isinstance(key, str) or not isinstance(m, dict):
+                continue
+            nm = _norm_tp_lot(m)
+            if nm:
+                lots[key] = nm
+    if plan is None and not lots:
+        return None
+    return {"plan": plan or {"threshold": 20.0, "mode": "keep_cost"}, "lots": lots}
 
 
 def _load_ledger() -> list:
@@ -135,7 +252,8 @@ def ledger_get():
                                                   (STRAT_CPPI_DD2, STRAT_CPPI_SLOTS2),
                                                   (STRAT_CPPI_DD3, STRAT_CPPI_SLOTS3)],
                                            full_slots=STRAT_SLOTS, hysteresis=STRAT_CPPI_HYSTERESIS)
-    return jsonify(clean(dict(ok=True, txns=txns, funds=states, cppi=cppi)))
+    return jsonify(clean(dict(ok=True, txns=txns, funds=states, cppi=cppi,
+                              dca_state=_load_dca_state())))
 
 
 @app.post("/api/ledger")
@@ -149,6 +267,208 @@ def ledger_post():
     if not _save_ledger(txns):
         return jsonify({"ok": False, "message": "台账写入失败（output 目录不可写？）"}), 500
     return jsonify(clean(dict(ok=True, txns=txns, message=f"已保存 {len(txns)} 条记录")))
+
+
+@app.post("/api/dca_state")
+def dca_state_post():
+    """整体替换定投终止/忽略/止盈标记（前端持有全量，与台账整存模式一致）；返回规范化后的状态"""
+    body = request.get_json(silent=True) or {}
+    state = {"terminated": {}, "ignored": {}, "take_profit": {}}
+    for key, norm in (("terminated", _norm_dca_marker), ("ignored", _norm_dca_marker),
+                      ("take_profit", _norm_tp_plan_entry)):
+        raw = body.get(key)
+        if not isinstance(raw, dict):
+            continue
+        for code, m in raw.items():
+            nm = norm(code, m)
+            if nm:
+                state[key][str(code).zfill(6)] = nm
+    if not _save_dca_state(state):
+        return jsonify({"ok": False, "message": "定投状态写入失败（output 目录不可写？）"}), 500
+    return jsonify(clean(dict(ok=True, **state)))
+
+
+# ---------------- 定投止盈（分批止盈线） ----------------
+TP_MODES = {"keep_cost": "卖利润·留成本（推荐）", "keep_profit": "卖成本·留利润"}
+TP_MODE_LABELS = {
+    "keep_cost": "卖利润留成本",
+    "keep_profit": "卖成本留利润",
+}
+
+
+def _tp_lot_key(date, amount):
+    return f"{date}|{amount:.2f}"
+
+
+def _tp_dca_lots(code):
+    """从台账提取某基金的去重定投买入批次（按 (日期,金额) 合并，日期升序）"""
+    txns = [t for t in _load_ledger()
+            if t.get("code") == code and t.get("side") == "buy" and t.get("isDca")]
+    seen, lots = set(), []
+    for t in txns:
+        amt = round(float(t["amount"]), 2)
+        key = (t["date"], amt)
+        if key in seen:
+            continue
+        seen.add(key)
+        lots.append({"date": t["date"], "amount": amt})
+    lots.sort(key=lambda x: x["date"])
+    return lots
+
+
+def _tp_compute(lots, adj, threshold, mode, harvested):
+    """定投各批次止盈计算（纯函数，可单测）。
+
+    lots:      [{"date": "YYYY-MM-DD", "amount": float}] 去重后的定投买入批次
+    adj:       复权净值 Series（DatetimeIndex 升序，值=复权单位净值）
+    threshold: 止盈线百分比（20 表示涨幅≥20% 触发）
+    mode:      "keep_cost"=卖利润·留成本（卖出 涨幅×成本） / "keep_profit"=卖成本·留利润（卖出=成本）
+    harvested: {lotKey: 已止盈记录}（该批次不再参与计算）
+
+    返回: (rows, summary)；row 字段: key/date/amount/costNav/navNow/navDate/gain/status/sellAmount/soldInfo
+    """
+    n = len(adj)
+    nav_now = float(adj.iloc[-1])
+    nav_date = str(adj.index[-1].date())
+    rows, hit_total = [], 0.0
+    for lot in lots:
+        d = pd.Timestamp(lot["date"])
+        pos = int(adj.index.searchsorted(d))
+        pos = min(max(pos, 0), n - 1)
+        cost_nav = float(adj.iloc[pos])
+        gain = nav_now / cost_nav - 1.0
+        key = _tp_lot_key(lot["date"], lot["amount"])
+        sold = harvested.get(key) if harvested else None
+        row = {"key": key, "date": lot["date"], "amount": lot["amount"],
+               "costNav": round(cost_nav, 4), "navNow": round(nav_now, 4),
+               "navDate": nav_date, "gain": round(gain * 100, 2), "status": "pending",
+               "sellAmount": 0.0}
+        if sold:
+            row["status"] = "sold"
+            row["soldInfo"] = sold
+        elif gain * 100 + 1e-9 >= threshold:
+            row["status"] = "hit"
+            if mode == "keep_cost":
+                sell = lot["amount"] * gain          # 卖利润：卖出 涨幅×成本，剩余=成本
+            else:
+                sell = float(lot["amount"])          # 卖成本：卖出=成本，剩余=利润
+            row["sellAmount"] = round(sell, 2)
+            hit_total += row["sellAmount"]
+        rows.append(row)
+    summary = {"n": len(rows),
+               "nHit": sum(1 for r in rows if r["status"] == "hit"),
+               "nSold": sum(1 for r in rows if r["status"] == "sold"),
+               "hitTotal": round(hit_total, 2),
+               "navNow": round(nav_now, 4), "navDate": nav_date}
+    return rows, summary
+
+
+def _tp_load_nav(code):
+    """取净值复权序列；失败抛异常（由调用方转为错误消息）"""
+    nav_df = provider.get_fund_nav(code)
+    adj = holding_diag.adj_series(nav_df)
+    if adj is None or len(adj) == 0:
+        raise ValueError("净值数据为空")
+    return adj
+
+
+@app.get("/api/dca_tp/preview")
+def dca_tp_preview():
+    """定投止盈检测：按当前净值逐批次计算是否达到止盈线，返回建议卖出金额（不落库）。
+    query: code / threshold(默认20) / mode(keep_cost|keep_profit)"""
+    code = str(request.args.get("code", "")).zfill(6)
+    if not re.fullmatch(r"\d{6}", code):
+        return jsonify({"ok": False, "message": "基金代码无效"}), 400
+    try:
+        threshold = float(request.args.get("threshold", 20))
+    except (TypeError, ValueError):
+        threshold = 20.0
+    threshold = min(100.0, max(1.0, threshold))
+    mode = str(request.args.get("mode") or "keep_cost")
+    if mode not in TP_MODES:
+        mode = "keep_cost"
+    lots = _tp_dca_lots(code)
+    if not lots:
+        return jsonify({"ok": False, "message": "台账中无该基金的定投买入记录（请在定投面板录入）"}), 400
+    try:
+        adj = _tp_load_nav(code)
+    except Exception as e:
+        return jsonify({"ok": False, "message": f"净值获取失败: {str(e)[:120]}"}), 400
+    tp = {}
+    state_tp = _load_dca_state().get("take_profit")
+    if isinstance(state_tp, dict):
+        tp = state_tp.get(code)
+        if not isinstance(tp, dict):
+            tp = {}
+    harvested = tp.get("lots", {}) if isinstance(tp.get("lots"), dict) else {}
+    rows, summary = _tp_compute(lots, adj, threshold, mode, harvested)
+    name = code
+    try:
+        meta = provider.get_fund_meta()
+        if len(meta):
+            name = dict(zip(meta.index.astype(str), meta["基金简称"])).get(code, code)
+    except Exception:
+        pass
+    return jsonify(clean(dict(ok=True, code=code, name=name,
+                              threshold=threshold, mode=mode, mode_label=TP_MODE_LABELS.get(mode, mode),
+                              lots=rows, **summary)))
+
+
+@app.post("/api/dca_tp/execute")
+def dca_tp_execute():
+    """确认卖出达到止盈线的所选批次：写入卖出台账记录 + 标记该批次已止盈（不再参与后续检测）。
+    body: {code, threshold?, mode?, lotKeys: [lotKey...]}  —— 服务端重算，不接受客户端金额。"""
+    body = request.get_json(silent=True) or {}
+    code = str(body.get("code", "")).zfill(6)
+    if not re.fullmatch(r"\d{6}", code):
+        return jsonify({"ok": False, "message": "基金代码无效"}), 400
+    try:
+        threshold = float(body.get("threshold", 20))
+    except (TypeError, ValueError):
+        threshold = 20.0
+    threshold = min(100.0, max(1.0, threshold))
+    mode = str(body.get("mode") or "keep_cost")
+    if mode not in TP_MODES:
+        mode = "keep_cost"
+    wanted = body.get("lotKeys")
+    if not isinstance(wanted, list) or not wanted:
+        return jsonify({"ok": False, "message": "请选择要止盈卖出的批次"}), 400
+    wanted = {str(k) for k in wanted}
+    lots = _tp_dca_lots(code)
+    if not lots:
+        return jsonify({"ok": False, "message": "台账中无该基金的定投买入记录"}), 400
+    try:
+        adj = _tp_load_nav(code)
+    except Exception as e:
+        return jsonify({"ok": False, "message": f"净值获取失败: {str(e)[:120]}"}), 400
+    state = _load_dca_state()
+    tp_entry = state.setdefault("take_profit", {}).setdefault(code, {})
+    tp_entry["plan"] = {"threshold": threshold, "mode": mode}
+    harvested = tp_entry.setdefault("lots", {})
+    rows, _ = _tp_compute(lots, adj, threshold, mode, harvested)
+    today = dt.date.today().isoformat()
+    txns = _load_ledger()
+    added, total_sell = 0, 0.0
+    for r in rows:
+        if r["status"] != "hit" or r["key"] not in wanted or r["key"] in harvested:
+            continue
+        nt = _norm_txn({"code": code, "date": today, "side": "sell",
+                        "amount": r["sellAmount"],
+                        "note": "定投止盈·" + TP_MODE_LABELS.get(mode, mode)})
+        if not nt:
+            continue
+        txns.append(nt)
+        harvested[r["key"]] = {"mode": mode, "soldAmount": r["sellAmount"],
+                               "soldDate": today, "costNav": r["costNav"], "nav": r["navNow"]}
+        added += 1
+        total_sell += r["sellAmount"]
+    if not added:
+        return jsonify({"ok": False, "message": "所选批次均未达到止盈线或已止盈，未写入任何记录"}), 400
+    if not _save_ledger(txns) or not _save_dca_state(state):
+        return jsonify({"ok": False, "message": "保存失败（output 目录不可写？）"}), 500
+    return jsonify(clean(dict(ok=True, added=added, totalSell=round(total_sell, 2),
+                              message=f"已记录卖出 {added} 笔，合计 {round(total_sell, 2):,.2f} 元",
+                              txns=txns, dca_state=state)))
 
 
 @app.post("/api/ledger/import")
@@ -216,6 +536,8 @@ def ledger_import():
 @app.delete("/api/ledger")
 def ledger_delete():
     _save_ledger([])
+    # 台账清空 = 从零开始：定投终止/忽略标记一并清掉，避免旧标记压制新轮次提醒
+    _save_dca_state({"terminated": {}, "ignored": {}})
     return jsonify({"ok": True, "txns": []})
 
 
