@@ -194,6 +194,8 @@
   .legend span{display:inline-flex;align-items:center;gap:6px}
   .legend em{width:8px;height:8px;border-radius:999px;display:inline-block}
   .empty{padding:28px;text-align:center;font:13px var(--sans);color:var(--muted);border:1px dashed var(--line);border-radius:var(--radius);background:var(--surface-2)}
+  /* 定投止盈表格复选框（对齐 ink 色板） */
+  #tp-list input[type=checkbox]{width:15px;height:15px;accent-color:var(--ink);cursor:pointer;margin:0;vertical-align:middle}
 
   footer{padding:32px 0 24px;color:var(--faint);font:11px var(--mono);line-height:1.8;text-align:center;border-top:1px solid var(--line);margin-top:32px}
   .hide{display:none}
@@ -384,6 +386,35 @@
       <div id="dca-prompt-panel" class="hide" style="margin-top:10px;padding:14px;background:var(--surface-2);border:1px dashed var(--warn);border-radius:8px">
         <div style="font-weight:bold; color:var(--warn); margin-bottom:8px;">发现待补齐的定投记录：</div>
         <div id="dca-prompt-list"></div>
+      </div>
+      <div id="tp-panel" style="margin-top:10px;padding:14px;background:var(--surface-2);border:1px solid var(--line);border-radius:8px">
+        <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
+          <b>定投止盈 · 分批止盈线</b>
+          <span class="hint">逐笔定投批次按「当前净值 ÷ 买入净值」算涨幅，达到止盈线即可卖出；卖出后该批次不再参与计算</span>
+        </div>
+        <div class="form-row" style="margin-top:10px">
+          <div class="field" style="flex:1 1 240px;max-width:340px"><label>定投计划（基金）</label>
+            <select id="tp-code" onchange="tpLoad()"><option value="">— 加载中 —</option></select></div>
+          <div class="field" style="max-width:100px"><label>止盈线 %</label><input id="tp-threshold" class="mono" value="20"></div>
+          <div class="field" style="flex:1 1 200px;max-width:260px"><label>止盈方式</label>
+            <select id="tp-mode">
+              <option value="keep_cost" selected>卖利润 · 留成本（推荐）</option>
+              <option value="keep_profit">卖成本 · 留利润</option>
+            </select></div>
+          <button class="btn btn-primary" style="padding:8px 16px" onclick="tpDetect()">检测止盈</button>
+        </div>
+        <div class="hint" style="margin-top:6px;line-height:1.7">
+          <b>推荐「卖利润·留成本」</b>：本金继续留在基金里滚动（定投复利引擎不中断），单次只卖约
+          1/6 仓位、赎回费更低，涨了继续跟涨、跌了本金仍在；「卖成本·留利润」适合想快速回收本金、
+          降低该基金敞口（回收后只剩利润免费仓位）。两种模式下总资产相同，只是现金与持仓的分配不同。
+        </div>
+        <div id="tp-list" style="margin-top:10px"></div>
+        <div id="tp-summary" style="margin-top:8px"></div>
+        <div id="tp-actions" class="hide" style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="btn btn-primary" onclick="tpExecute()">确认卖出所选批次并记录</button>
+          <span class="hint">卖出自动记入台账（方向=卖出，备注=定投止盈·卖利润留成本/卖成本留利润），已卖批次不再参与后续检测</span>
+        </div>
+        <div class="status" style="margin-top:6px"><span class="dot" id="tp-dot"></span><span id="tp-st">就绪</span></div>
       </div>
       <div class="hint" style="margin-top:8px;line-height:1.7">同一基金一次可录入多笔：「日期」「金额」按行一一对应（3 个日期 ↔ 3 个金额），方向统一。买入=成交成本，卖出=到账金额（按当日净值折份额）；同一基金任意多笔，卖出按<b>先进先出</b>扣减成本与份额，全部卖完后自动从诊断中剔除。</div>
       <div id="led-out"></div>
@@ -612,12 +643,25 @@ function addToRebalance(c){
 
 // ============ 操作台账（买卖历史 · 自动保存到服务器 output/ledger.json） ============
 let LEDGER_TXNS=[];
+// 定投终止/忽略/止盈标记（持久化，output/dca_state.json）。
+// 终止/忽略以「该轮定投最后扣款日 lastDate」为轮次指纹：同一轮已终止 → 不再反复询问；
+// 之后开始新一轮定投（出现更晚的扣款记录）→ lastDate 变化 → 自动重新提醒。
+// take_profit: {code: {plan:{threshold,mode}, lots:{lotKey:{mode,soldAmount,soldDate,costNav,nav}}}}，
+// 已止盈批次不再参与计算。
+let DCA_STATE = {terminated:{}, ignored:{}, take_profit:{}};
 async function updateLedger(){
   try{
     const j=await (await fetch('/api/ledger')).json();
     LEDGER_TXNS=j.txns||[];
+    if(j.dca_state){
+      // 服务端状态为基准，本地刚写入的标记（可能尚未落库）优先，避免补齐后立刻被旧状态覆盖而再次询问
+      DCA_STATE.terminated = Object.assign({}, j.dca_state.terminated||{}, DCA_STATE.terminated);
+      DCA_STATE.ignored = Object.assign({}, j.dca_state.ignored||{}, DCA_STATE.ignored);
+      DCA_STATE.take_profit = Object.assign({}, j.dca_state.take_profit||{}, DCA_STATE.take_profit);
+    }
     renderLedger(j);
     if(typeof checkMissingDCA === 'function') checkMissingDCA();
+    if(typeof tpMaybeAutoDetect === 'function') tpMaybeAutoDetect();
   }catch(e){}
 }
 async function ledAdd(){
@@ -668,6 +712,10 @@ async function ledClear(btn){
   btn._arm=false; btn.textContent='清空台账';
   await fetch('/api/ledger',{method:'DELETE'});
   LEDGER_TXNS=[]; renderLedger({txns:[],funds:[]});
+  DCA_STATE={terminated:{},ignored:{},take_profit:{}};   // 台账清空后旧标记一并失效，避免压制新一轮提醒/止盈
+  checkMissingDCA();
+  tpPopulate();
+  tpLoad();
   setStatus('led-dot','led-st','ok','台账已清空');
 }
 
@@ -764,6 +812,15 @@ async function dcaSave(){
 let missingDcaCandidates = [];
 const ignoredDCAs = new Set();
 
+function dcaRoundClosed(code, lastDate) {
+  // 该轮定投是否已结束（终止/忽略），避免每次打开都重复询问
+  const t = DCA_STATE.terminated?.[code];
+  if(t && t.lastDate === lastDate) return true;
+  const i = DCA_STATE.ignored?.[code];
+  if(i && i.lastDate === lastDate) return true;
+  return false;
+}
+
 function checkMissingDCA() {
   const byCode = {};
   for(const t of LEDGER_TXNS) {
@@ -789,6 +846,7 @@ function checkMissingDCA() {
     
     if(streak >= 2) {
       if(ignoredDCAs.has(code + '|' + last.date)) continue;
+      if(dcaRoundClosed(code, last.date)) continue;   // 该轮已终止/已忽略 → 不再询问（新一轮 lastDate 变化后自动恢复）
       
       const secondLast = txns[txns.length-2];
       const diffDays = Math.round((new Date(last.date) - new Date(secondLast.date))/(1000*3600*24));
@@ -842,16 +900,26 @@ function checkMissingDCA() {
           <input type="text" id="dca-term-${i}" class="mono" style="width:90px; border:none; background:transparent; outline:none; font-size:12px" value="${todayStr}">
           <button class="btn btn-ghost" style="padding:2px 6px;font-size:12px" onclick="fillMissingDCA(${i}, false)">补齐至此日</button>
         </div>
-        <button class="btn btn-ghost" style="padding:4px 8px;font-size:12px" onclick="ignoreMissingDCA(${i})">直接忽略</button>
+        <button class="btn btn-ghost" style="padding:4px 8px;font-size:12px" title="本轮不再提醒；若之后新增更晚的定投记录（新一轮），会自动重新提醒" onclick="ignoreMissingDCA(${i})">直接忽略</button>
       </div>
     </div>
   `).join('');
   document.getElementById('dca-prompt-list').innerHTML = html;
 }
 
-function ignoreMissingDCA(idx) {
+async function saveDcaState(){
+  try{
+    await fetch('/api/dca_state',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({terminated:DCA_STATE.terminated, ignored:DCA_STATE.ignored, take_profit:DCA_STATE.take_profit||{}})});
+  }catch(e){}
+}
+
+async function ignoreMissingDCA(idx) {
   const c = missingDcaCandidates[idx];
-  if(c) ignoredDCAs.add(c.code + '|' + c.lastDate);
+  if(c){
+    ignoredDCAs.add(c.code + '|' + c.lastDate);
+    DCA_STATE.ignored[c.code] = { lastDate: c.lastDate };   // 本轮忽略持久化：刷新页面不再询问
+    await saveDcaState();
+  }
   checkMissingDCA();
 }
 
@@ -863,6 +931,7 @@ async function fillMissingDCA(idx, toToday) {
   const endD = new Date(norm(endStr));
   if(isNaN(endD)) { alert("日期格式无效，请填写 YYYY-MM-DD"); return; }
   
+  const freq = c.freq;
   let curr = new Date(c.lastDate);
   if(freq==='daily') curr.setDate(curr.getDate()+1);
   else if(freq==='weekly') curr.setDate(curr.getDate()+7);
@@ -895,8 +964,20 @@ async function fillMissingDCA(idx, toToday) {
   
   ignoredDCAs.add(c.code + '|' + c.lastDate);
   
+  // 选择了「补齐至此日」= 明确告知定投已终止：记录该轮最后扣款日并持久化，
+  // 之后同一轮（lastDate 相同）不再询问；若重新开始新一轮（lastDate 更晚）会自动恢复提醒。
+  let terminatedInfo = null;
+  if(!toToday){
+    let lastDcaDate = c.lastDate;
+    for(const t of txnsToAdd) if(t.date > lastDcaDate) lastDcaDate = t.date;
+    terminatedInfo = { lastDate: lastDcaDate, terminatedDate: norm(endStr) };
+    DCA_STATE.terminated[c.code] = terminatedInfo;
+    await saveDcaState();
+  }
+  
   if(!txnsToAdd.length) {
     checkMissingDCA();
+    if(terminatedInfo) setStatus('led-dot','led-st','ok',`已标记 ${c.code} 定投终止（${terminatedInfo.terminatedDate}），不再重复询问`);
     return;
   }
   
@@ -905,7 +986,7 @@ async function fillMissingDCA(idx, toToday) {
   const j = await (await fetch('/api/ledger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({txns})})).json();
   if(j.ok){
     await updateLedger();
-    setStatus('led-dot','led-st','ok',`已成功补齐 ${txnsToAdd.length} 笔定投记录`);
+    setStatus('led-dot','led-st','ok',`已成功补齐 ${txnsToAdd.length} 笔定投记录${terminatedInfo ? '，并已标记该轮定投终止（不再重复询问）' : ''}`);
   } else {
     alert(j.message || '保存失败');
     setStatus('led-dot','led-st','err',j.message || '保存失败');
@@ -913,6 +994,140 @@ async function fillMissingDCA(idx, toToday) {
 }
 
 function normLedDate(d){const x=String(d).trim().replace(/[/.]/g,'-'); return /^\d{8}$/.test(x)?`${x.slice(0,4)}-${x.slice(4,6)}-${x.slice(6,8)}`:x}
+
+// ============ 定投止盈 · 分批止盈线 ============
+let TP_PREVIEW = null, TP_AUTO_DONE = false;
+function fmtTpAmt(n){ return (Number(n)||0).toLocaleString('zh-CN',{minimumFractionDigits:2, maximumFractionDigits:2}) + ' 元'; }
+
+function tpFundOptions(){
+  const byCode = {};
+  for(const t of LEDGER_TXNS){
+    if(t.side === 'buy' && t.isDca) (byCode[t.code] = byCode[t.code] || []).push(t);
+  }
+  const names = {};
+  const lj = window._lastLedger;
+  if(lj && lj.funds) for(const f of lj.funds) names[f.code] = f.name;
+  return Object.keys(byCode).sort().map(code => {
+    const ts = byCode[code].slice().sort((a,b) => a.date < b.date ? -1 : 1);
+    const last = ts[ts.length-1].date;
+    const closed = dcaRoundClosed(code, last);
+    return {code, name: names[code] || code, n: ts.length, closed};
+  });
+}
+
+function tpPopulate(){
+  const sel = document.getElementById('tp-code');
+  if(!sel) return;
+  const cur = sel.value;
+  const opts = tpFundOptions();
+  sel.innerHTML = '<option value="">— 选择定投计划（基金） —</option>'
+    + opts.map(o => `<option value="${o.code}">${o.code} ${o.name}（定投 ${o.n} 笔 · ${o.closed ? '已终止' : '进行中'}）</option>`).join('');
+  if(cur && opts.some(o => o.code === cur)) sel.value = cur;
+  return opts;
+}
+
+function tpLoad(){
+  const code = document.getElementById('tp-code')?.value;
+  if(!code){ document.getElementById('tp-list').innerHTML=''; document.getElementById('tp-summary').innerHTML=''; document.getElementById('tp-actions').classList.add('hide'); return; }
+  tpDetect();
+}
+
+function tpMaybeAutoDetect(){
+  const sel = document.getElementById('tp-code');
+  if(!sel) return;
+  const opts = tpFundOptions();
+  tpPopulate();
+  if(!opts.length){
+    // 台账无定投记录：给出空状态指引，避免模块呈现「死区」
+    const box = document.getElementById('tp-list');
+    if(box) box.innerHTML = '<div class="empty" style="padding:10px">台账暂无定投买入记录 — 先在「定投导入」录入，再进行分批止盈</div>';
+    const sum = document.getElementById('tp-summary');
+    if(sum) sum.innerHTML = '';
+    const act = document.getElementById('tp-actions');
+    if(act) act.classList.add('hide');
+    return;
+  }
+  if(!sel.value){
+    // 初始：自动选中第一个「进行中」的定投计划并检测（之后用户手动切换）
+    const first = opts.find(o => !o.closed) || opts[0];
+    if(first){ sel.value = first.code; if(!TP_AUTO_DONE){ TP_AUTO_DONE = true; tpDetect(); } }
+  }
+}
+
+async function tpDetect(){
+  const code = document.getElementById('tp-code')?.value;
+  if(!code){ return; }
+  const thr = parseFloat(document.getElementById('tp-threshold').value) || 20;
+  const mode = document.getElementById('tp-mode').value;
+  setStatus('tp-dot','tp-st','busy','止盈检测中...');
+  try{
+    const j = await (await fetch(`/api/dca_tp/preview?code=${code}&threshold=${thr}&mode=${mode}`)).json();
+    if(!j.ok){ setStatus('tp-dot','tp-st','err', j.message || '检测失败'); return; }
+    TP_PREVIEW = j;
+    renderTp(j);
+  }catch(e){ setStatus('tp-dot','tp-st','err','检测失败'); }
+}
+
+function renderTp(j){
+  const box = document.getElementById('tp-list');
+  const rows = j.lots || [];
+  const modeHint = j.mode === 'keep_cost'
+    ? '卖出「利润」= 涨幅×成本，剩余 = 成本继续在场'
+    : '卖出「成本」= 成本，剩余 = 利润免费仓位';
+  if(!rows.length){ box.innerHTML = '<div class="empty" style="padding:10px">该基金暂无定投买入批次</div>'; return; }
+  const trs = rows.map((l, i) => {
+    const checked = l.status === 'hit' ? ' checked' : '';
+    const disabled = l.status === 'hit' ? '' : ' disabled';
+    const badge = l.status === 'hit' ? '<span class="badge b-red">已达线</span>'
+      : (l.status === 'sold' ? '<span class="badge b-green">已止盈</span>' : '<span class="badge b-mute">未达线</span>');
+    const sell = l.status === 'hit' ? `<b style="color:var(--danger)">${fmtTpAmt(l.sellAmount)}</b>` : '—';
+    const soldInfo = (l.status === 'sold' && l.soldInfo)
+      ? `<div class="hint">${l.soldInfo.soldDate} 已卖 ${fmtTpAmt(l.soldInfo.soldAmount)}（${l.soldInfo.mode === 'keep_cost' ? '卖利润' : '卖成本'}）</div>` : '';
+    return `<tr>
+      <td>${l.status === 'hit' ? `<input type="checkbox" value="${l.key}"${checked}>` : ''}</td>
+      <td class="mono">${l.date}</td>
+      <td style="text-align:right" class="mono">${fmtYuanFull(l.amount)}</td>
+      <td class="mono" style="text-align:right">${l.costNav}</td>
+      <td class="mono" style="text-align:right">${l.navNow}</td>
+      <td class="mono" style="text-align:right;${l.gain >= j.threshold ? 'color:var(--danger);font-weight:bold' : ''}">${l.gain.toFixed(2)}%</td>
+      <td>${badge}</td>
+      <td style="text-align:right">${sell}${soldInfo}</td>
+    </tr>`;
+  }).join('');
+  box.innerHTML = `<div class="table-wrap" style="border:none;border-radius:0;padding:0">
+    <table><thead><tr><th style="width:26px"></th><th>扣款日</th><th style="text-align:right">定投金额(成本)</th><th>买入复权净值</th><th>当前复权净值</th><th>涨幅</th><th>状态</th><th>建议卖出</th></tr></thead>
+    <tbody>${trs}</tbody></table>
+  </div><div class="hint" style="margin-top:4px">净值截至 ${j.navDate} · ${modeHint}</div>`;
+  const sum = document.getElementById('tp-summary');
+  sum.innerHTML = `共 <b>${j.n}</b> 笔定投批次：<b style="color:var(--danger)">已达线 ${j.nHit} 笔</b>（建议卖出合计
+    <b style="color:var(--danger)">${fmtTpAmt(j.hitTotal)}</b>）· 已止盈 <b>${j.nSold}</b> 笔 · 未达线 <b>${j.n - j.nHit - j.nSold}</b> 笔`;
+  const act = document.getElementById('tp-actions');
+  if(j.nHit > 0) act.classList.remove('hide'); else act.classList.add('hide');
+  setStatus('tp-dot','tp-st', j.nHit > 0 ? 'busy' : 'ok', j.nHit > 0 ? `今日有 ${j.nHit} 笔达到 ${j.threshold}% 止盈线` : '今日无批次达到止盈线');
+}
+
+async function tpExecute(){
+  if(!TP_PREVIEW) return;
+  const checked = Array.from(document.querySelectorAll('#tp-list input[type=checkbox]:checked')).map(x => x.value);
+  if(!checked.length){ alert('请勾选要止盈卖出的批次'); return; }
+  const body = {code: TP_PREVIEW.code, threshold: TP_PREVIEW.threshold, mode: TP_PREVIEW.mode, lotKeys: checked};
+  setStatus('tp-dot','tp-st','busy','卖出记录中...');
+  try{
+    const r = await (await fetch('/api/dca_tp/execute', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})).json();
+    if(r.ok){
+      if(r.dca_state){
+        DCA_STATE.take_profit = Object.assign({}, r.dca_state.take_profit||{}, DCA_STATE.take_profit);
+      }
+      await updateLedger();
+      setStatus('tp-dot','tp-st','ok', r.message || `已记录卖出 ${r.added} 笔`);
+      tpDetect();
+    } else {
+      alert(r.message || '执行失败');
+      setStatus('tp-dot','tp-st','err', r.message || '执行失败');
+    }
+  }catch(e){ setStatus('tp-dot','tp-st','err','执行失败'); }
+}
+
 function ledExport(){
   if(!LEDGER_TXNS.length){ setStatus('led-dot','led-st','err','台账为空，无可导出'); return; }
   const esc=v=>{const s=String(v==null?'':v); return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s};
