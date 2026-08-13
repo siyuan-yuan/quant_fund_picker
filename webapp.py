@@ -1555,6 +1555,7 @@ def rebalance():
     #       ④ 全部满足后仍按 S 高者优先（市场内）。
     candidates = []
     dup_skips = []
+    dedup_warnings = []   # 查重覆盖度自检告警（降级绝不静默，前端可见）
     scan_msg = ""
     buy_note = None
     cand_stats = None     # 建议买入统计: gt70=榜单S>70总数, total=未持有候选数, dup=已排除重复数
@@ -1613,6 +1614,14 @@ def rebalance():
                     "rbsa": _parse_rbsa(r.get("rbsa")) if has_rbsa else {},
                 })
             rows_cand.sort(key=lambda c: -(c["S_total"] or 0))
+            # 查重覆盖度自检①：有 rbsa 列但个别候选暴露为空/无法解析 → 这些候选
+            # 会绕过全部三档闸门（贪心循环内 if has_rbsa and cand["rbsa"]），显式提示
+            if has_rbsa:
+                n_no_rb = sum(1 for c in rows_cand if not c.get("rbsa"))
+                if n_no_rb:
+                    dedup_warnings.append(
+                        f"{n_no_rb} 只 S>{int(STRAT_BUY_TH)} 候选的 RBSA 暴露为空或无法解析，"
+                        f"未参与复制盘/同指数/同风格查重，不排除与持仓撞仓")
             a_rows = [c for c in rows_cand if c["region"] == "A股"]
             ov_rows = [c for c in rows_cand if c["region"] == "海外"]
             # 组合已有暴露 = 保留持仓 RBSA 暴露加总（被卖出的不占）
@@ -1653,6 +1662,16 @@ def rebalance():
                 rb_h = _safe_dict(h.get("rbsa"))
                 if rb_h:
                     clone_refs.append((h["code"], h.get("name") or h["code"], rb_h))
+            # 查重覆盖度自检②：保留持仓缺 RBSA 暴露（评分失败/限流/新基）时，
+            # Tier0 复制盘与 Tier2 风格簇对它们完全失效——此前静默跳过，用户无法
+            # 察觉"明明持有孪生基金却照推"。必须显式告警提示重试评分。
+            no_rb_holds = [f"{h['code']} {h.get('name') or ''}".strip()
+                           for h in keeps if not _safe_dict(h.get("rbsa"))]
+            if no_rb_holds:
+                dedup_warnings.append(
+                    "以下保留持仓缺少 RBSA 风格暴露，复制盘/同风格查重对它们未生效"
+                    "（可点“重试”重新评分）：" + "、".join(no_rb_holds[:6])
+                    + (f" 等{len(no_rb_holds)}只" if len(no_rb_holds) > 6 else ""))
             # 贪心选取：市场内保持 S 降序；跨市场按 S 高者优先（海外受配额限制）；
             # 重复度三档规则（详见 config）：
             #   Tier0 复制盘：候选与任一持仓/已选候选 RBSA 暴露 L1≤STRAT_CLONE_L1
@@ -1722,6 +1741,9 @@ def rebalance():
                             f"市场内按 S 排序 + 重复度过滤（复制盘/同指数/同风格自动顺位）")
                 if not has_rbsa:
                     scan_msg += "；旧榜单无暴露数据，重复度过滤未生效（重新扫描后自动开启）"
+                    dedup_warnings.append(
+                        "当前榜单为旧格式（无 RBSA 暴露列），复制盘/同指数/同风格三档查重"
+                        "全部未生效，推荐候选可能与持仓撞仓——请重新执行“全市场扫描”后再生成方案")
         except Exception as e:
             scan_msg = f"读取扫描榜单失败：{str(e)[:80]}"
     elif free_slots==0 and not crisis_active:
@@ -1924,6 +1946,7 @@ def rebalance():
         buys=clean(buys),
         candidates=clean(candidates),
         dup_skips=clean(dup_skips),
+        dedup_warnings=clean(dedup_warnings),
         cand_stats=cand_stats,
         buy_note=buy_note,
         allocation=clean(allocation),

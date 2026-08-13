@@ -15,3 +15,4 @@ output/dca_state.json
 # 模型动物园实验中间产物（大, 可由 _build_ml_panel.py + _model_zoo.py 复现）
 output/ml_work/
 output/ml_panel.csv
+.venv/
