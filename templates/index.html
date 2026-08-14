@@ -813,12 +813,16 @@ let missingDcaCandidates = [];
 const ignoredDCAs = new Set();
 
 function dcaRoundClosed(code, lastDate) {
-  // 该轮定投是否已结束（终止/忽略），避免每次打开都重复询问
-  const t = DCA_STATE.terminated?.[code];
-  if(t && t.lastDate === lastDate) return true;
-  const i = DCA_STATE.ignored?.[code];
-  if(i && i.lastDate === lastDate) return true;
-  return false;
+  // 该轮定投是否已结束（终止/忽略），避免每次打开都重复询问。
+  // 以「标记日期」为界：台账当前最后扣款日 <= 标记日期 → 视为同一轮已结束，不再询问；
+  // 之后出现更晚的扣款记录（lastDate 更大）→ 判断为新的一轮，自动恢复提醒。
+  // 用「≤」而非「==」的原因：重新导入台账时，若导入源缺了最近几笔（或补记笔数略有出入），
+  // 最后扣款日可能比当初标记时更早——此时仍应沿用「已终止/已忽略」结论，不再反复询问。
+  const bound = m => (m && (m.terminatedDate || m.lastDate)) || null;
+  const tb = bound(DCA_STATE.terminated?.[code]);
+  const ib = bound(DCA_STATE.ignored?.[code]);
+  const b = (tb && ib) ? (tb > ib ? tb : ib) : (tb || ib);
+  return !!b && lastDate <= b;
 }
 
 function checkMissingDCA() {

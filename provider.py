@@ -6,7 +6,7 @@
   - 指数日行情: 新浪
   - 指数PE历史: 乐咕乐股 (Point-in-Time时序)
 """
-import os, re, json, time, datetime as dt
+import os, re, json, time, datetime as dt, threading, tempfile
 import requests
 import pandas as pd
 import akshare as ak
@@ -20,6 +20,56 @@ _memo_day = TODAY
 _FETCHED_TODAY = set()      # 每文件每日至多同步一次(防假期空转抓取)
 STALE_SERVED = []           # (文件, 旧数据截止日, 原因) — 降级不沉默
 STALE_OK = False   # True=使用过期缓存(walk-forward回测用, 历史数据不变)
+
+# ---- 缓存并发安全：原子写 + 每路径锁 ----
+# 根因修复：旧代码 `df.to_csv(path)` / `json.dump(open(path,'w'))` 直接覆盖写，非原子。
+# 当日缓存过期时，持仓诊断的多线程评分 + 全市场扫描会并发读到过期文件并同时重抓，
+# 写盘瞬间并发读会读到半写/空文件 → pandas `EmptyDataError: No columns to parse from file`，
+# 表现为「生成方案」首次点击总失败、重试才正常。这里改为「临时文件 + os.replace 原子替换」
+# 并用每路径锁串行化同一文件的重抓，读方永远只见完整文件（旧或新），不再见空文件。
+_fetch_locks = {}
+_fetch_locks_guard = threading.Lock()
+
+
+def _lock_for(path):
+    with _fetch_locks_guard:
+        lock = _fetch_locks.get(path)
+        if lock is None:
+            lock = threading.Lock()
+            _fetch_locks[path] = lock
+        return lock
+
+
+def _atomic_write_csv(df, path):
+    """原子写 CSV：同目录临时文件 + os.replace，杜绝并发读读到空/半写文件"""
+    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".", suffix=".tmp",
+                               dir=os.path.dirname(os.path.abspath(path)) or ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            df.to_csv(f, index=False)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def _atomic_write_json(obj, path):
+    """原子写 JSON：同目录临时文件 + os.replace，杜绝并发读读到空/半写文件"""
+    fd, tmp = tempfile.mkstemp(prefix=os.path.basename(path) + ".", suffix=".tmp",
+                               dir=os.path.dirname(os.path.abspath(path)) or ".")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(obj, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def _roll_day():
@@ -57,19 +107,32 @@ def _content_fresh(path, lag=0):
 def _cached_or_fetch(path, fetch_df, lag=0):
     """统一装载: 内容日期过期→重抓; 重抓失败→回退旧文件并记警告(降级不沉默)"""
     _roll_day()
-    if path not in _FETCHED_TODAY and not (_fresh(path) and _content_fresh(path, lag)):
-        try:
-            df = fetch_df()
-            df.to_csv(path, index=False)
-        except Exception as e:
-            if os.path.exists(path):
-                old = pd.read_csv(path, parse_dates=["date"])
-                STALE_SERVED.append((os.path.basename(path),
-                                     str(old["date"].max().date()), str(e)[:60]))
+
+    def _stale():
+        return path not in _FETCHED_TODAY and not (_fresh(path) and _content_fresh(path, lag))
+
+    if _stale():
+        # 串行化同文件的重抓+写盘：并发请求(持仓诊断多线程评分/全市场扫描)会同时读到
+        # 过期缓存并同时重抓，非原子写会令并发读读到半写/空文件 → EmptyDataError。
+        # 锁内二次检查，保证同一路径只抓一次、其余线程直接复用结果。
+        with _lock_for(path):
+            if _stale():
+                try:
+                    df = fetch_df()
+                    _atomic_write_csv(df, path)
+                except Exception as e:
+                    if os.path.exists(path):
+                        try:
+                            old = pd.read_csv(path, parse_dates=["date"])
+                        except Exception:
+                            old = None
+                        if old is not None and len(old):
+                            STALE_SERVED.append((os.path.basename(path),
+                                                 str(old["date"].max().date()), str(e)[:60]))
+                            _FETCHED_TODAY.add(path)
+                            return old
+                    raise
                 _FETCHED_TODAY.add(path)
-                return old
-            raise
-        _FETCHED_TODAY.add(path)
     return pd.read_csv(path, parse_dates=["date"])
 
 
@@ -190,7 +253,7 @@ def get_fund_dossier(code: str) -> dict:
                              for m in mgrs]
         except Exception:
             d["managers"] = []
-        json.dump(d, open(path, "w", encoding="utf-8"), ensure_ascii=False)
+        _atomic_write_json(d, path)
     _memo[key] = d
     return d
 
@@ -379,9 +442,14 @@ def get_fund_meta() -> pd.DataFrame:
     if _fresh(path):
         df = pd.read_csv(path, dtype={"基金代码": str})
     else:
-        df = _retry(lambda: ak.fund_name_em())
-        df["基金代码"] = df["基金代码"].astype(str).str.zfill(6)
-        df.to_csv(path, index=False)
+        # 名录是全场共享文件：多线程评分会同时触发重抓，加锁串行化 + 原子写防并发读空文件
+        with _lock_for(path):
+            if not _fresh(path):
+                df = _retry(lambda: ak.fund_name_em())
+                df["基金代码"] = df["基金代码"].astype(str).str.zfill(6)
+                _atomic_write_csv(df, path)
+            else:
+                df = pd.read_csv(path, dtype={"基金代码": str})
     df = df.set_index("基金代码")
     _memo["meta"] = df
     return df
