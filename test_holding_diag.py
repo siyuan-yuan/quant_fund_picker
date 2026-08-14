@@ -353,6 +353,39 @@ def test_portfolio_cppi_curve_input():
     print("test_portfolio_cppi_curve_input OK, dd=%.1f%% slots=%d | %s" % (r["dd"] * 100, r["slots"], r["tier_name"]))
 
 
+def test_portfolio_cppi_stale_nav():
+    """NAV 异步（QDII/港股披露时差）：并集日历上缺净值的日期必须 ffill 沿用
+    最近一期净值，不能按 0 计 —— 否则组合值瞬间塌陷，伪造巨幅回撤+CPPI清仓假信号"""
+    idx_a = pd.bdate_range("2026-04-22", "2026-08-13")   # A股基金净值到 8-13
+    idx_q = pd.bdate_range("2026-07-09", "2026-08-14")   # QDII 净值多一天到 8-14
+
+    def _curve(idx, entry, amt):
+        c = pd.Series(np.linspace(amt * 0.98, amt, len(idx)), index=idx, dtype=float)
+        c[idx < pd.Timestamp(entry)] = np.nan
+        return c
+
+    funds = [_curve(idx_a, "2026-07-24", 354), _curve(idx_a, "2026-08-04", 304),
+             _curve(idx_a, "2026-08-10", 308), _curve(idx_a, "2026-07-24", 250),
+             _curve(idx_q, "2026-07-09", 147)]
+    r = hd.portfolio_cppi([(c,) for c in funds], cash=1000.0,
+                          rules=[(-0.15, 6), (-0.20, 3), (-0.25, 0)], full_slots=10)
+    assert r["computable"] and r["n_funds"] == 5
+    # 最后一天组合值 ≈ 1000现金 + 5只基金合计（A股4只沿用8-13净值），绝不是 1000+147
+    assert r["current"] > 2300, r["current"]
+    assert r["dd"] > -0.05, r["dd"]           # 微涨曲线，回撤应接近 0
+    assert r["slots"] == 10, r["slots"]       # 不允许被假塌陷打到清仓档
+    assert not [e for e in r["events"] if e["kind"] == "trigger"]
+    # 反向校验：真实深回撤仍须触发清仓（ffill 不得糊掉真信号）
+    idx = pd.bdate_range("2026-01-05", "2026-08-14")
+    crash = pd.Series(np.r_[np.linspace(1000, 2000, 100),
+                            np.linspace(2000, 1400, len(idx) - 100)], index=idx)
+    r2 = hd.portfolio_cppi([(crash,)], cash=0.0,
+                           rules=[(-0.15, 6), (-0.20, 3), (-0.25, 0)], full_slots=10)
+    assert r2["slots"] == 0 and abs(r2["dd"] + 0.30) < 0.01
+    print("test_portfolio_cppi_stale_nav OK, dd=%.2f%% slots=%d | crash dd=%.1f%% slots=%d"
+          % (r["dd"] * 100, r["slots"], r2["dd"] * 100, r2["slots"]))
+
+
 def test_portfolio_cppi_auto_start():
     """组合曲线自适应起点：最早买入日前全 0/NaN 的前缀段应被裁掉"""
     n = 60
@@ -403,7 +436,7 @@ def test_webapp_endpoint():
 
 
 if __name__ == "__main__":
-    for fn in [test_adj_series, test_infer_entry_date, test_infer_ambiguous, test_fund_stop_diag, test_fund_lots_diag, test_portfolio_cppi_curve_input, test_portfolio_cppi_auto_start,
+    for fn in [test_adj_series, test_infer_entry_date, test_infer_ambiguous, test_fund_stop_diag, test_fund_lots_diag, test_portfolio_cppi_curve_input, test_portfolio_cppi_stale_nav, test_portfolio_cppi_auto_start,
                test_dca_dates_lots_infer, test_exposure_overlap, test_clone_detection, test_cppi_tier_sim, test_portfolio_cppi, test_webapp_endpoint]:
         fn()
     print("\nALL TESTS PASSED")
