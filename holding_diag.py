@@ -679,8 +679,12 @@ def portfolio_cppi(fund_series, cash=0.0, rules=None, full_slots=10,
     idx = pd.DatetimeIndex(sorted(idx))
     contrib = np.zeros(len(idx))
     for c in curves:
-        vals = c.reindex(idx).values
-        vals = np.where(np.isnan(vals), 0.0, vals)
+        # 基金自身日历内的 NaN = 入场前/空仓 → 市值 0（结构性空仓）
+        own = c.fillna(0.0)
+        # 并集日历上该基金缺净值的日期（如 QDII 与 A 股披露时差、节假日错位）
+        # → 沿用最近一期净值(forward-fill)，绝不能按 0 计（否则组合值瞬间塌陷，
+        #   会伪造出巨幅回撤、连续击穿 CPPI 触发线的假信号）
+        vals = own.reindex(idx).ffill().fillna(0.0).values.astype(float)
         contrib = contrib + vals
     value = contrib + cash                  # 现金常数并入
     if rules is None:
