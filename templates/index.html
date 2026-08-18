@@ -192,6 +192,12 @@
   .legend span{display:inline-flex;align-items:center;gap:6px}
   .legend em{width:8px;height:8px;border-radius:999px;display:inline-block}
   .empty{padding:28px;text-align:center;font:13px var(--sans);color:var(--muted);border:1px dashed var(--line);border-radius:var(--radius);background:var(--surface-2)}
+  .led-filter{display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin-top:12px}
+  .led-filter .field{flex:0 1 300px;min-width:220px}
+  .led-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:12px 0 0}
+  @media(max-width:860px){.led-stats{grid-template-columns:repeat(2,1fr)}}
+  tr.led-on{background:#f5f5f4}
+  tr.led-click{cursor:pointer}
   /* 定投止盈表格复选框（对齐 ink 色板） */
   #tp-list input[type=checkbox]{width:15px;height:15px;accent-color:var(--ink);cursor:pointer;margin:0;vertical-align:middle}
 
@@ -339,7 +345,7 @@
     <div class="panel" style="padding:14px" id="ledger-panel">
       <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
         <b>持仓台账（买卖历史 · 自动保存）</b>
-        <span class="hint">分批买入/卖出在此记录；生成方案自动合并，之后只需补记新操作</span>
+        <span class="hint">分批买入/卖出在此记录；可按基金查看流水并汇总主动买入 / 定投 / 卖出</span>
       </div>
       <div style="margin-top:12px">
         <div class="form-row">
@@ -653,6 +659,7 @@ function addToRebalance(c){
 
 // ============ 操作台账（买卖历史 · 自动保存到服务器 output/ledger.json） ============
 let LEDGER_TXNS=[];
+let LEDGER_VIEW_CODE=''; // 空=全部基金流水
 // 定投终止/忽略/止盈标记（持久化，output/dca_state.json）。
 // 终止/忽略以「该轮定投最后扣款日 lastDate」为轮次指纹：同一轮已终止 → 不再反复询问；
 // 之后开始新一轮定投（出现更晚的扣款记录）→ lastDate 变化 → 自动重新提醒。
@@ -1344,36 +1351,81 @@ async function ledRecordSell(code){
   const inp=document.getElementById('led-sell-'+code);
   await ledRecord(code,'sell',inp?inp.value:null,'诊断卖出');
 }
+function ledgerStats(txns){
+  let buy=0,dca=0,sell=0,nBuy=0,nDca=0,nSell=0;
+  for(const t of txns){
+    const a=Number(t.amount)||0;
+    if(t.side==='sell'){ sell+=a; nSell++; }
+    else if(t.isDca){ dca+=a; nDca++; }
+    else { buy+=a; nBuy++; }
+  }
+  return {buy,dca,sell,nBuy,nDca,nSell,n:txns.length,net:buy+dca-sell};
+}
+function setLedgerView(code){
+  LEDGER_VIEW_CODE=code||'';
+  if(LEDGER_VIEW_CODE){
+    const inp=document.getElementById('led-code');
+    if(inp) inp.value=LEDGER_VIEW_CODE;
+  }
+  if(window._lastLedger) renderLedger(window._lastLedger);
+}
 function renderLedger(j){
   window._lastLedger=j;
   const txns=j.txns||[], funds=j.funds||[];
   const box=document.getElementById('led-out');
   if(!box) return;
   if(!txns.length&&!funds.length){ box.innerHTML='<div class="empty" style="padding:16px;margin-top:10px">暂无持仓记录 — 在上方填写 代码 / 方向 / 日期 / 金额 添加买入（日期与金额支持多行一一对应），或点「定投导入」批量生成，即可生成方案。</div>'; return; }
-  const tRows=txns.map(t=>`<tr><td class="mono">${t.date}</td><td>${t.side==='buy'?(t.isDca?'<span class="badge b-blue">定投买入</span>':'<span class="badge b-green">买入</span>'):'<span class="badge b-red">卖出</span>'}</td><td class="mono">${t.code}</td><td style="text-align:right">${fmtYuanFull(t.amount)}</td><td><button class="btn btn-ghost" style="padding:2px 8px;font-size:11px" onclick="ledDel('${t.id}')">删</button></td></tr>`).join('');
+  const names={};
+  for(const f of funds) names[f.code]=f.name||f.code;
+  const codes=[...new Set(txns.map(t=>t.code).concat(funds.map(f=>f.code)))].filter(Boolean).sort();
+  if(LEDGER_VIEW_CODE && !codes.includes(LEDGER_VIEW_CODE)) LEDGER_VIEW_CODE='';
+  const viewCode=LEDGER_VIEW_CODE;
+  const viewTxns=(viewCode?txns.filter(t=>t.code===viewCode):txns.slice()).sort((a,b)=>a.date<b.date?1:a.date>b.date?-1:0);
+  const stt=ledgerStats(viewTxns);
+  const optHtml='<option value="">全部基金（'+codes.length+' 只）</option>'+codes.map(c=>'<option value="'+c+'"'+(c===viewCode?' selected':'')+'>'+c+' '+(names[c]&&names[c]!==c?names[c]:'')+'</option>').join('');
+  const title=viewCode?(viewCode+' '+(names[viewCode]&&names[viewCode]!==viewCode?names[viewCode]:'')+' · '+viewTxns.length+' 笔'):('全部流水 · '+viewTxns.length+' 笔');
+  const tRows=viewTxns.map(t=>`<tr><td class="mono">${t.date}</td><td>${t.side==='buy'?(t.isDca?'<span class="badge b-blue">定投买入</span>':'<span class="badge b-green">主动买入</span>'):'<span class="badge b-red">卖出</span>'}</td><td class="mono">${t.code}</td><td style="text-align:right">${fmtYuanFull(t.amount)}</td><td><button class="btn btn-ghost" style="padding:2px 8px;font-size:11px" onclick="ledDel('${t.id}')">删</button></td></tr>`).join('');
   const fRows=funds.map(f=>{
     const st=f.state||{};
-    if(st.flat) return `<tr><td class="mono">${f.code}</td><td class="name">${f.name}</td><td class="mono faint" colspan="4">已全部卖出</td><td class="mono faint">—</td><td><span class="badge b-mute">已清仓</span></td></tr>`;
+    const on=viewCode===f.code?' led-on':'';
+    const click=`class="led-click${on}" onclick="setLedgerView('${f.code}')" title="查看该基金全部买卖记录"`;
+    if(st.flat) return `<tr ${click}><td class="mono">${f.code}</td><td class="name">${f.name}</td><td class="mono faint" colspan="4">已全部卖出</td><td class="mono faint">—</td><td><span class="badge b-mute">已清仓</span></td></tr>`;
     const dd=st.dd==null?'—':fmtPct(st.dd);
     const col=st.status==='triggered'?'var(--danger)':(st.status==='near'?'var(--warn)':'var(--muted)');
     const stBadge=st.status==='triggered'?'<span class="badge b-red">止损清仓</span>':(st.status==='near'?'<span class="badge b-amber">接近止损</span>':'<span class="badge b-green">正常</span>');
     const over=st.over_sell?' <span class="badge b-amber" title="卖出金额超过持有份额，请核对记录">超额卖出</span>':'';
-    return `<tr><td class="mono">${f.code}</td><td class="name">${f.name}</td><td class="mono" style="text-align:center">${st.lots_n??'—'}</td><td style="text-align:right" class="mono">${fmtYuanFull(st.mv_now)}</td><td style="text-align:right" class="mono">${fmtYuanFull(st.basis)}</td><td style="text-align:right" class="mono">${fmtPct(st.ret_held)}</td><td class="mono" style="text-align:right;color:${col}">${dd}</td><td>${stBadge}${over}</td></tr>`;
+    return `<tr ${click}><td class="mono">${f.code}</td><td class="name">${f.name}</td><td class="mono" style="text-align:center">${st.lots_n??'—'}</td><td style="text-align:right" class="mono">${fmtYuanFull(st.mv_now)}</td><td style="text-align:right" class="mono">${fmtYuanFull(st.basis)}</td><td style="text-align:right" class="mono">${fmtPct(st.ret_held)}</td><td class="mono" style="text-align:right;color:${col}">${dd}</td><td>${stBadge}${over}</td></tr>`;
   }).join('');
   let mv=0,basis=0;
   for(const f of funds){ const st=f.state||{}; if(!st.flat){ mv+=(st.mv_now||0); basis+=(st.basis||0); } }
   const ret=basis>0?fmtPct(mv/basis-1):'—';
-  box.innerHTML=`<div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:12px">
+  const emptyTx=viewTxns.length?'':`<tr><td colspan="5" class="faint" style="text-align:center">该基金暂无流水</td></tr>`;
+  box.innerHTML=`<div class="led-filter">
+      <div class="field"><label>查看基金流水</label>
+        <select id="led-view-code" onchange="setLedgerView(this.value)">${optHtml}</select></div>
+      <div style="padding-bottom:8px">
+        ${viewCode?`<button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="setLedgerView('')">看全部</button>`:''}
+      </div>
+      <span class="hint" style="padding-bottom:10px">点右侧持仓行也可只看该基金；下拉选「全部基金」回到合账</span>
+    </div>
+    <div class="led-stats">
+      <div class="kpi"><label>主动买入</label><b>${fmtYuanFull(stt.buy)}</b><small>${stt.nBuy} 笔</small></div>
+      <div class="kpi"><label>定投买入</label><b>${fmtYuanFull(stt.dca)}</b><small>${stt.nDca} 笔</small></div>
+      <div class="kpi"><label>卖出</label><b>${fmtYuanFull(stt.sell)}</b><small>${stt.nSell} 笔</small></div>
+      <div class="kpi"><label>净投入</label><b>${fmtYuanFull(stt.net)}</b><small>${title}</small></div>
+    </div>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:12px">
     <div style="flex:1 1 360px;min-width:280px"><div class="table-wrap" style="border:none;border-radius:0;padding:0">
-      <table><thead><tr><th>日期</th><th>方向</th><th>代码</th><th>金额</th><th></th></tr></thead><tbody>${tRows}</tbody></table>
+      <table><thead><tr><th>日期</th><th>方向</th><th>代码</th><th>金额</th><th></th></tr></thead><tbody>${tRows||emptyTx}</tbody></table>
     </div></div>
     <div style="flex:1.4 1 480px;min-width:320px"><div class="table-wrap" style="border:none;border-radius:0;padding:0">
       <table><thead><tr><th>代码</th><th>名称</th><th>笔数</th><th>当前市值</th><th>剩余成本</th><th>持有收益</th><th>高点回撤</th><th>状态</th></tr></thead>
       <tbody>${fRows}<tr style="border-top:2px solid var(--line);font-weight:600"><td colspan="3">合计</td><td class="mono" style="text-align:right">${fmtYuanFull(mv)}</td><td class="mono" style="text-align:right">${fmtYuanFull(basis)}</td><td class="mono" style="text-align:right">${ret}</td><td colspan="2"></td></tr></tbody></table>
     </div></div>
   </div>
-  <div class="hint" style="margin-top:8px">市值/回撤由天天基金真实净值按你的每笔操作自动计算（卖出按 FIFO）。下方「生成方案」直接基于本台账计算。</div>`;
+  <div class="hint" style="margin-top:8px">金额为台账记账口径（买入=成交成本，卖出=到账金额）。市值/回撤由天天基金真实净值按每笔操作自动计算（卖出按 FIFO）。下方「生成方案」基于全量台账，不受当前筛选影响。</div>`;
 }
+
 function rbSave(){localStorage.setItem('rb_data',JSON.stringify({total:document.getElementById('rb-total').value,cash:document.getElementById('rb-cash').value})); setStatus('rb-dot','rb-st','ok','已记忆')}
 function rbLoad(){try{const d=JSON.parse(localStorage.getItem('rb_data')||'null'); if(!d) return; document.getElementById('rb-total').value=d.total||'';document.getElementById('rb-cash').value=d.cash||'';}catch(e){}}
 async function runRebalance(){
