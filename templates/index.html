@@ -4,10 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>量化选基 — V3.7 规则合成模型</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
-<noscript><link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet"></noscript>
+<!-- 系统字体：不依赖 Google Fonts，避免预览环境外网阻塞首屏 -->
 <style>
   :root{
     --bg:#fcfcfa;
@@ -465,8 +462,18 @@
   <footer>仅量化研究，不构成投资建议 · 天天基金 / 乐咕 / 中证 / 新浪</footer>
 </div>
 
+<script>window.__BOOT__={{ boot_json|default("{}")|safe }};</script>
 <script>
 let ROWS=[], sortKey='S_total', sortDir=-1, flt='all', mkt='all', poll=null;
+function takeBoot(k){const b=window.__BOOT__; if(!b||b[k]==null) return null; const v=b[k]; delete b[k]; return v;}
+function jfetch(url, opts){
+  const o=Object.assign({}, opts||{});
+  const ms=o.timeout==null?20000:o.timeout; delete o.timeout;
+  const ctrl=new AbortController();
+  const t=setTimeout(()=>ctrl.abort(), ms);
+  o.signal=ctrl.signal;
+  return fetch(url,o).finally(()=>clearTimeout(t));
+}
 const OVERSEAS_TYPES=new Set(['指数型-海外股票','QDII-普通股票','QDII-混合偏股','QDII-混合灵活','QDII-混合平衡','QDII-混合债','QDII-纯债','QDII-商品','QDII-FOF','QDII-REITs']);
 function regionOf(r){return (r.region)||(OVERSEAS_TYPES.has(r.ftype)?'海外':'A股')}
 function regionBadge(r){return regionOf(r)==='海外'?'<span class="badge b-blue" style="margin-right:6px">海外</span>':''}
@@ -484,7 +491,7 @@ function updateScanModeUI(){const mode=document.getElementById('scan-mode')?.val
 
 async function loadStrategyState(){
   try{
-    const j=await (await jfetch('/api/strategy_state',{timeout:12000})).json();
+    const j=takeBoot('strategy')||await (await jfetch('/api/strategy_state',{timeout:12000})).json();
     const sg=j.signal||{}, cs=j.crisis||{}, csh=j.cash||{}, mr=j.micro_risk||{}, dc=j.decision||{};
     document.getElementById('st-signal').innerHTML=`S&gt;${sg.buy_th} 买 · S&lt;${sg.sell_th} 卖 · ${sg.slots} 槽`;
     document.getElementById('st-risk').innerHTML=`现金 ${(csh.annual_yield*100).toFixed(1)}% · 止损 ${(mr.trail_stop*100).toFixed(0)}%`;
@@ -500,7 +507,7 @@ async function loadStrategyState(){
 async function loadTerrain(){
   const box=document.getElementById('terrain');
   try{
-    const j=await (await jfetch('/api/terrain',{timeout:20000})).json();
+    const j=takeBoot('terrain')||await (await jfetch('/api/terrain',{timeout:20000})).json();
     box.innerHTML=j.items.map(x=>{
       if(x.error) return `<div class="t"><div class="t-name">${x.name}</div><div class="t-meta">${x.error}</div></div>`;
       const p=x.pct??50, cls=p<=30?'c-low':(p<=70?'c-mid':'c-high'), c=p<=30?'var(--success)':(p<=70?'var(--warn)':'var(--danger)');
@@ -567,7 +574,7 @@ function startPoll(){
 }
 function poolPct(r,a){return a.length? a.filter(x=>x.S_total<=r.S_total).length/a.length:0}
 function sigOf(r){const ps=String(r.penalty_str||''); const veto=/-100%/.test(ps)||((r.penalties||[]).some(p=>p[1]>=1)); if(veto) return `<span class="badge b-red">否决</span>`; if(r.channel==='新星') return r.S_total>=50?`<span class="badge b-blue">观察</span>`:`<span class="badge b-mute">—</span>`; if((r.rating||'').includes('封顶')) return `<span class="badge b-green">Buy·帽</span>`; if(r.S_total>=70) return `<span class="badge b-green">买入</span>`; if(r.S_total<45) return `<span class="badge b-red">卖出</span>`; if(r.S_total>=50) return `<span class="badge b-amber">持有</span>`; return `<span class="badge b-mute">回避</span>`}
-async function loadResults(){const j=await (await jfetch('/api/results',{timeout:25000})).json(); ROWS=j.rows||[]; const M=ROWS.filter(r=>r.channel!=='新星'); ROWS.forEach(r=>r.pool_pct=poolPct(r,M)); document.getElementById('bd-empty').style.display=ROWS.length?'none':''; document.getElementById('bd-n').textContent=ROWS.length?`${j.n} · ${j.stamp} · ${j.asof||''}${j.n_a!=null?` · A股 ${j.n_a} · 海外 ${j.n_ov}`:''}`:''; renderBoard()}
+async function loadResults(){const j=takeBoot('results')||await (await jfetch('/api/results',{timeout:25000})).json(); ROWS=j.rows||[]; const M=ROWS.filter(r=>r.channel!=='新星'); ROWS.forEach(r=>r.pool_pct=poolPct(r,M)); document.getElementById('bd-empty').style.display=ROWS.length?'none':''; document.getElementById('bd-n').textContent=ROWS.length?`${j.n} · ${j.stamp} · ${j.asof||''}${j.n_a!=null?` · A股 ${j.n_a} · 海外 ${j.n_ov}`:''}`:''; renderBoard()}
 function setFlt(f){flt=f; document.querySelectorAll('#flt-seg button').forEach(b=>b.classList.toggle('on',b.dataset.f===f)); renderBoard()}
 function setMkt(m){mkt=m; document.querySelectorAll('#mkt-seg button').forEach(b=>b.classList.toggle('on',b.dataset.m===m)); renderBoard()}
 function sortBy(k){if(sortKey===k) sortDir*=-1; else{sortKey=k;sortDir=-1} renderBoard()}
@@ -652,17 +659,13 @@ let LEDGER_TXNS=[];
 let DCA_STATE = {terminated:{}, ignored:{}, take_profit:{}};
 async function updateLedger(){
   try{
-    const j=await (await jfetch('/api/ledger',{timeout:15000})).json();
+    const j=takeBoot('ledger')||await (await jfetch('/api/ledger',{timeout:15000})).json();
     LEDGER_TXNS=j.txns||[];
     if(j.dca_state){
       // 服务端状态为基准，本地刚写入的标记（可能尚未落库）优先，避免补齐后立刻被旧状态覆盖而再次询问
       DCA_STATE.terminated = Object.assign({}, j.dca_state.terminated||{}, DCA_STATE.terminated);
       DCA_STATE.ignored = Object.assign({}, j.dca_state.ignored||{}, DCA_STATE.ignored);
       DCA_STATE.take_profit = Object.assign({}, j.dca_state.take_profit||{}, DCA_STATE.take_profit);
-    }
-    renderLedger(j);
-    if(typeof checkMissingDCA === 'function') checkMissingDCA();
-    if(typeof tpMaybeAutoDetect === 'function') tpMayTATE.take_profit = Object.assign({}, j.dca_state.take_profit||{}, DCA_STATE.take_profit);
     }
     renderLedger(j);
     if(typeof checkMissingDCA === 'function') checkMissingDCA();
@@ -1398,8 +1401,16 @@ updateScanModeUI();
 updateLedger();
 loadStrategyState();
 loadTerrain();
-loadResults();
+loadResults().catch(()=>{ const e=document.getElementById('bd-empty'); if(e) e.textContent='榜单加载超时，请点「加载最近榜单」重试'; });
 refreshScanStatus().then(s=>{ if(s && (s.phase==='universe' || s.phase==='scoring')) startPoll(); }).catch(()=>{});
+setTimeout(()=>{
+  const d=document.getElementById('hd-date');
+  if(d && d.textContent==='加载中…'){
+    d.textContent='本地缓存';
+    const dot=document.getElementById('hd-dot');
+    if(dot) dot.className='dot';
+  }
+}, 4000);
 </script>
 </body>
 </html>

@@ -31,15 +31,18 @@ from config import (
 )
 
 app = Flask(__name__)
+app.config["TEMPLATES_AUTO_RELOAD"] = True
+app.jinja_env.auto_reload = True
 
 
 @app.after_request
 def _preview_headers(resp):
-    """Arena / iframe 预览：禁止被 X-Frame-Options 挡在空白加载页。"""
+    """Arena / iframe 预览：不要用 CSP 卡死内联脚本，允许跨源预览域名。"""
     resp.headers.pop("X-Frame-Options", None)
-    # 不覆盖业务 CSP；仅在未设置时放开 frame-ancestors
-    if "Content-Security-Policy" not in resp.headers:
-        resp.headers["Content-Security-Policy"] = "frame-ancestors *"
+    resp.headers.pop("Content-Security-Policy", None)
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Allow-Methods"] = "GET,POST,DELETE,OPTIONS"
     resp.headers["Cache-Control"] = "no-store"
     return resp
 
@@ -607,7 +610,20 @@ def _parse_int(v, default, low=None, high=None):
 # ---------------- 页面 ----------------
 @app.route("/")
 def home():
-    return render_template("index.html")
+    # 首屏数据直接嵌进 HTML：预览 iframe 里即便后续 fetch 失败，水位/地形也不会一直转圈
+    boot = {}
+    try:
+        with app.test_request_context():
+            for key, fn in (("strategy", strategy_state), ("terrain", terrain),
+                            ("ledger", ledger_get)):
+                try:
+                    boot[key] = fn().get_json()
+                except Exception as e:
+                    boot.setdefault("_errors", {})[key] = str(e)[:120]
+    except Exception as e:
+        boot["_errors"] = {"boot": str(e)[:120]}
+    payload = json.dumps(boot, ensure_ascii=False).replace("<", "\\u003c")
+    return render_template("index.html", boot_json=payload)
 
 
 # ---------------- 估值地形图 + 大盘水位计(V3.2) ----------------
