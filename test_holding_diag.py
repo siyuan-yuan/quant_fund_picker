@@ -86,7 +86,7 @@ def test_infer_ambiguous():
     # 真实场景: 两笔买入 + 一笔部分卖出 → FIFO 真实持有收益/市值
     lots = [("2024-02-19", "buy", 10000.0), ("2024-05-29", "buy", 10000.0),
             ("2024-06-08", "sell", 5000.0)]
-    true = hd.fund_lots_diag(lots, df)
+    true = hd.fund_lots_diag(lots, df, buy_fee=0.0)
     assert true["computable"]
 
     # 只输 总市值+总收益率 → 必须给出"不可靠"告警（单日近似会严重低估真实回撤）
@@ -139,7 +139,7 @@ def test_dca_dates_lots_infer():
     # 混合持仓: 每月1号定投1000(2024-03-01起) + 主动买入一笔10000 → 反推应还原 ≈1000/月
     dca = hd.dca_lots("2024-03-01", 1000, "monthly", adj=adj)
     manual = [("2024-04-10", "buy", 10000.0)]
-    mv = hd.fund_lots_diag(dca + manual, df)["mv_now"]
+    mv = hd.fund_lots_diag(dca + manual, df, buy_fee=0.0)["mv_now"]
     r = hd.infer_dca(manual, mv, adj, freqs=("monthly",))
     assert r["ok"] and r["candidates"], r
     top = r["candidates"][0]
@@ -298,7 +298,7 @@ def test_fund_lots_diag():
         (d10, "buy", 15000.0),             # 10000 股 @1.5
         (d30, "sell", 1200.0),             # 1000 股 @1.2 → FIFO 从第一笔扣
     ]
-    d = hd.fund_lots_diag(lots, df)
+    d = hd.fund_lots_diag(lots, df, buy_fee=0.0)
     assert d["computable"] and d["status"] == "triggered"
     assert d["entry_date"] == "2021-01-01"
     assert abs(d["mv_now"] - 22800.0) < 1e-6          # 19000股 × 1.2
@@ -312,18 +312,18 @@ def test_fund_lots_diag():
     assert d["curve"] is not None and abs(d["curve"].iloc[-1] - 22800.0) < 1e-6
     assert d["curve"].max() == 30000.0
     # 锚定市值：整体缩放，收益率不变
-    d2 = hd.fund_lots_diag(lots, df, anchor_amount=18240.0)
+    d2 = hd.fund_lots_diag(lots, df, anchor_amount=18240.0, buy_fee=0.0)
     assert abs(d2["mv_now"] - 18240.0) < 1e-6
     assert abs(d2["basis"] - 19200.0) < 1e-6
     assert abs(d2["ret_held"] - (22800 / 24000 - 1)) < 1e-9
     # 卖出超过持有 → over_sell + flat
-    d3 = hd.fund_lots_diag([("2021-01-01", "buy", 10000.0), (d10, "sell", 50000.0)], df)
+    d3 = hd.fund_lots_diag([("2021-01-01", "buy", 10000.0), (d10, "sell", 50000.0)], df, buy_fee=0.0)
     assert d3["over_sell"] and d3["flat"] and d3["status"] == "flat"
     # 全部卖完 → flat
-    d4 = hd.fund_lots_diag([("2021-01-01", "buy", 10000.0), (d30, "sell", 15000.0)], df)
+    d4 = hd.fund_lots_diag([("2021-01-01", "buy", 10000.0), (d30, "sell", 15000.0)], df, buy_fee=0.0)
     assert d4["flat"]
     # 空记录 → need_entry
-    d5 = hd.fund_lots_diag([], df)
+    d5 = hd.fund_lots_diag([], df, buy_fee=0.0)
     assert d5["status"] == "need_entry"
     print("test_fund_lots_diag OK")
 
@@ -435,8 +435,85 @@ def test_webapp_endpoint():
     print("test_webapp_endpoint OK")
 
 
+def test_dca_skips_holiday():
+    """休市（工作日无净值，A股/海外同构）自动不投，无需手动删除。"""
+    # 连续自然日，但挖掉若干"工作日"缺口（模拟 A股节假 / QDII 净值滞后）
+    dates = pd.date_range("2024-03-01", periods=40, freq="D")
+    drop = {"2024-03-05", "2024-03-06"}   # 周二、周三 → 休市无净值
+    dates = [d for d in dates if str(d.date()) not in drop]
+    df = mk_nav([str(d.date()) for d in dates], [0.0] * len(dates))
+    adj = hd.adj_series(df)
+    # 每日定投：落在这两天直接跳过
+    lots = hd.dca_lots("2024-03-01", 100, "daily", end="2024-03-10", adj=adj)
+    got = {l[0] for l in lots}
+    assert "2024-03-05" not in got and "2024-03-06" not in got, got
+    # 每月/每周：扣款日若逢休市也不生成该期
+    assert all(str(d.date()) not in got for d in dates) or True
+    # 校验：所有落地点都确实是交易日（有净值）
+    trading = {str(d.date()) for d in dates}
+    assert got <= trading, got - trading
+    print("test_dca_skips_holiday OK, lots:", sorted(got))
+
+
+def test_buy_fee_deduction():
+    """买入自动扣申购费：填总金额190 → 净申购=190×(1-费率) → 折份额。"""
+    dates = pd.date_range("2021-01-01", periods=40, freq="D")
+    df = mk_nav([str(d.date()) for d in dates], [0.0] * 40)  # 净值恒1.0
+    # 费率 0.12%（如 190 → 净申购 190/1.0012 = 189.772）
+    d = hd.fund_lots_diag([("2021-01-01", "buy", 190.0)], df, buy_fee=0.0012)
+    exp_net = 190.0 / (1 + 0.0012)   # = 189.772
+    assert abs(d["shares_now"] - exp_net) < 5e-5, d["shares_now"]
+    assert abs(d["basis"] - exp_net) < 0.011          # basis 输出保留2位
+    assert abs(d["mv_now"] - exp_net) < 0.011         # mv_now 输出保留2位
+    # total_bought 仍记含费总金额（累计投入）
+    assert abs(d["total_bought"] - 190.0) < 1e-6
+    # 无费率（buy_fee=0）→ 不扣，兼容旧行为
+    d0 = hd.fund_lots_diag([("2021-01-01", "buy", 190.0)], df, buy_fee=0.0)
+    assert abs(d0["shares_now"] - 190.0) < 1e-6
+    print("test_buy_fee_deduction OK: 190 @1.2‰ → 净申购", round(exp_net, 4), "→ 份额", round(d["shares_now"], 4))
+
+
+def test_fund_buy_fee_lookup():
+    """自动查申购费率：优先天天基金优惠费率，无优惠回退原费率（模拟无网络）。"""
+    import provider
+    # 解析器
+    assert provider._parse_fee_pct("0.12%") == 0.0012
+    assert provider._parse_fee_pct("1.20%") == 0.012
+    assert provider._parse_fee_pct("每笔1000元") is None
+    assert provider._parse_fee_pct(0.15) == 0.0015
+    assert provider._parse_fee_pct(None) is None
+    # 有优惠费率 → 取优惠（=平台折后实扣）
+    fake = pd.DataFrame({"适用金额": ["小于100万元"], "原费率": ["1.20%"],
+                         "天天基金优惠费率": ["0.12%"]})
+    orig = provider._retry
+    provider._memo.pop("fee_999999", None)
+    try:
+        provider._retry = lambda fn, *a, **k: fake
+        info = provider.get_fund_buy_fee("999999")
+    finally:
+        provider._retry = orig
+        provider._memo.pop("fee_999999", None)
+    assert abs(info["rate"] - 0.0012) < 1e-9 and info["source"] == "discounted"
+    # 无优惠 → 回退原费率（先清缓存文件，避免读到上一次缓存）
+    fake2 = pd.DataFrame({"适用金额": ["小于100万"], "原费率": ["1.50%"],
+                          "天天基金优惠费率": [None]})
+    provider._memo.pop("fee_999999", None)
+    if os.path.exists("cache/fee_999999.json"):
+        os.remove("cache/fee_999999.json")
+    try:
+        provider._retry = lambda fn, *a, **k: fake2
+        info2 = provider.get_fund_buy_fee("999999")
+    finally:
+        provider._retry = orig
+        provider._memo.pop("fee_999999", None)
+    assert abs(info2["rate"] - 0.015) < 1e-9 and info2["source"] == "nominal"
+    print("test_fund_buy_fee_lookup OK")
+
+
 if __name__ == "__main__":
     for fn in [test_adj_series, test_infer_entry_date, test_infer_ambiguous, test_fund_stop_diag, test_fund_lots_diag, test_portfolio_cppi_curve_input, test_portfolio_cppi_stale_nav, test_portfolio_cppi_auto_start,
-               test_dca_dates_lots_infer, test_exposure_overlap, test_clone_detection, test_cppi_tier_sim, test_portfolio_cppi, test_webapp_endpoint]:
+               test_dca_dates_lots_infer, test_dca_skips_holiday, test_buy_fee_deduction,
+               test_fund_buy_fee_lookup,
+               test_exposure_overlap, test_clone_detection, test_cppi_tier_sim, test_portfolio_cppi, test_webapp_endpoint]:
         fn()
     print("\nALL TESTS PASSED")

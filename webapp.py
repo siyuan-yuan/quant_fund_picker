@@ -233,7 +233,7 @@ def ledger_get():
         st = None
         try:
             nav_df = provider.get_fund_nav(code)
-            st = holding_diag.fund_lots_diag(lots, nav_df)
+            st = holding_diag.fund_lots_diag(lots, nav_df, code=code)
             if st.get("curve") is not None:
                 curves[code] = st["curve"]
         except Exception as e:
@@ -522,7 +522,12 @@ def ledger_import():
                 cost = amt * float(adj.iloc[pos]) / float(adj.iloc[-1])
             except Exception:
                 cost = amt
-        t = _norm_txn({"code": code, "date": buy_date, "side": "buy", "amount": cost, "note": "导入"})
+        # 导入得到的 cost 为"净成本（确认金额）"；台账金额按"含费总金额"存，
+        # 因此转回 gross = cost×(1+费率)，fund_lots_diag 计算净申购= gross/(1+费率)，
+        # 恰好还原 cost，避免二次扣费。
+        fee = holding_diag.buy_fee_rate(code)
+        gross = cost * (1.0 + fee)
+        t = _norm_txn({"code": code, "date": buy_date, "side": "buy", "amount": gross, "note": "导入"})
         key = (t["code"], t["date"], t["side"], round(t["amount"], 2)) if t else None
         if t and t["id"] not in existing_ids and key not in existing_keys:
             txns.append(t)
@@ -777,13 +782,14 @@ def dca_preview():
     lots = holding_diag.dca_lots(start, amt, freq, end, adj=adj)
     if not lots:
         return jsonify({"ok": False, "message": "生成 0 期（开始日期晚于净值最新日？）"}), 400
-    # 序列当前市值估算（每期按当日净值折份额 × 最新净值）
+    # 序列当前市值估算（每期按当日净值折份额 × 最新净值；已自动扣申购费）
+    fee = holding_diag.buy_fee_rate(code)
     now = float(adj.iloc[-1])
     n = len(adj)
     mv = 0.0
     for d, _, a in lots:
         pos = int(min(max(int(adj.index.searchsorted(pd.Timestamp(d))), 0), n - 1))
-        mv += a * now / float(adj.iloc[pos])
+        mv += a / (1.0 + fee) * now / float(adj.iloc[pos])
     total = sum(a for _, _, a in lots)
     return jsonify(clean(dict(
         ok=True, code=code, freq=freq, freq_label=holding_diag.DCA_FREQ_LABELS.get(freq, freq),
@@ -1300,7 +1306,7 @@ def rebalance():
                 stop = holding_diag.fund_lots_diag(
                     ledger_by[code], nav_df,
                     anchor_amount=amt if amt and amt > 0 else None,
-                    stop=STRAT_TRAIL_STOP)
+                    stop=STRAT_TRAIL_STOP, code=code)
             else:
                 # 用户输入(买入日期/成本/收益率)合并进评分行，供净值曲线反推入场
                 rec_in = dict(rec) if isinstance(rec, dict) else {"code": code, "name": code}
