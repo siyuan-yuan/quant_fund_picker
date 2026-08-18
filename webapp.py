@@ -32,6 +32,22 @@ from config import (
 
 app = Flask(__name__)
 
+
+@app.after_request
+def _preview_headers(resp):
+    """Arena / iframe 预览：禁止被 X-Frame-Options 挡在空白加载页。"""
+    resp.headers.pop("X-Frame-Options", None)
+    # 不覆盖业务 CSP；仅在未设置时放开 frame-ancestors
+    if "Content-Security-Policy" not in resp.headers:
+        resp.headers["Content-Security-Policy"] = "frame-ancestors *"
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.get("/api/health")
+def health():
+    return jsonify({"ok": True, "service": "quant-fund-picker", "ts": int(time.time())})
+
 # ---------------- 操作台账（买卖记录持久化，output/ledger.json） ----------------
 LEDGER_FILE = os.path.join(OUTPUT_DIR, "ledger.json")
 # 定投状态（终止/忽略标记）单独持久化，避免与台账记录格式耦合。
@@ -623,14 +639,21 @@ def terrain():
                         "date": str(pe.index[-1].date())})
         except Exception as e:
             out.append({"name": name, "error": str(e)[:60]})
-    w = market_water(None)
+    try:
+        w = market_water(None)
+    except Exception:
+        w = float("nan")
+    try:
+        rev = provider.market_reversal_signal("sh000300")
+    except Exception as e:
+        rev = {"error": str(e)[:80]}
     _dates = [o["date"] for o in out if o.get("date")]
     return jsonify({"items": out, "water": None if w != w else round(w * 100, 1),
                     "water_style": "6风格等权PE分位", "regime": regime_label(w),
                     "asof": max(_dates) if _dates else None,
                     "asof_expected": provider.expected_last_td(),
                     "stale": provider.stale_warnings(),
-                    "reversal": provider.market_reversal_signal("sh000300")})
+                    "reversal": rev})
 
 
 # ---------------- V3.8 执行层策略状态 —— 抽出危机计算供复用 ----------------
@@ -751,7 +774,12 @@ def results():
     if "region" in df:
         n_a = int((df["region"] == "A股").sum())
         n_ov = int((df["region"] == "海外").sum())
-    return jsonify({"rows": clean(df.where(pd.notna(df), None).to_dict("records")),
+    # 榜单首屏只要表格列。rbsa JSON 会把 4500 行撑到数 MB，浏览器一直转圈。
+    keep = ["code", "name", "ftype", "region", "channel", "S_total", "rating",
+            "F_value", "F_alpha", "F_momentum", "val_pct", "penalty_str", "last_date"]
+    cols = [c for c in keep if c in df.columns]
+    view = df[cols] if cols else df
+    return jsonify({"rows": clean(view.where(pd.notna(view), None).to_dict("records")),
                     "stamp": stamp, "n": len(df), "n_a": n_a, "n_ov": n_ov,
                     "asof": asof, "asof_expected": exp,
                     "asof_stale": bool(asof and asof < exp),
@@ -1952,8 +1980,7 @@ if __name__ == "__main__":
     print("============================================================", flush=True)
     try:
         from waitress import serve
-        serve(app, host="0.0.0.0", port=8000, threads=8)
+        serve(app, host="0.0.0.0", port=8000, threads=8, ident="quant-fund-picker")
     except ImportError:
-        from wsgiref.simple_server import make_server
-        server = make_server("0.0.0.0", 8000, app)
-        server.serve_forever()
+        # 禁止回退到单线程 wsgiref：任一慢接口都会让整页一直转圈
+        app.run(host="0.0.0.0", port=8000, threaded=True, use_reloader=False)
