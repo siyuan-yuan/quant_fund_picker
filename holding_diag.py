@@ -21,6 +21,42 @@
 import numpy as np
 import pandas as pd
 
+try:
+    import config
+    _BUY_FEE_DEFAULT = float(config.BUY_FEE_RATE)
+    _BUY_FEE_BY_FUND = getattr(config, "BUY_FEE_BY_FUND", {}) or {}
+except Exception:
+    _BUY_FEE_DEFAULT = 0.0015
+    _BUY_FEE_BY_FUND = {}
+
+
+def buy_fee_rate(code):
+    """取某基金申购费率（折后实扣费率），优先级：
+
+    1. config.BUY_FEE_BY_FUND 按代码覆盖（用户显式指定，最高优先）；
+    2. 自动查天天基金（provider.get_fund_buy_fee）该基金的折后申购费率；
+    3. 兜底 config.BUY_FEE_RATE 默认值。
+    任何失败都返回非 0 的小数费率，绝不阻断计算。
+    """
+    code = str(code or "")
+    try:
+        if code in _BUY_FEE_BY_FUND:
+            return float(_BUY_FEE_BY_FUND[code])
+    except (TypeError, ValueError):
+        pass
+    try:
+        import provider  # 惰性导入，避免 holding_diag 顶部依赖 provider
+        info = provider.get_fund_buy_fee(code)
+        rate = float(info.get("rate") or 0)
+        if rate > 0:
+            return rate
+    except Exception:
+        pass
+    try:
+        return float(_BUY_FEE_DEFAULT)
+    except (TypeError, ValueError):
+        return 0.0
+
 
 def adj_series(nav_df):
     """复权净值序列：由天天基金官方日增长率(复权)累乘，date 升序"""
@@ -149,15 +185,18 @@ def dca_dates(start, freq="monthly", end=None):
 def dca_lots(start, amount, freq="monthly", end=None, adj=None):
     """生成定投买入记录 [(date_str, 'buy', amount), ...]。
 
-    adj 提供时裁剪到净值覆盖范围 [首个净值日, 最新净值日]（早于成立日的期次丢弃）。
+    adj 提供时自动跳过休市：
+      - 裁剪到净值覆盖范围 [首个净值日, 最新净值日]（早于成立日的期次丢弃）；
+      - **只保留实际有净值的交易日**（A股/海外的周末与法定/境外休市在净值序列里
+        都是缺行）→ 定投落在休市日直接不投，无需再手动删除。
     """
     amount = float(amount)
     if amount <= 0:
         return []
     dates = dca_dates(start, freq, end)
     if adj is not None and len(adj):
-        lo, hi = adj.index[0].date(), adj.index[-1].date()
-        dates = [d for d in dates if lo <= d <= hi]
+        trading = set(adj.index.date)      # 有净值的日子 = 该基金真实交易日
+        dates = [d for d in dates if d in trading]
     return [(str(d), "buy", amount) for d in dates]
 
 
@@ -376,11 +415,16 @@ def find_clone_exposure(cand_expo, ref_list, max_l1=0.02):
     return None, None
 
 
-def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15):
+def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15, code=None,
+                   buy_fee=None):
     """多笔买入/卖出 → 单基金持仓诊断（FIFO 成本 + 持仓市值曲线 + 入场高点回撤）。
 
     lots: [(date, side, amount), ...]  side ∈ {'buy','sell'}，amount 为金额（元）。
-      买入金额 = 成交成本；卖出金额 = 卖出所得（按当日复权净值折算份额，忽略申赎费）。
+      买入金额 = 用户填写的**扣款总金额（含申购费）**，系统自动扣费后折份额：
+        净申购 = 金额 × (1 - 申购费率)，份额 = 净申购 ÷ 当日净值（费率见 config）。
+      卖出金额 = 卖出净到账（已扣赎回费，赎回费默认 0，见 config）。
+    code: 基金代码（可选），用于查该基金的申购费率覆盖（BUY_FEE_BY_FUND）。
+    buy_fee: 申购费率（可选）。给定时直接使用；缺省 None 时按 code 查 config。
     anchor_amount: 用户当前市值（可选）。份额×现值与用户市值存在小数差/费用差时，
       按 k=市值/计算值 整体缩放成本与曲线，保证"当前市值=用户所填"且持有收益率不变。
     返回 dict（字段与 fund_stop_diag 兼容的超集）：
@@ -416,17 +460,21 @@ def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15):
         return min(max(p, 0), n - 1)
 
     # ---- 逐日持仓份额（卖出超持有时截断至0，标记 over_sell）----
+    # 买入自动扣前端申购费（正确公式）：净申购金额 = 总金额 / (1 + 费率)，
+    # 份额 = 净申购金额 ÷ 当日净值；卖出金额视为净到账。
+    fee = buy_fee_rate(code) if buy_fee is None else float(buy_fee)
     deltas = np.zeros(n)
     run = 0.0
     for d, side, amt in lots:
         px = float(adj.iloc[_pos(d)])
         if px <= 0:
             continue
-        sh = amt / px
         if side == "buy":
+            sh = amt / (1.0 + fee) / px
             deltas[_pos(d)] += sh
             run += sh
         else:
+            sh = amt / px
             if sh > run + 1e-6:
                 out["over_sell"] = True
             deltas[_pos(d)] -= sh
@@ -434,6 +482,8 @@ def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15):
     shares_t = np.maximum(np.cumsum(deltas), 0.0)
 
     # ---- FIFO 剩余成本（卖出按先进先出扣减成本）----
+    # 买入成本 = 净申购金额（总金额/(1+申购费率)），与账户"持仓成本=确认金额"口径一致；
+    # total_bought 仍记用户填写的扣款总金额（含费），作为"累计投入"展示。
     q = []          # [剩余份额, 剩余成本]
     total_bought = total_sold = 0.0
     for d, side, amt in lots:
@@ -441,7 +491,8 @@ def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15):
         if px <= 0:
             continue
         if side == "buy":
-            q.append([amt / px, amt])
+            net = amt / (1.0 + fee)
+            q.append([net / px, net])
             total_bought += amt
         else:
             sh_sell = amt / px
@@ -561,7 +612,7 @@ def fund_stop_diag(rec, nav_df, stop=0.20, warn_dd=0.15):
     cost = ui["cost"] if (ui["cost"] or 0) > 0 else (ui["amount"] or 0)
     lots = [(pd.Timestamp(entry), "buy", cost)]
     d = fund_lots_diag(lots, nav_df, anchor_amount=ui["amount"] if (ui["amount"] or 0) > 0 else None,
-                       stop=stop, warn_dd=warn_dd)
+                       stop=stop, warn_dd=warn_dd, code=rec.get("code"))
     out.update(d)
     out["inferred"] = bool(ui["buy_date"] is None and out.get("entry_date"))
     # fund_lots_diag 成功路径 reason="" 会覆盖反推警告 → 重新挂上

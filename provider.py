@@ -466,3 +466,82 @@ def is_passive_fund(code: str, name: str = "") -> bool:
     ftype = fund_type(code)
     name = name or ""
     return ("指数" in ftype) or ("指数" in name) or ("ETF" in name) or ("联接" in name)
+
+
+# ---------------- 基金申购费率 (天天基金 fundf10) ----------------
+FEE_FALLBACK_DEFAULT = 0.0015   # 网络/解析失败时的兜底默认（折后 0.15%）
+
+
+def _parse_fee_pct(v):
+    """把 '0.12%' / '1.20%' / 0.12 解析为小数费率；'每笔1000元' 等固定额返回 None。"""
+    if v is None:
+        return None
+    if isinstance(v, (int, float)):
+        f = float(v)
+        return None if not (0 < f <= 100) else f / 100.0
+    s = str(v).strip().replace("%", "").replace("％", "").replace(",", "").replace(" ", "")
+    if not s or "每笔" in s or "笔" in s:
+        return None
+    try:
+        f = float(s)
+    except (TypeError, ValueError):
+        return None
+    return None if not (0 < f <= 100) else f / 100.0
+
+
+def get_fund_buy_fee(code: str) -> dict:
+    """自动查某基金的**申购费率**（折后实扣费率）。
+
+    来源: 天天基金基金档案-购买信息 `ak.fund_fee_em(symbol, "申购费率")`，
+    返回各金额档的 `原费率` 与 `天天基金优惠费率`（即平台折后实扣）。取**最小金额档**
+    （散户实际买入档）的优惠费率，无优惠则回退原费率。结果缓存到 cache/fee_<code>.json。
+
+    返回: {"rate": 小数费率, "source": "nominal"|"discounted"|"default"|"override",
+           "original": 名义费率, "discounted": 优惠费率, "bracket": "适用金额档"}
+    任何异常都不会抛错——回退到 FEE_FALLBACK_DEFAULT，保证不阻断打分/台账。
+    """
+    code = str(code or "").zfill(6)
+    key = f"fee_{code}"
+    _roll_day()
+    if key in _memo:
+        return _memo[key]
+    path = f"{CACHE_DIR}/fee_{code}.json"
+    # 读缓存（含旧缓存复用；费率不随交易日变，当日新鲜即可）
+    d = None
+    if _fresh(path):
+        try:
+            d = json.load(open(path, encoding="utf-8"))
+        except Exception:
+            d = None
+    if d is None:
+        try:
+            df = _retry(lambda: ak.fund_fee_em(symbol=code, indicator="申购费率"),
+                        n=2, sleep=1.0)
+            if df is not None and len(df):
+                df = df.reset_index(drop=True)
+                # 列名防御
+                cols = {str(c): c for c in df.columns}
+                ocol = cols.get("原费率")
+                dcol = cols.get("天天基金优惠费率")
+                bcol = cols.get("适用金额")
+                orig = None if ocol is None else _parse_fee_pct(df.loc[0, ocol])
+                disc = None if dcol is None else _parse_fee_pct(df.loc[0, dcol])
+                bracket = None if bcol is None else str(df.loc[0, bcol])
+                # 优惠费率优先（=平台折后实扣），否则名义费率
+                rate = disc if disc is not None else orig
+                d = {
+                    "rate": rate if rate is not None else FEE_FALLBACK_DEFAULT,
+                    "source": "discounted" if (disc is not None) else
+                              ("nominal" if orig is not None else "default"),
+                    "original": orig, "discounted": disc, "bracket": bracket,
+                    "fetched": dt.date.today().isoformat(),
+                }
+                _atomic_write_json(d, path)
+            else:
+                raise RuntimeError("fund_fee_em 空表")
+        except Exception as e:
+            d = {"rate": FEE_FALLBACK_DEFAULT, "source": "default",
+                 "original": None, "discounted": None, "bracket": None,
+                 "fetched": dt.date.today().isoformat(), "_err": str(e)[:80]}
+    _memo[key] = d
+    return d
