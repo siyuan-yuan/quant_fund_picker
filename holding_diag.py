@@ -47,9 +47,8 @@ def buy_fee_rate(code):
     try:
         import provider  # 惰性导入，避免 holding_diag 顶部依赖 provider
         info = provider.get_fund_buy_fee(code)
-        rate = float(info.get("rate") or 0)
-        if rate > 0:
-            return rate
+        if isinstance(info, dict) and "rate" in info:
+            return float(info.get("rate") or 0)
     except Exception:
         pass
     try:
@@ -66,6 +65,49 @@ def adj_series(nav_df):
     df = df.dropna(subset=["ret"]).sort_values("date")
     adj = (1 + df["ret"].astype(float).fillna(0)).cumprod()
     return pd.Series(adj.values, index=pd.DatetimeIndex(df["date"]), name="adj")
+
+
+def unit_series(nav_df):
+    """单位净值序列（账户市值口径：确认份额 × 单位净值）。"""
+    if nav_df is None or len(nav_df) == 0 or "date" not in nav_df or "nav" not in nav_df:
+        return pd.Series(dtype=float, name="nav")
+    df = nav_df.dropna(subset=["nav"]).sort_values("date")
+    return pd.Series(df["nav"].astype(float).values,
+                     index=pd.DatetimeIndex(df["date"]), name="nav")
+
+
+def confirm_nav_pos(idx, d, delay=0):
+    """下单日 → 确认净值在序列中的位置。
+
+    规则（用户填的是北京 15:00 切日后的下单日）：
+      1. 下单日若无净值（周末/法定休市/海外休市）→ 顺延到下一交易日；
+      2. delay=1（QDII）再往后一个交易日（T 日下单，按 T+1 净值确认）；
+      3. 下单日晚于最新净值 → 暂用最新净值（在途/缓存未更新）。
+    """
+    if idx is None or len(idx) == 0:
+        return 0
+    p = int(idx.searchsorted(pd.Timestamp(d)))
+    n = len(idx)
+    if p >= n:
+        return n - 1
+    p = min(max(p, 0) + int(delay or 0), n - 1)
+    return max(p, 0)
+
+
+def nav_confirm_delay(code):
+    """QDII / 海外基金：下单日 T 按 T+1 净值确认；A 股为 0（当天净值）。"""
+    code = str(code or "").zfill(6) if code else ""
+    if not code or code == "000000":
+        return 0
+    try:
+        import provider
+        from config import OVERSEAS_FUND_TYPES
+        ft = str(provider.fund_type(code) or "")
+        if ft in OVERSEAS_FUND_TYPES or "QDII" in ft or "海外" in ft:
+            return 1
+    except Exception:
+        pass
+    return 0
 
 
 def parse_user_inputs(rec):
@@ -434,68 +476,76 @@ def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15, co
       total_bought / total_sold / lots_n / flat / curve(持仓市值曲线 Series)
     """
     adj = adj_series(nav_df)
+    unit = unit_series(nav_df)
+    navs = unit if len(unit) else adj
     out = dict(
         computable=False, status="no_data", reason="", entry_date=None, entry_nav=None,
         inferred=False, days_held=None, peak=None, peak_date=None, dd=None,
         trigger_nav=None, ret_held=None, mv_now=None, basis=None, shares_now=None,
         over_sell=False, total_bought=0.0, total_sold=0.0, lots_n=0,
         flat=False, curve=None, stop=float(stop),
+        nav_asof=None, buy_fee=None, confirm_delay=0, pending_buy=0.0, pending_n=0,
     )
-    if len(adj) < 30:
+    if len(navs) < 30:
         out["reason"] = "净值历史不足，无法计算入场高点回撤"
         return out
     lots = sorted([(pd.Timestamp(d), str(side).lower(), float(a))
                    for d, side, a in lots if a is not None and a > 0])
     lots = [(d, s, a) for d, s, a in lots if s in ("buy", "sell")]
+    # 当天及以后的单 = 待确认（支付宝「持有金额」不含在途），不计入当前市值
+    today0 = pd.Timestamp(pd.Timestamp.today().date())
+    pending = [(d, s, a) for d, s, a in lots if d.normalize() >= today0]
+    lots = [(d, s, a) for d, s, a in lots if d.normalize() < today0]
+    out["pending_n"] = len(pending)
+    out["pending_buy"] = round(sum(a for d, s, a in pending if s == "buy"), 2)
     if not lots:
         out["status"] = "need_entry"
         out["reason"] = "缺少买入记录，无法定位入场高点（在操作台账中添加买入，或输入 代码 市值 买入日期）"
+        if pending:
+            out["reason"] = "仅有待确认交易（下单日≥今天），支付宝持有金额尚未计入"
         return out
     out["lots_n"] = len(lots)
-    n = len(adj)
-    idx = adj.index
+    n = len(navs)
+    idx = navs.index
+    delay = 0
 
     def _pos(d):
-        p = int(idx.searchsorted(d))          # 买入日当天（含）按当日净值折算
-        return min(max(p, 0), n - 1)
+        return confirm_nav_pos(idx, d, delay)
 
-    # ---- 逐日持仓份额（卖出超持有时截断至0，标记 over_sell）----
-    # 买入自动扣前端申购费（正确公式）：净申购金额 = 总金额 / (1 + 费率)，
-    # 份额 = 净申购金额 ÷ 当日净值；卖出金额视为净到账。
     fee = buy_fee_rate(code) if buy_fee is None else float(buy_fee)
+    out["buy_fee"] = round(float(fee), 6)
+    out["confirm_delay"] = 0
+    out["nav_asof"] = str(idx[-1].date())
     deltas = np.zeros(n)
     run = 0.0
     for d, side, amt in lots:
-        px = float(adj.iloc[_pos(d)])
-        if px <= 0:
+        pxv = float(navs.iloc[_pos(d)])
+        if pxv <= 0:
             continue
         if side == "buy":
-            sh = amt / (1.0 + fee) / px
+            sh = amt / (1.0 + fee) / pxv
             deltas[_pos(d)] += sh
             run += sh
         else:
-            sh = amt / px
+            sh = amt / pxv
             if sh > run + 1e-6:
                 out["over_sell"] = True
             deltas[_pos(d)] -= sh
             run = max(0.0, run - sh)
     shares_t = np.maximum(np.cumsum(deltas), 0.0)
 
-    # ---- FIFO 剩余成本（卖出按先进先出扣减成本）----
-    # 买入成本 = 净申购金额（总金额/(1+申购费率)），与账户"持仓成本=确认金额"口径一致；
-    # total_bought 仍记用户填写的扣款总金额（含费），作为"累计投入"展示。
-    q = []          # [剩余份额, 剩余成本]
+    q = []
     total_bought = total_sold = 0.0
     for d, side, amt in lots:
-        px = float(adj.iloc[_pos(d)])
-        if px <= 0:
+        pxv = float(navs.iloc[_pos(d)])
+        if pxv <= 0:
             continue
         if side == "buy":
             net = amt / (1.0 + fee)
-            q.append([net / px, net])
+            q.append([net / pxv, net])
             total_bought += amt
         else:
-            sh_sell = amt / px
+            sh_sell = amt / pxv
             total_sold += amt
             while sh_sell > 1e-9 and q:
                 take = min(q[0][0], sh_sell)
@@ -511,22 +561,21 @@ def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15, co
                    basis=0.0, total_bought=total_bought, total_sold=total_sold,
                    reason="台账中该基金已全部卖出，不计入组合")
         return out
-    mv = shares_now * float(adj.iloc[-1])
-    # ---- 锚定用户市值（可选）：整体缩放曲线与成本，收益率不变 ----
+    mv = shares_now * float(navs.iloc[-1])
     k = 1.0
     if anchor_amount and anchor_amount > 0 and mv > 0:
         k = anchor_amount / mv
-    curve = pd.Series(shares_t * adj.values * k, index=idx, name="value")
-    curve[shares_t <= 1e-9] = np.nan       # 入场前/空仓期为 NaN（组合曲线按最早买入日自适应裁剪）
+    curve = pd.Series(shares_t * navs.values * k, index=idx, name="value")
+    curve[shares_t <= 1e-9] = np.nan
     basis *= k
     mv = float(curve.iloc[-1])
     first_pos = int(np.argmax(shares_t > 1e-9))
-    peak_adj = float(adj.iloc[first_pos:].max())
-    peak_adj_date = adj.iloc[first_pos:].idxmax()
-    peak_val = float(curve.iloc[first_pos:].max())   # 持仓市值高点（多笔含卖出时为组合口径）
+    peak_adj = float(navs.iloc[first_pos:].max())
+    peak_adj_date = navs.iloc[first_pos:].idxmax()
+    peak_val = float(curve.iloc[first_pos:].max())
     dd = float(mv / peak_val - 1.0)
     entry_date = idx[first_pos]
-    entry_nav = float(adj.iloc[first_pos])
+    entry_nav = float(navs.iloc[first_pos])
     ret_held = float(mv / basis - 1.0) if basis > 0 else None
     out.update(
         computable=True,

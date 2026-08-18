@@ -435,6 +435,20 @@ def test_webapp_endpoint():
     print("test_webapp_endpoint OK")
 
 
+def test_confirm_nav_pos_and_holiday():
+    """下单日无净值 → 下一交易日；delay=1 再顺延一天（QDII T+1）。"""
+    dates = pd.bdate_range("2024-03-01", "2024-03-15")
+    idx = pd.DatetimeIndex(dates)
+    assert hd.confirm_nav_pos(idx, "2024-03-01", 0) == 0
+    p = hd.confirm_nav_pos(idx, "2024-03-02", 0)
+    assert str(idx[p].date()) == "2024-03-04"
+    p1 = hd.confirm_nav_pos(idx, "2024-03-01", 1)
+    assert str(idx[p1].date()) == "2024-03-04"
+    plast = hd.confirm_nav_pos(idx, "2024-12-31", 0)
+    assert plast == len(idx) - 1
+    print("test_confirm_nav_pos_and_holiday OK")
+
+
 def test_dca_skips_holiday():
     """休市（工作日无净值，A股/海外同构）自动不投，无需手动删除。"""
     # 连续自然日，但挖掉若干"工作日"缺口（模拟 A股节假 / QDII 净值滞后）
@@ -479,6 +493,9 @@ def test_fund_buy_fee_lookup():
     # 解析器
     assert provider._parse_fee_pct("0.12%") == 0.0012
     assert provider._parse_fee_pct("1.20%") == 0.012
+    assert provider._parse_fee_pct("0.00%") == 0.0
+    assert provider._parse_fee_pct("0%") == 0.0
+    assert provider._parse_fee_pct(0) == 0.0
     assert provider._parse_fee_pct("每笔1000元") is None
     assert provider._parse_fee_pct(0.15) == 0.0015
     assert provider._parse_fee_pct(None) is None
@@ -512,7 +529,7 @@ def test_fund_buy_fee_lookup():
 
 if __name__ == "__main__":
     for fn in [test_adj_series, test_infer_entry_date, test_infer_ambiguous, test_fund_stop_diag, test_fund_lots_diag, test_portfolio_cppi_curve_input, test_portfolio_cppi_stale_nav, test_portfolio_cppi_auto_start,
-               test_dca_dates_lots_infer, test_dca_skips_holiday, test_buy_fee_deduction,
+               test_dca_dates_lots_infer, test_confirm_nav_pos_and_holiday, test_dca_skips_holiday, test_buy_fee_deduction,
                test_fund_buy_fee_lookup,
                test_exposure_overlap, test_clone_detection, test_cppi_tier_sim, test_portfolio_cppi, test_webapp_endpoint]:
         fn()

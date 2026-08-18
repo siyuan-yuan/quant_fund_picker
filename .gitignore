@@ -1,6 +1,7 @@
 # Python cache
 __pycache__/
 *.py[cod]
+.venv/
 
 # Local/generated strategy experiment artifacts (large, reproducible)
 output/strategy_experiment_*.csv

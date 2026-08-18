@@ -31,6 +31,25 @@ from config import (
 )
 
 app = Flask(__name__)
+app.config["TEMPLATES_AUTO_RELOAD"] = True
+app.jinja_env.auto_reload = True
+
+
+@app.after_request
+def _preview_headers(resp):
+    """Arena / iframe 预览：不要用 CSP 卡死内联脚本，允许跨源预览域名。"""
+    resp.headers.pop("X-Frame-Options", None)
+    resp.headers.pop("Content-Security-Policy", None)
+    resp.headers["Access-Control-Allow-Origin"] = "*"
+    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    resp.headers["Access-Control-Allow-Methods"] = "GET,POST,DELETE,OPTIONS"
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.get("/api/health")
+def health():
+    return jsonify({"ok": True, "service": "quant-fund-picker", "ts": int(time.time())})
 
 # ---------------- 操作台账（买卖记录持久化，output/ledger.json） ----------------
 LEDGER_FILE = os.path.join(OUTPUT_DIR, "ledger.json")
@@ -108,16 +127,34 @@ def _norm_tp_plan(p) -> dict:
 
 
 def _norm_tp_lot(m) -> dict:
-    """规范化单批次止盈卖出记录 → 合法记录或 None（卖出金额/日期必填）"""
+    """规范化单批次止盈记录 → 合法记录或 None。
+    action=skip：用户明确选择不卖，不再提示；否则为已卖出（金额/日期必填）。"""
     if not isinstance(m, dict):
         return None
+    action = str(m.get("action") or "").strip().lower()
+    if action in ("skip", "hold", "nosell", "不卖", "不卖出") or m.get("skipped"):
+        out = {"action": "skip"}
+        sd = _parse_date(m.get("skipDate") or m.get("soldDate") or m.get("date"))
+        if sd:
+            out["skipDate"] = sd
+        if m.get("threshold") is not None:
+            try:
+                out["threshold"] = float(m["threshold"])
+            except (TypeError, ValueError):
+                pass
+        if m.get("gain") is not None:
+            try:
+                out["gain"] = float(m["gain"])
+            except (TypeError, ValueError):
+                pass
+        return out
     amt = _parse_yuan(m.get("soldAmount"))
     if not amt or amt <= 0:
         return None
     sd = _parse_date(m.get("soldDate"))
     if not sd:
         return None
-    out = {"mode": str(m.get("mode") or "keep_cost"),
+    out = {"action": "sold", "mode": str(m.get("mode") or "keep_cost"),
            "soldAmount": round(float(amt), 2), "soldDate": sd}
     if m.get("costNav") is not None:
         try:
@@ -190,10 +227,14 @@ def _norm_txn(t) -> dict:
     d = _parse_date(t.get("date"))
     if not d:
         return None
-    side = str(t.get("side", "")).strip().lower()
-    if side in ("买", "买入", "b", "buy"):
+    side_raw = str(t.get("side", "")).strip().lower()
+    isDca = bool(t.get("isDca", False))
+    if side_raw in ("买", "买入", "b", "buy"):
         side = "buy"
-    elif side in ("卖", "卖出", "s", "sell"):
+    elif side_raw in ("定投", "定投买入", "dca"):
+        side = "buy"
+        isDca = True
+    elif side_raw in ("卖", "卖出", "s", "sell"):
         side = "sell"
     else:
         return None
@@ -201,7 +242,6 @@ def _norm_txn(t) -> dict:
     if not amt or amt <= 0:
         return None
     tid = str(t.get("id") or f"l{int(time.time()*1000)}{random.randint(0,9999)}")
-    isDca = bool(t.get("isDca", False))
     return {"id": tid, "code": code, "date": d, "side": side,
             "amount": round(float(amt), 2), "note": str(t.get("note", "") or "")[:120], "isDca": isDca}
 
@@ -253,7 +293,25 @@ def ledger_get():
                                                   (STRAT_CPPI_DD3, STRAT_CPPI_SLOTS3)],
                                            full_slots=STRAT_SLOTS, hysteresis=STRAT_CPPI_HYSTERESIS)
     return jsonify(clean(dict(ok=True, txns=txns, funds=states, cppi=cppi,
-                              dca_state=_load_dca_state())))
+                              dca_state=_load_dca_state(),
+                              nav_expected=provider.expected_last_td())))
+
+
+@app.post("/api/nav/refresh")
+def nav_refresh():
+    """同步刷新台账里各基金净值（不阻塞首屏；前端点按钮或自动补刷）。"""
+    body = request.get_json(silent=True) or {}
+    codes = body.get("codes")
+    if not isinstance(codes, list) or not codes:
+        codes = sorted(_ledger_by_code(_load_ledger()).keys())
+    out = []
+    for raw in codes[:30]:
+        code = str(raw).zfill(6)
+        if not re.fullmatch(r"\d{6}", code):
+            continue
+        out.append(provider.refresh_fund_nav(code, timeout=12))
+    n_ok = sum(1 for r in out if r.get("ok"))
+    return jsonify(clean(dict(ok=True, refreshed=n_ok, total=len(out), results=out)))
 
 
 @app.post("/api/ledger")
@@ -316,7 +374,7 @@ def _tp_dca_lots(code):
     return lots
 
 
-def _tp_compute(lots, adj, threshold, mode, harvested):
+def _tp_compute(lots, adj, threshold, mode, harvested, delay=0):
     """定投各批次止盈计算（纯函数，可单测）。
 
     lots:      [{"date": "YYYY-MM-DD", "amount": float}] 去重后的定投买入批次
@@ -338,14 +396,18 @@ def _tp_compute(lots, adj, threshold, mode, harvested):
         cost_nav = float(adj.iloc[pos])
         gain = nav_now / cost_nav - 1.0
         key = _tp_lot_key(lot["date"], lot["amount"])
-        sold = harvested.get(key) if harvested else None
+        rec = harvested.get(key) if harvested else None
         row = {"key": key, "date": lot["date"], "amount": lot["amount"],
                "costNav": round(cost_nav, 4), "navNow": round(nav_now, 4),
                "navDate": nav_date, "gain": round(gain * 100, 2), "status": "pending",
                "sellAmount": 0.0}
-        if sold:
+        rec_action = str((rec or {}).get("action") or "").lower()
+        if rec and (rec_action == "skip" or rec.get("skipped")):
+            row["status"] = "skipped"
+            row["soldInfo"] = rec
+        elif rec:
             row["status"] = "sold"
-            row["soldInfo"] = sold
+            row["soldInfo"] = rec
         elif gain * 100 + 1e-9 >= threshold:
             row["status"] = "hit"
             if mode == "keep_cost":
@@ -358,6 +420,7 @@ def _tp_compute(lots, adj, threshold, mode, harvested):
     summary = {"n": len(rows),
                "nHit": sum(1 for r in rows if r["status"] == "hit"),
                "nSold": sum(1 for r in rows if r["status"] == "sold"),
+               "nSkipped": sum(1 for r in rows if r["status"] == "skipped"),
                "hitTotal": round(hit_total, 2),
                "navNow": round(nav_now, 4), "navDate": nav_date}
     return rows, summary
@@ -401,7 +464,7 @@ def dca_tp_preview():
         if not isinstance(tp, dict):
             tp = {}
     harvested = tp.get("lots", {}) if isinstance(tp.get("lots"), dict) else {}
-    rows, summary = _tp_compute(lots, adj, threshold, mode, harvested)
+    rows, summary = _tp_compute(lots, adj, threshold, mode, harvested, delay=0)
     name = code
     try:
         meta = provider.get_fund_meta()
@@ -445,7 +508,7 @@ def dca_tp_execute():
     tp_entry = state.setdefault("take_profit", {}).setdefault(code, {})
     tp_entry["plan"] = {"threshold": threshold, "mode": mode}
     harvested = tp_entry.setdefault("lots", {})
-    rows, _ = _tp_compute(lots, adj, threshold, mode, harvested)
+    rows, _ = _tp_compute(lots, adj, threshold, mode, harvested, delay=0)
     today = dt.date.today().isoformat()
     txns = _load_ledger()
     added, total_sell = 0, 0.0
@@ -458,7 +521,7 @@ def dca_tp_execute():
         if not nt:
             continue
         txns.append(nt)
-        harvested[r["key"]] = {"mode": mode, "soldAmount": r["sellAmount"],
+        harvested[r["key"]] = {"action": "sold", "mode": mode, "soldAmount": r["sellAmount"],
                                "soldDate": today, "costNav": r["costNav"], "nav": r["navNow"]}
         added += 1
         total_sell += r["sellAmount"]
@@ -469,6 +532,56 @@ def dca_tp_execute():
     return jsonify(clean(dict(ok=True, added=added, totalSell=round(total_sell, 2),
                               message=f"已记录卖出 {added} 笔，合计 {round(total_sell, 2):,.2f} 元",
                               txns=txns, dca_state=state)))
+
+
+
+@app.post("/api/dca_tp/skip")
+def dca_tp_skip():
+    """把已达线的所选批次标记为「不卖出」：不写卖出台账，之后不再提示该批次。
+    body: {code, threshold?, mode?, lotKeys: [lotKey...]}"""
+    body = request.get_json(silent=True) or {}
+    code = str(body.get("code", "")).zfill(6)
+    if not re.fullmatch(r"\d{6}", code):
+        return jsonify({"ok": False, "message": "基金代码无效"}), 400
+    try:
+        threshold = float(body.get("threshold", 20))
+    except (TypeError, ValueError):
+        threshold = 20.0
+    threshold = min(100.0, max(1.0, threshold))
+    mode = str(body.get("mode") or "keep_cost")
+    if mode not in TP_MODES:
+        mode = "keep_cost"
+    wanted = body.get("lotKeys")
+    if not isinstance(wanted, list) or not wanted:
+        return jsonify({"ok": False, "message": "请选择要标记为不卖出的批次"}), 400
+    wanted = {str(k) for k in wanted}
+    lots = _tp_dca_lots(code)
+    if not lots:
+        return jsonify({"ok": False, "message": "台账中无该基金的定投买入记录"}), 400
+    try:
+        adj = _tp_load_nav(code)
+    except Exception as e:
+        return jsonify({"ok": False, "message": f"净值获取失败: {str(e)[:120]}"}), 400
+    state = _load_dca_state()
+    tp_entry = state.setdefault("take_profit", {}).setdefault(code, {})
+    tp_entry["plan"] = {"threshold": threshold, "mode": mode}
+    harvested = tp_entry.setdefault("lots", {})
+    rows, _ = _tp_compute(lots, adj, threshold, mode, harvested, delay=0)
+    today = dt.date.today().isoformat()
+    added = 0
+    for r in rows:
+        if r["status"] != "hit" or r["key"] not in wanted or r["key"] in harvested:
+            continue
+        harvested[r["key"]] = {"action": "skip", "skipDate": today,
+                               "threshold": threshold, "gain": r["gain"]}
+        added += 1
+    if not added:
+        return jsonify({"ok": False, "message": "所选批次均未达线或已处理，未写入任何标记"}), 400
+    if not _save_dca_state(state):
+        return jsonify({"ok": False, "message": "保存失败（output 目录不可写？）"}), 500
+    return jsonify(clean(dict(ok=True, added=added,
+                              message=f"已标记 {added} 笔不卖出，之后不再提示",
+                              dca_state=state)))
 
 
 @app.post("/api/ledger/import")
@@ -591,7 +704,20 @@ def _parse_int(v, default, low=None, high=None):
 # ---------------- 页面 ----------------
 @app.route("/")
 def home():
-    return render_template("index.html")
+    # 首屏数据直接嵌进 HTML：预览 iframe 里即便后续 fetch 失败，水位/地形也不会一直转圈
+    boot = {}
+    try:
+        with app.test_request_context():
+            for key, fn in (("strategy", strategy_state), ("terrain", terrain),
+                            ("ledger", ledger_get)):
+                try:
+                    boot[key] = fn().get_json()
+                except Exception as e:
+                    boot.setdefault("_errors", {})[key] = str(e)[:120]
+    except Exception as e:
+        boot["_errors"] = {"boot": str(e)[:120]}
+    payload = json.dumps(boot, ensure_ascii=False).replace("<", "\\u003c")
+    return render_template("index.html", boot_json=payload)
 
 
 # ---------------- 估值地形图 + 大盘水位计(V3.2) ----------------
@@ -623,14 +749,21 @@ def terrain():
                         "date": str(pe.index[-1].date())})
         except Exception as e:
             out.append({"name": name, "error": str(e)[:60]})
-    w = market_water(None)
+    try:
+        w = market_water(None)
+    except Exception:
+        w = float("nan")
+    try:
+        rev = provider.market_reversal_signal("sh000300")
+    except Exception as e:
+        rev = {"error": str(e)[:80]}
     _dates = [o["date"] for o in out if o.get("date")]
     return jsonify({"items": out, "water": None if w != w else round(w * 100, 1),
                     "water_style": "6风格等权PE分位", "regime": regime_label(w),
                     "asof": max(_dates) if _dates else None,
                     "asof_expected": provider.expected_last_td(),
                     "stale": provider.stale_warnings(),
-                    "reversal": provider.market_reversal_signal("sh000300")})
+                    "reversal": rev})
 
 
 # ---------------- V3.8 执行层策略状态 —— 抽出危机计算供复用 ----------------
@@ -751,7 +884,12 @@ def results():
     if "region" in df:
         n_a = int((df["region"] == "A股").sum())
         n_ov = int((df["region"] == "海外").sum())
-    return jsonify({"rows": clean(df.where(pd.notna(df), None).to_dict("records")),
+    # 榜单首屏只要表格列。rbsa JSON 会把 4500 行撑到数 MB，浏览器一直转圈。
+    keep = ["code", "name", "ftype", "region", "channel", "S_total", "rating",
+            "F_value", "F_alpha", "F_momentum", "val_pct", "penalty_str", "last_date"]
+    cols = [c for c in keep if c in df.columns]
+    view = df[cols] if cols else df
+    return jsonify({"rows": clean(view.where(pd.notna(view), None).to_dict("records")),
                     "stamp": stamp, "n": len(df), "n_a": n_a, "n_ov": n_ov,
                     "asof": asof, "asof_expected": exp,
                     "asof_stale": bool(asof and asof < exp),
@@ -1952,8 +2090,7 @@ if __name__ == "__main__":
     print("============================================================", flush=True)
     try:
         from waitress import serve
-        serve(app, host="0.0.0.0", port=8000, threads=8)
+        serve(app, host="0.0.0.0", port=8000, threads=8, ident="quant-fund-picker")
     except ImportError:
-        from wsgiref.simple_server import make_server
-        server = make_server("0.0.0.0", 8000, app)
-        server.serve_forever()
+        # 禁止回退到单线程 wsgiref：任一慢接口都会让整页一直转圈
+        app.run(host="0.0.0.0", port=8000, threaded=True, use_reloader=False)

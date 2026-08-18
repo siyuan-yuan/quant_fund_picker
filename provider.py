@@ -18,8 +18,54 @@ TODAY = dt.date.today().isoformat()
 _memo = {}
 _memo_day = TODAY
 _FETCHED_TODAY = set()      # 每文件每日至多同步一次(防假期空转抓取)
+_BG_REFRESHING = set()      # 后台刷新中的路径，避免并发重复打源
 STALE_SERVED = []           # (文件, 旧数据截止日, 原因) — 降级不沉默
 STALE_OK = False   # True=使用过期缓存(walk-forward回测用, 历史数据不变)
+
+# 外网（东财/乐咕/中证）不通或无超时挂起时，页面会永远转圈。
+# 给 requests/akshare 补默认超时，并用线程墙钟兜底；有本地缓存则先回缓存。
+_HTTP_TIMEOUT = float(os.environ.get("QFP_FETCH_TIMEOUT", "8"))
+
+
+def _patch_requests_timeout(timeout=_HTTP_TIMEOUT):
+    """akshare 内部 requests 默认 timeout=None，sandbox/预览环境会永久挂起。"""
+    try:
+        if getattr(requests.Session.request, "_qfp_patched", False):
+            return
+        _orig = requests.Session.request
+
+        def _wrapped(self, method, url, **kwargs):
+            kwargs.setdefault("timeout", timeout)
+            return _orig(self, method, url, **kwargs)
+
+        _wrapped._qfp_patched = True
+        requests.Session.request = _wrapped
+    except Exception:
+        pass
+
+
+_patch_requests_timeout()
+
+
+def _run_with_timeout(fn, timeout=None):
+    """硬超时执行抓取，避免单次 akshare 调用卡死 Flask 线程。"""
+    timeout = _HTTP_TIMEOUT + 4 if timeout is None else timeout
+    box, err = {}, {}
+
+    def _target():
+        try:
+            box["v"] = fn()
+        except Exception as e:
+            err["e"] = e
+
+    t = threading.Thread(target=_target, daemon=True)
+    t.start()
+    t.join(timeout)
+    if t.is_alive():
+        raise TimeoutError(f"数据源超时({timeout:.0f}s)")
+    if err:
+        raise err["e"]
+    return box.get("v")
 
 # ---- 缓存并发安全：原子写 + 每路径锁 ----
 # 根因修复：旧代码 `df.to_csv(path)` / `json.dump(open(path,'w'))` 直接覆盖写，非原子。
@@ -105,35 +151,58 @@ def _content_fresh(path, lag=0):
 
 
 def _cached_or_fetch(path, fetch_df, lag=0):
-    """统一装载: 内容日期过期→重抓; 重抓失败→回退旧文件并记警告(降级不沉默)"""
+    """统一装载: 有缓存先回；内容过期则后台刷新。禁止同步打源卡住首屏。"""
     _roll_day()
 
+    def _read():
+        return pd.read_csv(path, parse_dates=["date"])
+
     def _stale():
+        # 回测 STALE_OK：历史缓存就是事实，绝不再打今日源
+        if STALE_OK:
+            return False
         return path not in _FETCHED_TODAY and not (_fresh(path) and _content_fresh(path, lag))
 
-    if _stale():
-        # 串行化同文件的重抓+写盘：并发请求(持仓诊断多线程评分/全市场扫描)会同时读到
-        # 过期缓存并同时重抓，非原子写会令并发读读到半写/空文件 → EmptyDataError。
-        # 锁内二次检查，保证同一路径只抓一次、其余线程直接复用结果。
-        with _lock_for(path):
-            if _stale():
+    have = os.path.exists(path) and os.path.getsize(path) > 32
+
+    def _refresh_sync():
+        df = _run_with_timeout(fetch_df)
+        _atomic_write_csv(df, path)
+        _FETCHED_TODAY.add(path)
+        return df
+
+    def _refresh_bg():
+        try:
+            _refresh_sync()
+        except Exception as e:
+            if have:
                 try:
-                    df = fetch_df()
-                    _atomic_write_csv(df, path)
-                except Exception as e:
-                    if os.path.exists(path):
-                        try:
-                            old = pd.read_csv(path, parse_dates=["date"])
-                        except Exception:
-                            old = None
-                        if old is not None and len(old):
-                            STALE_SERVED.append((os.path.basename(path),
-                                                 str(old["date"].max().date()), str(e)[:60]))
-                            _FETCHED_TODAY.add(path)
-                            return old
-                    raise
-                _FETCHED_TODAY.add(path)
-    return pd.read_csv(path, parse_dates=["date"])
+                    old = _read()
+                    asof = str(old["date"].max().date()) if old is not None and len(old) else "?"
+                except Exception:
+                    asof = "?"
+                STALE_SERVED.append((os.path.basename(path), asof, str(e)[:60]))
+            # 失败不记 FETCHED_TODAY：持仓页「刷新净值」还能再试
+        finally:
+            _BG_REFRESHING.discard(path)
+
+    if have and not _stale():
+        return _read()
+
+    if have and _stale():
+        # 首屏关键路径：立刻返回本地缓存，刷新放到后台
+        with _lock_for(path):
+            if _stale() and path not in _BG_REFRESHING:
+                _BG_REFRESHING.add(path)
+                threading.Thread(target=_refresh_bg, daemon=True).start()
+        return _read()
+
+    # 无缓存才同步抓；仍带硬超时，避免永久挂起
+    with _lock_for(path):
+        if os.path.exists(path) and os.path.getsize(path) > 32:
+            return _read()
+        df = _refresh_sync()
+        return df if df is not None else _read()
 
 
 def stale_warnings():
@@ -180,6 +249,43 @@ def get_fund_nav(code: str) -> pd.DataFrame:
     df = _cached_or_fetch(path, _build)
     _memo[key] = df
     return df
+
+
+def refresh_fund_nav(code: str, timeout=15):
+    """同步刷新一只基金净值。失败不记入 FETCHED_TODAY，允许稍后重试。"""
+    code = str(code or "").zfill(6)
+    key = f"nav_{code}"
+    path = f"{CACHE_DIR}/nav_{code}.csv"
+    _roll_day()
+
+    def _build():
+        raw = _retry(lambda: ak.fund_open_fund_info_em(symbol=code, indicator="单位净值走势"),
+                     n=2, sleep=1.0)
+        return pd.DataFrame({
+            "date": pd.to_datetime(raw["净值日期"]),
+            "nav": raw["单位净值"].astype(float).values,
+            "ret": raw["日增长率"].astype(float).div(100).values,
+        }).dropna().sort_values("date").reset_index(drop=True)
+
+    try:
+        df = _run_with_timeout(_build, timeout=timeout)
+        if df is None or len(df) == 0:
+            raise RuntimeError("净值空表")
+        _atomic_write_csv(df, path)
+        _memo[key] = df
+        _FETCHED_TODAY.add(path)
+        return {"ok": True, "code": code,
+                "asof": str(pd.Timestamp(df["date"].max()).date()), "n": int(len(df))}
+    except Exception as e:
+        _memo.pop(key, None)
+        asof = None
+        try:
+            if os.path.exists(path):
+                old = pd.read_csv(path, parse_dates=["date"])
+                asof = str(old["date"].max().date())
+        except Exception:
+            pass
+        return {"ok": False, "code": code, "asof": asof, "error": str(e)[:120]}
 
 
 # ---------------- 基金档案 (pingzhongdata) ----------------
@@ -478,6 +584,8 @@ def _parse_fee_pct(v):
         return None
     if isinstance(v, (int, float)):
         f = float(v)
+        if f == 0:
+            return 0.0
         return None if not (0 < f <= 100) else f / 100.0
     s = str(v).strip().replace("%", "").replace("％", "").replace(",", "").replace(" ", "")
     if not s or "每笔" in s or "笔" in s:
@@ -486,6 +594,8 @@ def _parse_fee_pct(v):
         f = float(s)
     except (TypeError, ValueError):
         return None
+    if f == 0:
+        return 0.0
     return None if not (0 < f <= 100) else f / 100.0
 
 
@@ -540,7 +650,8 @@ def get_fund_buy_fee(code: str) -> dict:
             else:
                 raise RuntimeError("fund_fee_em 空表")
         except Exception as e:
-            d = {"rate": FEE_FALLBACK_DEFAULT, "source": "default",
+            # 查不到时不要臆造 0.15% 把所有基金市值削一刀；按 0 计并标记，UI 可提示
+            d = {"rate": 0.0, "source": "default",
                  "original": None, "discounted": None, "bracket": None,
                  "fetched": dt.date.today().isoformat(), "_err": str(e)[:80]}
     _memo[key] = d
