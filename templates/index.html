@@ -354,8 +354,8 @@
             <option value="buy" selected>主动买入</option>
             <option value="dca">定投买入</option>
             <option value="sell">主动卖出</option></select></div>
-          <div class="field" id="box-led-dates"><label>日期 · 每行一条（支持多条）</label><textarea id="led-dates" rows="3" class="mono" style="min-height:88px" placeholder="2021-06-01&#10;2023-02-01&#10;2025-09-01"></textarea></div>
-          <div class="field" id="box-led-amts"><label>金额 · 与日期一一对应</label><textarea id="led-amts" rows="3" class="mono" style="min-height:88px" placeholder="20000&#10;10000&#10;8000"></textarea></div>
+          <div class="field" id="box-led-dates"><label>下单日 · 每行一条（15:00 前当天 / 15:00 后下一交易日）</label><textarea id="led-dates" rows="3" class="mono" style="min-height:88px" placeholder="2021-06-01&#10;2023-02-01&#10;2025-09-01"></textarea></div>
+          <div class="field" id="box-led-amts"><label>扣款总额 · 含申购费，系统自动扣</label><textarea id="led-amts" rows="3" class="mono" style="min-height:88px" placeholder="20000&#10;10000&#10;8000"></textarea></div>
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center">
           <button class="btn btn-primary" id="btn-led-add" style="padding:8px 16px" onclick="ledAdd()">添加记录</button>
@@ -380,7 +380,7 @@
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center">
           <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="dcaPreview()">生成定投序列</button>
-          <span class="hint" style="color:var(--muted)">自动检测台账中该基金的主动买入/卖出，保存后自动合并</span>
+          <span class="hint" style="color:var(--muted)">休市（A股/海外）自动跳过；按该基金净值日历生成，无需再手删</span>
         </div>
         <div class="preview mono" id="dca-preview" style="background:var(--surface)">填写参数后点「生成定投序列」。</div>
         <div class="actions">
@@ -391,6 +391,21 @@
       <div id="dca-prompt-panel" class="hide" style="margin-top:10px;padding:14px;background:var(--surface-2);border:1px dashed var(--warn);border-radius:8px">
         <div style="font-weight:bold; color:var(--warn); margin-bottom:8px;">发现待补齐的定投记录：</div>
         <div id="dca-prompt-list"></div>
+      </div>
+      <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--line)">
+        <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
+          <b>生成方案</b>
+          <span class="hint">基于台账持仓自动计算：评分 / 20% 入场止损 / CPPI 动态槽位 / 买卖指令</span>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin-top:10px">
+          <div class="field" style="flex:0 1 200px"><label>总资金</label><input id="rb-total" class="mono" placeholder="100000 或 10万"></div>
+          <div class="field" style="flex:0 1 200px"><label>可用现金</label><input id="rb-cash" class="mono" placeholder="20000"></div>
+          <button class="btn btn-primary" onclick="runRebalance()" id="rb-btn">生成方案</button>
+          <button class="btn btn-ghost" onclick="rbSave()">记忆</button>
+          <button class="btn btn-ghost" onclick="rbLoad()">恢复</button>
+        </div>
+        <div class="status"><span class="dot" id="rb-dot"></span><span id="rb-st">就绪</span></div>
+        <div id="rb-out" style="margin-top:12px"></div>
       </div>
       <div id="tp-panel" style="margin-top:10px;padding:14px;background:var(--surface-2);border:1px solid var(--line);border-radius:8px">
         <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
@@ -422,23 +437,8 @@
         </div>
         <div class="status" style="margin-top:6px"><span class="dot" id="tp-dot"></span><span id="tp-st">就绪</span></div>
       </div>
-      <div class="hint" style="margin-top:8px;line-height:1.7">同一基金一次可录入多笔：「日期」「金额」按行一一对应（3 个日期 ↔ 3 个金额），方向统一。买入=成交成本，卖出=到账金额（按当日净值折份额）；同一基金任意多笔，卖出按<b>先进先出</b>扣减成本与份额，全部卖完后自动从诊断中剔除。</div>
+      <div class="hint" style="margin-top:8px;line-height:1.7">同一基金一次可录入多笔：「日期」「金额」按行一一对应（3 个日期 ↔ 3 个金额），方向统一。买入填扣款总额（例 190 → 自动按费率折成确认金额 189.77）；卖出填到账金额。日期填北京 15:00 切日后的下单日，系统按交易日/QDII T+1 取确认净值；同一基金任意多笔，卖出按<b>先进先出</b>扣减成本与份额，全部卖完后自动从诊断中剔除。</div>
       <div id="led-out"></div>
-      <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--line)">
-        <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
-          <b>生成方案</b>
-          <span class="hint">基于台账持仓自动计算：评分 / 20% 入场止损 / CPPI 动态槽位 / 买卖指令</span>
-        </div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin-top:10px">
-          <div class="field" style="flex:0 1 200px"><label>总资金</label><input id="rb-total" class="mono" placeholder="100000 或 10万"></div>
-          <div class="field" style="flex:0 1 200px"><label>可用现金</label><input id="rb-cash" class="mono" placeholder="20000"></div>
-          <button class="btn btn-primary" onclick="runRebalance()" id="rb-btn">生成方案</button>
-          <button class="btn btn-ghost" onclick="rbSave()">记忆</button>
-          <button class="btn btn-ghost" onclick="rbLoad()">恢复</button>
-        </div>
-        <div class="status"><span class="dot" id="rb-dot"></span><span id="rb-st">就绪</span></div>
-        <div id="rb-out" style="margin-top:12px"></div>
-      </div>
     </div>
   </section>
 
@@ -757,54 +757,34 @@ function toggleSideMode(){
   }
 }
 
-function dcaPreview(){
+async function dcaPreview(){
   const code=document.getElementById('led-code').value.replace(/\D/g,'').padStart(6,'0');
   if(!/^\d{6}$/.test(code)){ setStatus('dca-dot','dca-st','err','基金代码需为 6 位数字'); return; }
   const st=document.getElementById('dca-start').value.trim();
   const ed=document.getElementById('dca-end').value.trim();
   const fq=document.getElementById('dca-freq').value;
-  const a=parseYuan(document.getElementById('dca-amt').value);
-  if(a<=0){ setStatus('dca-dot','dca-st','err','金额无效'); return; }
-  const norm=d=>{const x=d.replace(/[/.]/g,'-'); return /^\d{8}$/.test(x)?`${x.slice(0,4)}-${x.slice(4,6)}-${x.slice(6,8)}`:x};
+  const amt=parseYuan(document.getElementById('dca-amt').value);
+  if(amt<=0){ setStatus('dca-dot','dca-st','err','金额无效'); return; }
+  const norm=d=>{const x=d.replace(/[/.]/g,'-'); return /^\d{8}$/.test(x)?`${x.slice(0,4)}-${x.slice(4,6)}-${x.slice(6,8)}`:x;};
   const d0=norm(st);
   if(!/^\d{4}-\d{1,2}-\d{1,2}$/.test(d0)){ setStatus('dca-dot','dca-st','err','开始日期格式无效'); return; }
-  const endD=ed?new Date(norm(ed)):new Date();
-  let curr=new Date(d0);
-  if(isNaN(curr)||isNaN(endD)){ setStatus('dca-dot','dca-st','err','日期无效'); return; }
-  dcaGeneratedTxns=[];
-  while(curr<=endD){
-    let d=new Date(curr);
-    let isWeekend = (d.getDay()===0 || d.getDay()===6);
-    if(d.getDay()===0) d.setDate(d.getDate()+1);
-    else if(d.getDay()===6) d.setDate(d.getDate()+2);
-    
-    if(d<=endD){
-      const ds=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-      // 如果是每日定投，且当前日期是周末，则直接跳过，不在周一重复买入
-      if (!(fq === 'daily' && isWeekend)) {
-        // 如果是周/月定投遇到周末，顺延到周一（日期已修改）；同一天如果有多笔（极少情况），合并金额
-        const existing = dcaGeneratedTxns.find(t => t.date === ds);
-        if (existing) {
-          existing.amount += a;
-        } else {
-          dcaGeneratedTxns.push({code, side:'buy', isDca:true, date:ds, amount:a});
-        }
-      }
+  setStatus('dca-dot','dca-st','busy','按交易日生成（自动跳过休市）...');
+  try{
+    const body={code, start_date:d0, amount:amt, freq:fq};
+    if(ed) body.end_date=norm(ed);
+    const j=await (await fetch('/api/dca/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+    if(!j.ok){ setStatus('dca-dot','dca-st','err',j.message||'生成失败'); document.getElementById('dca-save-btn').disabled=true; return; }
+    dcaGeneratedTxns=(j.lots||[]).map(x=>({code, side:'buy', isDca:true, date:x.date, amount:x.amount}));
+    if(!dcaGeneratedTxns.length){
+      setStatus('dca-dot','dca-st','err','区间内无交易日（休市已跳过）');
+      document.getElementById('dca-preview').textContent='';
+      document.getElementById('dca-save-btn').disabled=true;
+      return;
     }
-    if(fq==='daily') curr.setDate(curr.getDate()+1);
-    else if(fq==='weekly') curr.setDate(curr.getDate()+7);
-    else if(fq==='biweekly') curr.setDate(curr.getDate()+14);
-    else if(fq==='monthly') curr.setMonth(curr.getMonth()+1);
-  }
-  if(!dcaGeneratedTxns.length){
-    setStatus('dca-dot','dca-st','err','区间内无定投日期');
-    document.getElementById('dca-preview').textContent='';
-    document.getElementById('dca-save-btn').disabled=true;
-    return;
-  }
-  document.getElementById('dca-preview').textContent=dcaGeneratedTxns.map(x=>`${x.date} ${x.amount}元`).join('\n');
-  document.getElementById('dca-save-btn').disabled=false;
-  setStatus('dca-dot','dca-st','ok',`生成 ${dcaGeneratedTxns.length} 笔，共 ${dcaGeneratedTxns.length*a} 元`);
+    document.getElementById('dca-preview').textContent=dcaGeneratedTxns.map(x=>`${x.date} ${x.amount}元`).join('\n');
+    document.getElementById('dca-save-btn').disabled=false;
+    setStatus('dca-dot','dca-st','ok',`生成 ${dcaGeneratedTxns.length} 笔（已跳过休市），共 ${fmtYuanFull(j.total!=null?j.total:dcaGeneratedTxns.length*amt)}`);
+  }catch(e){ setStatus('dca-dot','dca-st','err','生成失败'); document.getElementById('dca-save-btn').disabled=true; }
 }
 
 async function dcaSave(){
@@ -952,36 +932,14 @@ async function fillMissingDCA(idx, toToday) {
   const endD = new Date(norm(endStr));
   if(isNaN(endD)) { alert("日期格式无效，请填写 YYYY-MM-DD"); return; }
   
-  const freq = c.freq;
-  let curr = new Date(c.lastDate);
-  if(freq==='daily') curr.setDate(curr.getDate()+1);
-  else if(freq==='weekly') curr.setDate(curr.getDate()+7);
-  else if(freq==='biweekly') curr.setDate(curr.getDate()+14);
-  else if(freq==='monthly') curr.setMonth(curr.getMonth()+1);
-  
-  const txnsToAdd = [];
-  while(curr <= endD) {
-    let d = new Date(curr);
-    let isWeekend = (d.getDay()===0 || d.getDay()===6);
-    if(d.getDay()===0) d.setDate(d.getDate()+1);
-    else if(d.getDay()===6) d.setDate(d.getDate()+2);
-    
-    if(d <= endD) {
-      const ds = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
-      if (!(freq === 'daily' && isWeekend)) {
-        const existing = txnsToAdd.find(t => t.date === ds);
-        if(existing) {
-          existing.amount += c.amount;
-        } else {
-          txnsToAdd.push({code: c.code, side:'buy', isDca:true, date:ds, amount:c.amount});
-        }
-      }
-    }
-    if(freq==='daily') curr.setDate(curr.getDate()+1);
-    else if(freq==='weekly') curr.setDate(curr.getDate()+7);
-    else if(freq==='biweekly') curr.setDate(curr.getDate()+14);
-    else if(freq==='monthly') curr.setMonth(curr.getMonth()+1);
-  }
+  const nd = c.nextDate;
+  const startStr = `${nd.getFullYear()}-${String(nd.getMonth()+1).padStart(2,'0')}-${String(nd.getDate()).padStart(2,'0')}`;
+  let txnsToAdd = [];
+  try{
+    const pj = await (await fetch('/api/dca/preview',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({code:c.code, start_date:startStr, amount:c.amount, freq:c.freq, end_date:norm(endStr)})})).json();
+    if(pj.ok) txnsToAdd = (pj.lots||[]).map(x=>({code:c.code, side:'buy', isDca:true, date:x.date, amount:x.amount}));
+  }catch(e){}
   
   ignoredDCAs.add(c.code + '|' + c.lastDate);
   
@@ -1394,7 +1352,8 @@ function renderLedger(j){
     const col=st.status==='triggered'?'var(--danger)':(st.status==='near'?'var(--warn)':'var(--muted)');
     const stBadge=st.status==='triggered'?'<span class="badge b-red">止损清仓</span>':(st.status==='near'?'<span class="badge b-amber">接近止损</span>':'<span class="badge b-green">正常</span>');
     const over=st.over_sell?' <span class="badge b-amber" title="卖出金额超过持有份额，请核对记录">超额卖出</span>':'';
-    return `<tr ${click}><td class="mono">${f.code}</td><td class="name">${f.name}</td><td class="mono" style="text-align:center">${st.lots_n??'—'}</td><td style="text-align:right" class="mono">${fmtYuanFull(st.mv_now)}</td><td style="text-align:right" class="mono">${fmtYuanFull(st.basis)}</td><td style="text-align:right" class="mono">${fmtPct(st.ret_held)}</td><td class="mono" style="text-align:right;color:${col}">${dd}</td><td>${stBadge}${over}</td></tr>`;
+    const feeTxt=st.buy_fee!=null?`费 ${(st.buy_fee*100).toFixed(2)}%`:`费 —`; const asof=st.nav_asof?`净值 ${st.nav_asof}`:''; const delayTxt=st.confirm_delay?` · T+${st.confirm_delay}确认`:'';
+    return `<tr ${click}><td class="mono">${f.code}</td><td class="name">${f.name}<div class="hint">${feeTxt}${asof?' · '+asof:''}${delayTxt}</div></td><td class="mono" style="text-align:center">${st.lots_n??'—'}</td><td style="text-align:right" class="mono">${fmtYuanFull(st.mv_now)}</td><td style="text-align:right" class="mono">${fmtYuanFull(st.basis)}</td><td style="text-align:right" class="mono">${fmtPct(st.ret_held)}</td><td class="mono" style="text-align:right;color:${col}">${dd}</td><td>${stBadge}${over}</td></tr>`;
   }).join('');
   let mv=0,basis=0;
   for(const f of funds){ const st=f.state||{}; if(!st.flat){ mv+=(st.mv_now||0); basis+=(st.basis||0); } }
@@ -1423,7 +1382,7 @@ function renderLedger(j){
       <tbody>${fRows}<tr style="border-top:2px solid var(--line);font-weight:600"><td colspan="3">合计</td><td class="mono" style="text-align:right">${fmtYuanFull(mv)}</td><td class="mono" style="text-align:right">${fmtYuanFull(basis)}</td><td class="mono" style="text-align:right">${ret}</td><td colspan="2"></td></tr></tbody></table>
     </div></div>
   </div>
-  <div class="hint" style="margin-top:8px">金额为台账记账口径（买入=成交成本，卖出=到账金额）。市值/回撤由天天基金真实净值按每笔操作自动计算（卖出按 FIFO）。下方「生成方案」基于全量台账，不受当前筛选影响。</div>`;
+  <div class="hint" style="margin-top:8px">市值=确认份额×单位净值（买入按扣款总额自动扣申购费；QDII 按下单日 T+1 确认）。净值截止日见各基金状态。止盈「确认卖出」后再删流水会把仓位加回。生成方案基于全量台账。</div>`;
 }
 
 function rbSave(){localStorage.setItem('rb_data',JSON.stringify({total:document.getElementById('rb-total').value,cash:document.getElementById('rb-cash').value})); setStatus('rb-dot','rb-st','ok','已记忆')}

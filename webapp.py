@@ -356,7 +356,7 @@ def _tp_dca_lots(code):
     return lots
 
 
-def _tp_compute(lots, adj, threshold, mode, harvested):
+def _tp_compute(lots, adj, threshold, mode, harvested, delay=0):
     """定投各批次止盈计算（纯函数，可单测）。
 
     lots:      [{"date": "YYYY-MM-DD", "amount": float}] 去重后的定投买入批次
@@ -446,7 +446,8 @@ def dca_tp_preview():
         if not isinstance(tp, dict):
             tp = {}
     harvested = tp.get("lots", {}) if isinstance(tp.get("lots"), dict) else {}
-    rows, summary = _tp_compute(lots, adj, threshold, mode, harvested)
+    rows, summary = _tp_compute(lots, adj, threshold, mode, harvested,
+                                delay=holding_diag.nav_confirm_delay(code))
     name = code
     try:
         meta = provider.get_fund_meta()
@@ -490,7 +491,8 @@ def dca_tp_execute():
     tp_entry = state.setdefault("take_profit", {}).setdefault(code, {})
     tp_entry["plan"] = {"threshold": threshold, "mode": mode}
     harvested = tp_entry.setdefault("lots", {})
-    rows, _ = _tp_compute(lots, adj, threshold, mode, harvested)
+    rows, _ = _tp_compute(lots, adj, threshold, mode, harvested,
+                          delay=holding_diag.nav_confirm_delay(code))
     today = dt.date.today().isoformat()
     txns = _load_ledger()
     added, total_sell = 0, 0.0

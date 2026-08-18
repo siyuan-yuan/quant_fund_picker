@@ -47,9 +47,8 @@ def buy_fee_rate(code):
     try:
         import provider  # 惰性导入，避免 holding_diag 顶部依赖 provider
         info = provider.get_fund_buy_fee(code)
-        rate = float(info.get("rate") or 0)
-        if rate > 0:
-            return rate
+        if isinstance(info, dict) and "rate" in info:
+            return float(info.get("rate") or 0)
     except Exception:
         pass
     try:
@@ -66,6 +65,49 @@ def adj_series(nav_df):
     df = df.dropna(subset=["ret"]).sort_values("date")
     adj = (1 + df["ret"].astype(float).fillna(0)).cumprod()
     return pd.Series(adj.values, index=pd.DatetimeIndex(df["date"]), name="adj")
+
+
+def unit_series(nav_df):
+    """单位净值序列（账户市值口径：确认份额 × 单位净值）。"""
+    if nav_df is None or len(nav_df) == 0 or "date" not in nav_df or "nav" not in nav_df:
+        return pd.Series(dtype=float, name="nav")
+    df = nav_df.dropna(subset=["nav"]).sort_values("date")
+    return pd.Series(df["nav"].astype(float).values,
+                     index=pd.DatetimeIndex(df["date"]), name="nav")
+
+
+def confirm_nav_pos(idx, d, delay=0):
+    """下单日 → 确认净值在序列中的位置。
+
+    规则（用户填的是北京 15:00 切日后的下单日）：
+      1. 下单日若无净值（周末/法定休市/海外休市）→ 顺延到下一交易日；
+      2. delay=1（QDII）再往后一个交易日（T 日下单，按 T+1 净值确认）；
+      3. 下单日晚于最新净值 → 暂用最新净值（在途/缓存未更新）。
+    """
+    if idx is None or len(idx) == 0:
+        return 0
+    p = int(idx.searchsorted(pd.Timestamp(d)))
+    n = len(idx)
+    if p >= n:
+        return n - 1
+    p = min(max(p, 0) + int(delay or 0), n - 1)
+    return max(p, 0)
+
+
+def nav_confirm_delay(code):
+    """QDII / 海外基金：下单日 T 按 T+1 净值确认；A 股为 0（当天净值）。"""
+    code = str(code or "").zfill(6) if code else ""
+    if not code or code == "000000":
+        return 0
+    try:
+        import provider
+        from config import OVERSEAS_FUND_TYPES
+        ft = str(provider.fund_type(code) or "")
+        if ft in OVERSEAS_FUND_TYPES or "QDII" in ft or "海外" in ft:
+            return 1
+    except Exception:
+        pass
+    return 0
 
 
 def parse_user_inputs(rec):
@@ -434,14 +476,17 @@ def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15, co
       total_bought / total_sold / lots_n / flat / curve(持仓市值曲线 Series)
     """
     adj = adj_series(nav_df)
+    unit = unit_series(nav_df)
+    px = unit if len(unit) else adj          # 账户市值按单位净值折份额
     out = dict(
         computable=False, status="no_data", reason="", entry_date=None, entry_nav=None,
         inferred=False, days_held=None, peak=None, peak_date=None, dd=None,
         trigger_nav=None, ret_held=None, mv_now=None, basis=None, shares_now=None,
         over_sell=False, total_bought=0.0, total_sold=0.0, lots_n=0,
         flat=False, curve=None, stop=float(stop),
+        nav_asof=None, buy_fee=None, confirm_delay=0,
     )
-    if len(adj) < 30:
+    if len(px) < 30:
         out["reason"] = "净值历史不足，无法计算入场高点回撤"
         return out
     lots = sorted([(pd.Timestamp(d), str(side).lower(), float(a))
@@ -452,17 +497,23 @@ def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15, co
         out["reason"] = "缺少买入记录，无法定位入场高点（在操作台账中添加买入，或输入 代码 市值 买入日期）"
         return out
     out["lots_n"] = len(lots)
-    n = len(adj)
-    idx = adj.index
+    n = len(px)
+    idx = px.index
+    delay = 0 if buy_fee == 0 and code is None else nav_confirm_delay(code)
+    # 单测传入 buy_fee 且无 code 时不套 QDII 延迟，保持合成数据断言稳定
+    if code:
+        delay = nav_confirm_delay(code)
 
     def _pos(d):
-        p = int(idx.searchsorted(d))          # 买入日当天（含）按当日净值折算
-        return min(max(p, 0), n - 1)
+        return confirm_nav_pos(idx, d, delay)
 
     # ---- 逐日持仓份额（卖出超持有时截断至0，标记 over_sell）----
     # 买入自动扣前端申购费（正确公式）：净申购金额 = 总金额 / (1 + 费率)，
-    # 份额 = 净申购金额 ÷ 当日净值；卖出金额视为净到账。
+    # 份额 = 净申购金额 ÷ 确认日单位净值；卖出金额视为净到账。
     fee = buy_fee_rate(code) if buy_fee is None else float(buy_fee)
+    out["buy_fee"] = round(float(fee), 6)
+    out["confirm_delay"] = int(delay)
+    out["nav_asof"] = str(idx[-1].date())
     deltas = np.zeros(n)
     run = 0.0
     for d, side, amt in lots:

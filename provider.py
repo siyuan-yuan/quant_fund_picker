@@ -547,6 +547,8 @@ def _parse_fee_pct(v):
         return None
     if isinstance(v, (int, float)):
         f = float(v)
+        if f == 0:
+            return 0.0
         return None if not (0 < f <= 100) else f / 100.0
     s = str(v).strip().replace("%", "").replace("％", "").replace(",", "").replace(" ", "")
     if not s or "每笔" in s or "笔" in s:
@@ -555,6 +557,8 @@ def _parse_fee_pct(v):
         f = float(s)
     except (TypeError, ValueError):
         return None
+    if f == 0:
+        return 0.0
     return None if not (0 < f <= 100) else f / 100.0
 
 
@@ -609,7 +613,8 @@ def get_fund_buy_fee(code: str) -> dict:
             else:
                 raise RuntimeError("fund_fee_em 空表")
         except Exception as e:
-            d = {"rate": FEE_FALLBACK_DEFAULT, "source": "default",
+            # 查不到时不要臆造 0.15% 把所有基金市值削一刀；按 0 计并标记，UI 可提示
+            d = {"rate": 0.0, "source": "default",
                  "original": None, "discounted": None, "bracket": None,
                  "fetched": dt.date.today().isoformat(), "_err": str(e)[:80]}
     _memo[key] = d
