@@ -411,7 +411,8 @@
         <div id="tp-summary" style="margin-top:8px"></div>
         <div id="tp-actions" class="hide" style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
           <button class="btn btn-primary" onclick="tpExecute()">确认卖出所选批次并记录</button>
-          <span class="hint">卖出自动记入台账（方向=卖出，备注=定投止盈·卖利润留成本/卖成本留利润），已卖批次不再参与后续检测</span>
+          <button class="btn btn-ghost" onclick="tpSkip()">标记所选批次不卖出</button>
+          <span class="hint">卖出记入台账；不卖出只打标、之后不再提示该笔。两种决定都会写进「导出台账」CSV，再导入不用重标。</span>
         </div>
         <div class="status" style="margin-top:6px"><span class="dot" id="tp-dot"></span><span id="tp-st">就绪</span></div>
       </div>
@@ -1088,14 +1089,17 @@ function renderTp(j){
     ? '卖出「利润」= 涨幅×成本，剩余 = 成本继续在场'
     : '卖出「成本」= 成本，剩余 = 利润免费仓位';
   if(!rows.length){ box.innerHTML = '<div class="empty" style="padding:10px">该基金暂无定投买入批次</div>'; return; }
+  const nSkip = j.nSkipped || rows.filter(r=>r.status==='skipped').length;
   const trs = rows.map((l, i) => {
     const checked = l.status === 'hit' ? ' checked' : '';
-    const disabled = l.status === 'hit' ? '' : ' disabled';
     const badge = l.status === 'hit' ? '<span class="badge b-red">已达线</span>'
-      : (l.status === 'sold' ? '<span class="badge b-green">已止盈</span>' : '<span class="badge b-mute">未达线</span>');
+      : (l.status === 'sold' ? '<span class="badge b-green">已止盈</span>'
+      : (l.status === 'skipped' ? '<span class="badge b-mute">不卖出</span>' : '<span class="badge b-mute">未达线</span>'));
     const sell = l.status === 'hit' ? `<b style="color:var(--danger)">${fmtTpAmt(l.sellAmount)}</b>` : '—';
     const soldInfo = (l.status === 'sold' && l.soldInfo)
-      ? `<div class="hint">${l.soldInfo.soldDate} 已卖 ${fmtTpAmt(l.soldInfo.soldAmount)}（${l.soldInfo.mode === 'keep_cost' ? '卖利润' : '卖成本'}）</div>` : '';
+      ? `<div class="hint">${l.soldInfo.soldDate||''} 已卖 ${fmtTpAmt(l.soldInfo.soldAmount)}（${l.soldInfo.mode === 'keep_cost' ? '卖利润' : '卖成本'}）</div>`
+      : ((l.status === 'skipped' && l.soldInfo)
+        ? `<div class="hint">${l.soldInfo.skipDate||''} 已标记不卖</div>` : '');
     return `<tr>
       <td>${l.status === 'hit' ? `<input type="checkbox" value="${l.key}"${checked}>` : ''}</td>
       <td class="mono">${l.date}</td>
@@ -1112,8 +1116,9 @@ function renderTp(j){
     <tbody>${trs}</tbody></table>
   </div><div class="hint" style="margin-top:4px">净值截至 ${j.navDate} · ${modeHint}</div>`;
   const sum = document.getElementById('tp-summary');
+  const nPend = j.n - j.nHit - j.nSold - nSkip;
   sum.innerHTML = `共 <b>${j.n}</b> 笔定投批次：<b style="color:var(--danger)">已达线 ${j.nHit} 笔</b>（建议卖出合计
-    <b style="color:var(--danger)">${fmtTpAmt(j.hitTotal)}</b>）· 已止盈 <b>${j.nSold}</b> 笔 · 未达线 <b>${j.n - j.nHit - j.nSold}</b> 笔`;
+    <b style="color:var(--danger)">${fmtTpAmt(j.hitTotal)}</b>）· 已止盈 <b>${j.nSold}</b> 笔 · 不卖出 <b>${nSkip}</b> 笔 · 未达线 <b>${nPend}</b> 笔`;
   const act = document.getElementById('tp-actions');
   if(j.nHit > 0) act.classList.remove('hide'); else act.classList.add('hide');
   setStatus('tp-dot','tp-st', j.nHit > 0 ? 'busy' : 'ok', j.nHit > 0 ? `今日有 ${j.nHit} 笔达到 ${j.threshold}% 止盈线` : '今日无批次达到止盈线');
@@ -1140,6 +1145,27 @@ async function tpExecute(){
     }
   }catch(e){ setStatus('tp-dot','tp-st','err','执行失败'); }
 }
+async function tpSkip(){
+  if(!TP_PREVIEW) return;
+  const checked = Array.from(document.querySelectorAll('#tp-list input[type=checkbox]:checked')).map(x => x.value);
+  if(!checked.length){ alert('请勾选要标记为不卖出的批次'); return; }
+  const body = {code: TP_PREVIEW.code, threshold: TP_PREVIEW.threshold, mode: TP_PREVIEW.mode, lotKeys: checked};
+  setStatus('tp-dot','tp-st','busy','标记不卖出...');
+  try{
+    const r = await (await fetch('/api/dca_tp/skip', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})).json();
+    if(r.ok){
+      if(r.dca_state){
+        DCA_STATE.take_profit = Object.assign({}, r.dca_state.take_profit||{}, DCA_STATE.take_profit);
+      }
+      await updateLedger();
+      setStatus('tp-dot','tp-st','ok', r.message || `已标记 ${r.added} 笔不卖出`);
+      tpDetect();
+    } else {
+      alert(r.message || '标记失败');
+      setStatus('tp-dot','tp-st','err', r.message || '标记失败');
+    }
+  }catch(e){ setStatus('tp-dot','tp-st','err','标记失败'); }
+}
 
 function ledExport(){
   if(!LEDGER_TXNS.length){ setStatus('led-dot','led-st','err','台账为空，无可导出'); return; }
@@ -1157,25 +1183,59 @@ function ledExport(){
   if(stRows.length>1){
     csv += '\n\n#定投状态（导入时自动恢复，标记过的基金不再询问是否还在定投）\n'+stRows.map(r=>r.join(',')).join('\n');
   }
+  const tpRows=[['代码','批次键','扣款日','金额','止盈决定','决定日','卖出金额']];
+  const tpAll=DCA_STATE.take_profit||{};
+  for(const code of Object.keys(tpAll).sort()){
+    const lots=(tpAll[code]&&tpAll[code].lots)||{};
+    for(const key of Object.keys(lots).sort()){
+      const rec=lots[key]||{};
+      const parts=String(key).split('|');
+      const lotDate=parts[0]||'';
+      const lotAmt=parts[1]||'';
+      const isSkip = rec.action==='skip' || rec.skipped;
+      tpRows.push([code, key, lotDate, lotAmt, isSkip?'不卖出':'已卖出', rec.skipDate||rec.soldDate||'', rec.soldAmount==null?'':rec.soldAmount]);
+    }
+  }
+  if(tpRows.length>1){
+    csv += '\n\n#定投止盈（导入时恢复：已卖出 / 不卖出，不再重复提示）\n'+tpRows.map(r=>r.join(',')).join('\n');
+  }
   const b=new Blob(["\uFEFF"+csv],{type:'text/csv'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(b);
   a.download='ledger_'+new Date().toISOString().slice(0,10)+'.csv'; a.click();
-  const nMark=stRows.length-1;
-  setStatus('led-dot','led-st','ok',`已导出 ${LEDGER_TXNS.length} 条流水`+(nMark?` + ${nMark} 条定投终止/忽略标记`:'')+'（CSV，可用 Excel 打开）');
+  const nMark=stRows.length-1, nTp=tpRows.length-1;
+  setStatus('led-dot','led-st','ok',`已导出 ${LEDGER_TXNS.length} 条流水`+(nMark?` + ${nMark} 条定投终止/忽略`:'')+(nTp?` + ${nTp} 条止盈决定`:'')+'（CSV，可用 Excel 打开）');
 }
 function parseDcaStateBlock(text){
-  const out={terminated:{}, ignored:{}};
+  const out={terminated:{}, ignored:{}, take_profit:{}};
   const lines=String(text).split(/[\r\n]+/).map(l=>l.trim());
-  let on=false;
+  let mode='';
   for(const line of lines){
-    if(/^#\s*定投状态/.test(line) || /^(代码)[,，\s]+定投状态/.test(line)){ on=true; if(/^(代码)/.test(line)) continue; continue; }
-    if(!on || !line || line[0]==='#') continue;
+    if(/^#\s*定投状态/.test(line) || /^(代码)[,，\s]+定投状态/.test(line)){ mode='dca'; if(/^(代码)/.test(line)) continue; continue; }
+    if(/^#\s*定投止盈/.test(line) || /^(代码)[,，\s]+批次/.test(line)){ mode='tp'; if(/^(代码)/.test(line)) continue; continue; }
+    if(!mode || !line) continue;
+    if(line[0]==='#' ){ mode=''; continue; }
     const parts=line.split(/[,，]/).map(x=>x.trim());
     const code=(parts[0]||'').replace(/\D/g,'').padStart(6,'0');
     if(!/^\d{6}$/.test(code) || parts.length<2) continue;
-    const st=parts[1]||'', last=parts[2]||'', term=parts[3]||'';
-    if(/终止/.test(st)) out.terminated[code]={lastDate: last||term, terminatedDate: term||last||undefined};
-    else if(/忽略/.test(st)) out.ignored[code]={lastDate: last||term};
+    if(mode==='dca'){
+      const st=parts[1]||'', last=parts[2]||'', term=parts[3]||'';
+      if(/终止/.test(st)) out.terminated[code]={lastDate: last||term, terminatedDate: term||last||undefined};
+      else if(/忽略/.test(st)) out.ignored[code]={lastDate: last||term};
+    } else if(mode==='tp'){
+      const key=parts[1]||'';
+      if(!key || key.indexOf('|')<0) continue;
+      const decision=parts[4]||'', decDate=parts[5]||'', soldAmt=parts[6]||'';
+      const entry=out.take_profit[code] || {plan:{threshold:20, mode:'keep_cost'}, lots:{}};
+      if(/不卖/.test(decision)){
+        entry.lots[key]={action:'skip', skipDate: decDate||undefined};
+      } else if(/卖/.test(decision)){
+        const rec={action:'sold', soldDate: decDate||undefined};
+        const a=parseYuan(soldAmt);
+        if(a>0) rec.soldAmount=a;
+        entry.lots[key]=rec;
+      } else continue;
+      out.take_profit[code]=entry;
+    }
   }
   return out;
 }
@@ -1188,6 +1248,7 @@ function parseLedgerFile(text){
     if(/^#/.test(line)) continue;
     if(/^(日期|date)[,\s]/.test(line.toLowerCase())) continue;
     if(/^(代码)[,，\s]+定投状态/.test(line)) continue;
+    if(/^(代码)[,，\s]+批次/.test(line)) continue;
     let parts=line.split(',').map(x=>x.trim()).filter(Boolean);
     if(parts.length<4) parts=line.split(/[\s，;；]+/).filter(Boolean);
     if(parts.length<4) continue;
@@ -1209,11 +1270,18 @@ function parseLedgerFile(text){
 }
 async function applyImportedDcaState(st){
   if(!st) return 0;
-  const term=st.terminated||{}, ign=st.ignored||{};
-  const n=Object.keys(term).length+Object.keys(ign).length;
-  if(!n) return 0;
+  const term=st.terminated||{}, ign=st.ignored||{}, tp=st.take_profit||{};
+  let n=Object.keys(term).length+Object.keys(ign).length;
   DCA_STATE.terminated = Object.assign({}, DCA_STATE.terminated, term);
   DCA_STATE.ignored = Object.assign({}, DCA_STATE.ignored, ign);
+  for(const code of Object.keys(tp)){
+    const entry=tp[code]||{};
+    const cur=DCA_STATE.take_profit[code]||{plan:{threshold:20,mode:'keep_cost'}, lots:{}};
+    const lots=Object.assign({}, cur.lots||{}, entry.lots||{});
+    DCA_STATE.take_profit[code]={plan: entry.plan||cur.plan||{threshold:20,mode:'keep_cost'}, lots};
+    n += Object.keys(entry.lots||{}).length;
+  }
+  if(!n) return 0;
   await saveDcaState();
   return n;
 }
