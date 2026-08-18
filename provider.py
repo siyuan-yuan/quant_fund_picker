@@ -182,7 +182,7 @@ def _cached_or_fetch(path, fetch_df, lag=0):
                 except Exception:
                     asof = "?"
                 STALE_SERVED.append((os.path.basename(path), asof, str(e)[:60]))
-            _FETCHED_TODAY.add(path)   # 失败也记一笔，避免全天反复锤源
+            # 失败不记 FETCHED_TODAY：持仓页「刷新净值」还能再试
         finally:
             _BG_REFRESHING.discard(path)
 
@@ -249,6 +249,43 @@ def get_fund_nav(code: str) -> pd.DataFrame:
     df = _cached_or_fetch(path, _build)
     _memo[key] = df
     return df
+
+
+def refresh_fund_nav(code: str, timeout=15):
+    """同步刷新一只基金净值。失败不记入 FETCHED_TODAY，允许稍后重试。"""
+    code = str(code or "").zfill(6)
+    key = f"nav_{code}"
+    path = f"{CACHE_DIR}/nav_{code}.csv"
+    _roll_day()
+
+    def _build():
+        raw = _retry(lambda: ak.fund_open_fund_info_em(symbol=code, indicator="单位净值走势"),
+                     n=2, sleep=1.0)
+        return pd.DataFrame({
+            "date": pd.to_datetime(raw["净值日期"]),
+            "nav": raw["单位净值"].astype(float).values,
+            "ret": raw["日增长率"].astype(float).div(100).values,
+        }).dropna().sort_values("date").reset_index(drop=True)
+
+    try:
+        df = _run_with_timeout(_build, timeout=timeout)
+        if df is None or len(df) == 0:
+            raise RuntimeError("净值空表")
+        _atomic_write_csv(df, path)
+        _memo[key] = df
+        _FETCHED_TODAY.add(path)
+        return {"ok": True, "code": code,
+                "asof": str(pd.Timestamp(df["date"].max()).date()), "n": int(len(df))}
+    except Exception as e:
+        _memo.pop(key, None)
+        asof = None
+        try:
+            if os.path.exists(path):
+                old = pd.read_csv(path, parse_dates=["date"])
+                asof = str(old["date"].max().date())
+        except Exception:
+            pass
+        return {"ok": False, "code": code, "asof": asof, "error": str(e)[:120]}
 
 
 # ---------------- 基金档案 (pingzhongdata) ----------------

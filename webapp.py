@@ -293,7 +293,25 @@ def ledger_get():
                                                   (STRAT_CPPI_DD3, STRAT_CPPI_SLOTS3)],
                                            full_slots=STRAT_SLOTS, hysteresis=STRAT_CPPI_HYSTERESIS)
     return jsonify(clean(dict(ok=True, txns=txns, funds=states, cppi=cppi,
-                              dca_state=_load_dca_state())))
+                              dca_state=_load_dca_state(),
+                              nav_expected=provider.expected_last_td())))
+
+
+@app.post("/api/nav/refresh")
+def nav_refresh():
+    """同步刷新台账里各基金净值（不阻塞首屏；前端点按钮或自动补刷）。"""
+    body = request.get_json(silent=True) or {}
+    codes = body.get("codes")
+    if not isinstance(codes, list) or not codes:
+        codes = sorted(_ledger_by_code(_load_ledger()).keys())
+    out = []
+    for raw in codes[:30]:
+        code = str(raw).zfill(6)
+        if not re.fullmatch(r"\d{6}", code):
+            continue
+        out.append(provider.refresh_fund_nav(code, timeout=12))
+    n_ok = sum(1 for r in out if r.get("ok"))
+    return jsonify(clean(dict(ok=True, refreshed=n_ok, total=len(out), results=out)))
 
 
 @app.post("/api/ledger")
@@ -446,8 +464,7 @@ def dca_tp_preview():
         if not isinstance(tp, dict):
             tp = {}
     harvested = tp.get("lots", {}) if isinstance(tp.get("lots"), dict) else {}
-    rows, summary = _tp_compute(lots, adj, threshold, mode, harvested,
-                                delay=holding_diag.nav_confirm_delay(code))
+    rows, summary = _tp_compute(lots, adj, threshold, mode, harvested, delay=0)
     name = code
     try:
         meta = provider.get_fund_meta()
@@ -491,8 +508,7 @@ def dca_tp_execute():
     tp_entry = state.setdefault("take_profit", {}).setdefault(code, {})
     tp_entry["plan"] = {"threshold": threshold, "mode": mode}
     harvested = tp_entry.setdefault("lots", {})
-    rows, _ = _tp_compute(lots, adj, threshold, mode, harvested,
-                          delay=holding_diag.nav_confirm_delay(code))
+    rows, _ = _tp_compute(lots, adj, threshold, mode, harvested, delay=0)
     today = dt.date.today().isoformat()
     txns = _load_ledger()
     added, total_sell = 0, 0.0
@@ -550,7 +566,7 @@ def dca_tp_skip():
     tp_entry = state.setdefault("take_profit", {}).setdefault(code, {})
     tp_entry["plan"] = {"threshold": threshold, "mode": mode}
     harvested = tp_entry.setdefault("lots", {})
-    rows, _ = _tp_compute(lots, adj, threshold, mode, harvested)
+    rows, _ = _tp_compute(lots, adj, threshold, mode, harvested, delay=0)
     today = dt.date.today().isoformat()
     added = 0
     for r in rows:

@@ -359,6 +359,7 @@
         </div>
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center">
           <button class="btn btn-primary" id="btn-led-add" style="padding:8px 16px" onclick="ledAdd()">添加记录</button>
+          <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="refreshLedgerNav()">刷新净值</button>
           <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="ledExport()">导出台账</button>
           <span class="hint">导出含定投终止/忽略标记；用这份文件重新导入后不会再问「是否还在定投」</span>
           <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="document.getElementById('led-file').click()">导入台账</button>
@@ -666,12 +667,12 @@ let LEDGER_VIEW_CODE=''; // 空=全部基金流水
 // take_profit: {code: {plan:{threshold,mode}, lots:{lotKey:{mode,soldAmount,soldDate,costNav,nav}}}}，
 // 已止盈批次不再参与计算。
 let DCA_STATE = {terminated:{}, ignored:{}, take_profit:{}};
+let LEDGER_NAV_TRIED=false;
 async function updateLedger(){
   try{
     const j=takeBoot('ledger')||await (await jfetch('/api/ledger',{timeout:15000})).json();
     LEDGER_TXNS=j.txns||[];
     if(j.dca_state){
-      // 服务端状态为基准，本地刚写入的标记（可能尚未落库）优先，避免补齐后立刻被旧状态覆盖而再次询问
       DCA_STATE.terminated = Object.assign({}, j.dca_state.terminated||{}, DCA_STATE.terminated);
       DCA_STATE.ignored = Object.assign({}, j.dca_state.ignored||{}, DCA_STATE.ignored);
       DCA_STATE.take_profit = Object.assign({}, j.dca_state.take_profit||{}, DCA_STATE.take_profit);
@@ -679,7 +680,22 @@ async function updateLedger(){
     renderLedger(j);
     if(typeof checkMissingDCA === 'function') checkMissingDCA();
     if(typeof tpMaybeAutoDetect === 'function') tpMaybeAutoDetect();
+    const exp=j.nav_expected;
+    const stale=(j.funds||[]).some(f=>f.state&&f.state.nav_asof&&exp&&f.state.nav_asof<exp);
+    if(stale && !LEDGER_NAV_TRIED){
+      LEDGER_NAV_TRIED=true;
+      refreshLedgerNav();
+    }
   }catch(e){}
+}
+async function refreshLedgerNav(){
+  setStatus('led-dot','led-st','busy','正在刷新净值…');
+  try{
+    const r=await (await jfetch('/api/nav/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}',timeout:90000})).json();
+    const n=r.refreshed||0;
+    await updateLedger();
+    setStatus('led-dot','led-st', n?'ok':'err', n?`已刷新 ${n}/${r.total||n} 只净值`:'净值源暂时不可用，市值按本地缓存截止日计算');
+  }catch(e){ setStatus('led-dot','led-st','err','净值刷新失败'); }
 }
 async function ledAdd(){
   // 结构化录入：代码 + 方向 + 日期(多条) + 金额(多条, 与日期一一对应)
@@ -1352,8 +1368,8 @@ function renderLedger(j){
     const col=st.status==='triggered'?'var(--danger)':(st.status==='near'?'var(--warn)':'var(--muted)');
     const stBadge=st.status==='triggered'?'<span class="badge b-red">止损清仓</span>':(st.status==='near'?'<span class="badge b-amber">接近止损</span>':'<span class="badge b-green">正常</span>');
     const over=st.over_sell?' <span class="badge b-amber" title="卖出金额超过持有份额，请核对记录">超额卖出</span>':'';
-    const feeTxt=st.buy_fee!=null?`费 ${(st.buy_fee*100).toFixed(2)}%`:`费 —`; const asof=st.nav_asof?`净值 ${st.nav_asof}`:''; const delayTxt=st.confirm_delay?` · T+${st.confirm_delay}确认`:'';
-    return `<tr ${click}><td class="mono">${f.code}</td><td class="name">${f.name}<div class="hint">${feeTxt}${asof?' · '+asof:''}${delayTxt}</div></td><td class="mono" style="text-align:center">${st.lots_n??'—'}</td><td style="text-align:right" class="mono">${fmtYuanFull(st.mv_now)}</td><td style="text-align:right" class="mono">${fmtYuanFull(st.basis)}</td><td style="text-align:right" class="mono">${fmtPct(st.ret_held)}</td><td class="mono" style="text-align:right;color:${col}">${dd}</td><td>${stBadge}${over}</td></tr>`;
+    const exp=j.nav_expected; const stale=st.nav_asof&&exp&&st.nav_asof<exp; const feeTxt=st.buy_fee!=null?`费 ${(st.buy_fee*100).toFixed(2)}%`:`费 —`; const asof=st.nav_asof?(stale?`净值停在 ${st.nav_asof}`:`净值 ${st.nav_asof}`):''; const pend=st.pending_buy>0?` · 在途 ${fmtYuanFull(st.pending_buy)}`:'';
+    return `<tr ${click}><td class="mono">${f.code}</td><td class="name">${f.name}<div class="hint">${feeTxt}${asof?' · '+asof:''}${pend}</div></td><td class="mono" style="text-align:center">${st.lots_n??'—'}</td><td style="text-align:right" class="mono">${fmtYuanFull(st.mv_now)}</td><td style="text-align:right" class="mono">${fmtYuanFull(st.basis)}</td><td style="text-align:right" class="mono">${fmtPct(st.ret_held)}</td><td class="mono" style="text-align:right;color:${col}">${dd}</td><td>${stBadge}${over}</td></tr>`;
   }).join('');
   let mv=0,basis=0;
   for(const f of funds){ const st=f.state||{}; if(!st.flat){ mv+=(st.mv_now||0); basis+=(st.basis||0); } }
@@ -1382,7 +1398,7 @@ function renderLedger(j){
       <tbody>${fRows}<tr style="border-top:2px solid var(--line);font-weight:600"><td colspan="3">合计</td><td class="mono" style="text-align:right">${fmtYuanFull(mv)}</td><td class="mono" style="text-align:right">${fmtYuanFull(basis)}</td><td class="mono" style="text-align:right">${ret}</td><td colspan="2"></td></tr></tbody></table>
     </div></div>
   </div>
-  <div class="hint" style="margin-top:8px">市值=确认份额×单位净值（买入按扣款总额自动扣申购费；QDII 按下单日 T+1 确认）。净值截止日见各基金状态。止盈「确认卖出」后再删流水会把仓位加回。生成方案基于全量台账。</div>`;
+  <div class="hint" style="margin-top:8px">市值=已确认份额×最新单位净值（当天及以后的单算在途，对齐全额宝「持有金额」）。净值落后时点「刷新净值」。止盈确认卖出后再删流水会把仓位加回。</div>`;
 }
 
 function rbSave(){localStorage.setItem('rb_data',JSON.stringify({total:document.getElementById('rb-total').value,cash:document.getElementById('rb-cash').value})); setStatus('rb-dot','rb-st','ok','已记忆')}
