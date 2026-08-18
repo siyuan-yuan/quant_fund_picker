@@ -209,10 +209,14 @@ def _norm_txn(t) -> dict:
     d = _parse_date(t.get("date"))
     if not d:
         return None
-    side = str(t.get("side", "")).strip().lower()
-    if side in ("买", "买入", "b", "buy"):
+    side_raw = str(t.get("side", "")).strip().lower()
+    isDca = bool(t.get("isDca", False))
+    if side_raw in ("买", "买入", "b", "buy"):
         side = "buy"
-    elif side in ("卖", "卖出", "s", "sell"):
+    elif side_raw in ("定投", "定投买入", "dca"):
+        side = "buy"
+        isDca = True
+    elif side_raw in ("卖", "卖出", "s", "sell"):
         side = "sell"
     else:
         return None
@@ -220,7 +224,6 @@ def _norm_txn(t) -> dict:
     if not amt or amt <= 0:
         return None
     tid = str(t.get("id") or f"l{int(time.time()*1000)}{random.randint(0,9999)}")
-    isDca = bool(t.get("isDca", False))
     return {"id": tid, "code": code, "date": d, "side": side,
             "amount": round(float(amt), 2), "note": str(t.get("note", "") or "")[:120], "isDca": isDca}
 

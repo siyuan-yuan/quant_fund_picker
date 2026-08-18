@@ -354,6 +354,7 @@
         <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center">
           <button class="btn btn-primary" id="btn-led-add" style="padding:8px 16px" onclick="ledAdd()">添加记录</button>
           <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="ledExport()">导出台账</button>
+          <span class="hint">导出含定投终止/忽略标记；用这份文件重新导入后不会再问「是否还在定投」</span>
           <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="document.getElementById('led-file').click()">导入台账</button>
           <input type="file" id="led-file" accept=".csv,.txt,.json" style="display:none" onchange="ledImportFile()">
           <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="ledClear(this)">清空台账</button>
@@ -1145,11 +1146,38 @@ function ledExport(){
   const esc=v=>{const s=String(v==null?'':v); return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s};
   const rows=[['日期','方向','代码','金额','备注']];
   for(const t of LEDGER_TXNS) rows.push([t.date, t.side==='buy'?(t.isDca?'定投买入':'买入'):'卖出', t.code, t.amount, esc(t.note||'')]);
-  const csv=rows.map(r=>r.join(',')).join('\n');
+  const stRows=[['代码','定投状态','最后扣款日','终止日']];
+  const markCodes=new Set([...Object.keys(DCA_STATE.terminated||{}), ...Object.keys(DCA_STATE.ignored||{})]);
+  for(const code of [...markCodes].sort()){
+    const term=DCA_STATE.terminated[code], ign=DCA_STATE.ignored[code];
+    if(term) stRows.push([code,'已终止', term.lastDate||'', term.terminatedDate||'']);
+    else if(ign) stRows.push([code,'已忽略', ign.lastDate||'', '']);
+  }
+  let csv=rows.map(r=>r.join(',')).join('\n');
+  if(stRows.length>1){
+    csv += '\n\n#定投状态（导入时自动恢复，标记过的基金不再询问是否还在定投）\n'+stRows.map(r=>r.join(',')).join('\n');
+  }
   const b=new Blob(["\uFEFF"+csv],{type:'text/csv'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(b);
   a.download='ledger_'+new Date().toISOString().slice(0,10)+'.csv'; a.click();
-  setStatus('led-dot','led-st','ok',`已导出 ${LEDGER_TXNS.length} 条台账记录（CSV）`);
+  const nMark=stRows.length-1;
+  setStatus('led-dot','led-st','ok',`已导出 ${LEDGER_TXNS.length} 条流水`+(nMark?` + ${nMark} 条定投终止/忽略标记`:'')+'（CSV，可用 Excel 打开）');
+}
+function parseDcaStateBlock(text){
+  const out={terminated:{}, ignored:{}};
+  const lines=String(text).split(/[\r\n]+/).map(l=>l.trim());
+  let on=false;
+  for(const line of lines){
+    if(/^#\s*定投状态/.test(line) || /^(代码)[,，\s]+定投状态/.test(line)){ on=true; if(/^(代码)/.test(line)) continue; continue; }
+    if(!on || !line || line[0]==='#') continue;
+    const parts=line.split(/[,，]/).map(x=>x.trim());
+    const code=(parts[0]||'').replace(/\D/g,'').padStart(6,'0');
+    if(!/^\d{6}$/.test(code) || parts.length<2) continue;
+    const st=parts[1]||'', last=parts[2]||'', term=parts[3]||'';
+    if(/终止/.test(st)) out.terminated[code]={lastDate: last||term, terminatedDate: term||last||undefined};
+    else if(/忽略/.test(st)) out.ignored[code]={lastDate: last||term};
+  }
+  return out;
 }
 function parseLedgerFile(text){
   const out=[];
@@ -1157,7 +1185,9 @@ function parseLedgerFile(text){
   const isDate=s=>/^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}$/.test(String(s).trim())||/^\d{8}$/.test(String(s).trim());
   const lines=String(text).split(/[\r\n]+/).map(l=>l.trim()).filter(Boolean);
   for(const line of lines){
-    if(/^(日期|date)[,\s]/.test(line.toLowerCase())) continue;   // 跳过表头
+    if(/^#/.test(line)) continue;
+    if(/^(日期|date)[,\s]/.test(line.toLowerCase())) continue;
+    if(/^(代码)[,，\s]+定投状态/.test(line)) continue;
     let parts=line.split(',').map(x=>x.trim()).filter(Boolean);
     if(parts.length<4) parts=line.split(/[\s，;；]+/).filter(Boolean);
     if(parts.length<4) continue;
@@ -1175,13 +1205,23 @@ function parseLedgerFile(text){
     if (isDca) txn.isDca = true;
     out.push(txn);
   }
-  return out;
+  return {txns:out, dcaState:parseDcaStateBlock(text)};
+}
+async function applyImportedDcaState(st){
+  if(!st) return 0;
+  const term=st.terminated||{}, ign=st.ignored||{};
+  const n=Object.keys(term).length+Object.keys(ign).length;
+  if(!n) return 0;
+  DCA_STATE.terminated = Object.assign({}, DCA_STATE.terminated, term);
+  DCA_STATE.ignored = Object.assign({}, DCA_STATE.ignored, ign);
+  await saveDcaState();
+  return n;
 }
 async function ledImportFile(){
   const inp=document.getElementById('led-file');
   const f=inp.files&&inp.files[0];
   if(!f) return;
-  let text, parsed=[];
+  let text, parsed=[], importedState=null;
   try{ text=await f.text(); }catch(e){ setStatus('led-dot','led-st','err','文件读取失败'); inp.value=''; return; }
   if(/\.json$/i.test(f.name)){
     try{
@@ -1194,9 +1234,11 @@ async function ledImportFile(){
         if(isDca || t.isDca) txn.isDca = true;
         return txn;
       }).filter(x=>/^\d{6}$/.test(x.code)&&x.amount>0);
+      importedState = data.dca_state || {terminated:data.terminated||{}, ignored:data.ignored||{}};
     }catch(e){ setStatus('led-dot','led-st','err','JSON 解析失败'); inp.value=''; return; }
   } else {
-    parsed=parseLedgerFile(text);
+    const pack=parseLedgerFile(text);
+    parsed=pack.txns; importedState=pack.dcaState;
   }
   if(!parsed.length){ setStatus('led-dot','led-st','err','未解析到有效记录（CSV: 日期,方向,代码,金额）'); inp.value=''; return; }
   const txns=LEDGER_TXNS.slice();
@@ -1208,7 +1250,11 @@ async function ledImportFile(){
     seen.add(k); txns.push(r); added++;
   }
   const j=await (await fetch('/api/ledger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({txns})})).json();
-  if(j.ok){ await updateLedger(); setStatus('led-dot','led-st','ok',`已导入 ${added} 条（共解析 ${parsed.length} 条，跳过重复 ${parsed.length-added} 条）`); }
+  if(j.ok){
+    const nMark=await applyImportedDcaState(importedState);
+    await updateLedger();
+    setStatus('led-dot','led-st','ok',`已导入 ${added} 条（共解析 ${parsed.length} 条，跳过重复 ${parsed.length-added} 条）`+(nMark?`，并恢复 ${nMark} 条定投终止/忽略标记`:'。旧 CSV 不含标记的话请重新点一次「导出台账」'));
+  }
   else setStatus('led-dot','led-st','err',j.message||'导入失败');
   inp.value='';
 }
