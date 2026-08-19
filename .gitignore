@@ -10,8 +10,9 @@ output/strategy_experiment_*.png
 
 # 用户操作台账（本地用户数据，不提交）
 output/ledger.json
-# 定投终止/忽略标记（本地用户数据，不提交）
+# 定投终止/忽略标记、用户费率设置（本地用户数据，不提交）
 output/dca_state.json
+output/fee_settings.json
 
 # 模型动物园实验中间产物（大, 可由 _build_ml_panel.py + _model_zoo.py 复现）
 output/ml_work/

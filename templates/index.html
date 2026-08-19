@@ -366,6 +366,20 @@
           <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="ledClear(this)">清空台账</button>
         </div>
         <div class="status"><span class="dot" id="led-dot"></span><span id="led-st">就绪</span></div>
+        <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line)">
+          <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
+            <b style="font-size:13px">买入费率设置</b>
+            <span class="hint">优先级：单基金覆盖 ＞ 自动查询折后费率 ＞ 默认费率；填写 0 表示免申购费</span>
+          </div>
+          <div class="form-row" style="margin-top:8px;align-items:end">
+            <div class="field" style="max-width:130px"><label>默认费率 %</label><input id="fee-default" class="mono" value="0.15" inputmode="decimal"></div>
+            <button class="btn btn-ghost" style="padding:7px 10px;font-size:12px" onclick="saveDefaultFee()">保存默认</button>
+            <div class="field" style="max-width:130px"><label>基金代码</label><input id="fee-code" class="mono" placeholder="016452" inputmode="numeric"></div>
+            <div class="field" style="max-width:130px"><label>该基金费率 %</label><input id="fee-rate" class="mono" placeholder="0.12" inputmode="decimal"></div>
+            <button class="btn btn-ghost" style="padding:7px 10px;font-size:12px" onclick="saveFundFee()">添加 / 修改</button>
+          </div>
+          <div id="fee-overrides" class="hint" style="margin-top:8px">加载费率设置…</div>
+        </div>
       </div>
       <div id="dca-panel" class="hide" style="margin-top:10px;padding:14px;background:var(--surface-2);border:1px solid var(--line);border-radius:8px">
         <div class="form-row">
@@ -659,6 +673,60 @@ function addToRebalance(c){
 // ============ 操作台账（买卖历史 · 自动保存到服务器 output/ledger.json） ============
 let LEDGER_TXNS=[];
 let LEDGER_VIEW_CODE=''; // 空=全部基金流水
+// 使用浏览器本地日期而不是 toISOString() 的 UTC 日期；北京时间 00:00～07:59
+// 若取 UTC 会误判成“昨天”，导致“补齐至今天”少补一天。
+function localDateStr(d=new Date()){
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+let FEE_SETTINGS={default_rate:0.0015,overrides:{}};
+function renderFeeSettings(s){
+  if(s) FEE_SETTINGS={default_rate:Number(s.default_rate??0.0015),overrides:Object.assign({},s.overrides||{})};
+  const inp=document.getElementById('fee-default');
+  if(inp) inp.value=(FEE_SETTINGS.default_rate*100).toFixed(4).replace(/0+$/,'').replace(/\.$/,'');
+  const box=document.getElementById('fee-overrides');
+  if(!box) return;
+  const rows=Object.entries(FEE_SETTINGS.overrides).sort(([a],[b])=>a.localeCompare(b));
+  box.innerHTML=rows.length?`单基金覆盖：${rows.map(([code,rate])=>`<span class="badge b-blue" style="margin:2px 5px 2px 0;cursor:pointer" title="点击填入修改框" onclick="editFundFee('${code}')">${code} ${(Number(rate)*100).toFixed(4).replace(/0+$/,'').replace(/\.$/,'')}% <i style="font-style:normal;margin-left:4px" title="删除覆盖" onclick="event.stopPropagation();deleteFundFee('${code}')">×</i></span>`).join('')}`:'暂无单基金覆盖；未查到费率时使用默认值。';
+}
+function feePctValue(id){
+  const raw=String(document.getElementById(id)?.value??'').trim();
+  if(raw==='') return null;
+  const v=Number(raw);
+  return Number.isFinite(v)&&v>=0&&v<=10?v/100:null;
+}
+async function persistFeeSettings(okText){
+  try{
+    const j=await (await fetch('/api/fee_settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(FEE_SETTINGS)})).json();
+    if(!j.ok){setStatus('led-dot','led-st','err',j.message||'费率保存失败');return false;}
+    renderFeeSettings(j); await updateLedger();
+    setStatus('led-dot','led-st','ok',okText); return true;
+  }catch(e){setStatus('led-dot','led-st','err','费率保存失败：无法连接服务器');return false;}
+}
+async function saveDefaultFee(){
+  const rate=feePctValue('fee-default');
+  if(rate==null){setStatus('led-dot','led-st','err','默认费率须在 0%～10% 之间');return;}
+  FEE_SETTINGS.default_rate=rate;
+  await persistFeeSettings(`默认买入费率已设为 ${(rate*100).toFixed(4).replace(/0+$/,'').replace(/\.$/,'')}%`);
+}
+async function saveFundFee(){
+  const rawCode=String(document.getElementById('fee-code')?.value||'').replace(/\D/g,'');
+  const code=rawCode?rawCode.padStart(6,'0'):'';
+  const rate=feePctValue('fee-rate');
+  if(!/^\d{6}$/.test(code)||code==='000000'){setStatus('led-dot','led-st','err','基金代码需为6位数字');return;}
+  if(rate==null){setStatus('led-dot','led-st','err','基金费率须在 0%～10% 之间');return;}
+  FEE_SETTINGS.overrides[code]=rate;
+  if(await persistFeeSettings(`${code} 买入费率已设为 ${(rate*100).toFixed(4).replace(/0+$/,'').replace(/\.$/,'')}%`)){
+    document.getElementById('fee-code').value=''; document.getElementById('fee-rate').value='';
+  }
+}
+function editFundFee(code){
+  document.getElementById('fee-code').value=code;
+  document.getElementById('fee-rate').value=(Number(FEE_SETTINGS.overrides[code])*100).toFixed(4).replace(/0+$/,'').replace(/\.$/,'');
+}
+async function deleteFundFee(code){
+  delete FEE_SETTINGS.overrides[code];
+  await persistFeeSettings(`已删除 ${code} 单基金覆盖，将按自动查询或默认费率计算`);
+}
 // 定投终止/忽略/止盈标记（持久化，output/dca_state.json）。
 // 终止/忽略以「该轮定投最后扣款日 lastDate」为轮次指纹：同一轮已终止 → 不再反复询问；
 // 之后开始新一轮定投（出现更晚的扣款记录）→ lastDate 变化 → 自动重新提醒。
@@ -670,6 +738,7 @@ async function updateLedger(){
   try{
     const j=takeBoot('ledger')||await (await jfetch('/api/ledger',{timeout:15000})).json();
     LEDGER_TXNS=j.txns||[];
+    if(j.fee_settings) renderFeeSettings(j.fee_settings);
     if(j.dca_state){
       DCA_STATE.terminated = Object.assign({}, j.dca_state.terminated||{}, DCA_STATE.terminated);
       DCA_STATE.ignored = Object.assign({}, j.dca_state.ignored||{}, DCA_STATE.ignored);
@@ -844,8 +913,8 @@ function checkMissingDCA() {
     byCode[t.code].push(t);
   }
   
-  const todayStr = new Date().toISOString().slice(0,10);
-  const today = new Date(todayStr);
+  const todayStr = localDateStr();
+  const today = new Date(todayStr + 'T00:00:00');
   const candidates = [];
   
   for(const code in byCode) {
@@ -941,47 +1010,72 @@ async function ignoreMissingDCA(idx) {
 async function fillMissingDCA(idx, toToday) {
   const c = missingDcaCandidates[idx];
   if(!c) return;
-  const endStr = toToday ? new Date().toISOString().slice(0,10) : document.getElementById('dca-term-'+idx).value.trim();
+  const endStr = toToday ? localDateStr() : document.getElementById('dca-term-'+idx).value.trim();
   const norm = d => { const x = String(d).replace(/[/.]/g,'-'); return /^\d{8}$/.test(x)?`${x.slice(0,4)}-${x.slice(4,6)}-${x.slice(6,8)}`:x; };
-  const endD = new Date(norm(endStr));
-  if(isNaN(endD)) { alert("日期格式无效，请填写 YYYY-MM-DD"); return; }
-  
+  const endD = new Date(norm(endStr) + 'T00:00:00');
+  if(isNaN(endD)) { setStatus('led-dot','led-st','err','日期格式无效，请填写 YYYY-MM-DD'); return; }
+
   const nd = c.nextDate;
-  const startStr = `${nd.getFullYear()}-${String(nd.getMonth()+1).padStart(2,'0')}-${String(nd.getDate()).padStart(2,'0')}`;
-  let txnsToAdd = [];
+  const startStr = localDateStr(nd);
+  setStatus('led-dot','led-st','run',`正在计算 ${c.code} ${startStr} 至 ${norm(endStr)} 的应补记录…`);
+  let pj;
   try{
-    const pj = await (await fetch('/api/dca/preview',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({code:c.code, start_date:startStr, amount:c.amount, freq:c.freq, end_date:norm(endStr)})})).json();
-    if(pj.ok) txnsToAdd = (pj.lots||[]).map(x=>({code:c.code, side:'buy', isDca:true, date:x.date, amount:x.amount}));
-  }catch(e){}
-  
-  ignoredDCAs.add(c.code + '|' + c.lastDate);
-  
-  // 选择了「补齐至此日」= 明确告知定投已终止：记录该轮最后扣款日并持久化，
-  // 之后同一轮（lastDate 相同）不再询问；若重新开始新一轮（lastDate 更晚）会自动恢复提醒。
+    const resp = await fetch('/api/dca/preview',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({code:c.code, start_date:startStr, amount:c.amount, freq:c.freq, end_date:norm(endStr)})});
+    pj = await resp.json();
+  }catch(e){
+    setStatus('led-dot','led-st','err','补齐失败：无法连接服务器，请重试');
+    return;
+  }
+  // 旧逻辑吞掉 preview 的错误后仍把候选隐藏，造成“点了按钮但没有补”的假成功。
+  // 现在只有明确生成并成功保存后才改变本地状态；失败会展示原因并保留按钮供重试。
+  if(!pj.ok){
+    setStatus('led-dot','led-st','err',`补齐失败：${pj.message||'无法生成定投记录'}`);
+    return;
+  }
+  const txnsToAdd = (pj.lots||[]).map(x=>({code:c.code, side:'buy', isDca:true, date:x.date, amount:x.amount}));
+
+  // 选择了「补齐至此日」= 明确告知定投已终止。先准备标记，必须等台账保存成功后
+  // 再持久化，避免“台账写失败但状态已终止”把尚未补齐的记录永久隐藏。
   let terminatedInfo = null;
   if(!toToday){
     let lastDcaDate = c.lastDate;
     for(const t of txnsToAdd) if(t.date > lastDcaDate) lastDcaDate = t.date;
     terminatedInfo = { lastDate: lastDcaDate, terminatedDate: norm(endStr) };
-    DCA_STATE.terminated[c.code] = terminatedInfo;
-    await saveDcaState();
   }
-  
+
   if(!txnsToAdd.length) {
-    checkMissingDCA();
-    if(terminatedInfo) setStatus('led-dot','led-st','ok',`已标记 ${c.code} 定投终止（${terminatedInfo.terminatedDate}），不再重复询问`);
+    if(terminatedInfo){
+      DCA_STATE.terminated[c.code] = terminatedInfo;
+      ignoredDCAs.add(c.code + '|' + c.lastDate);
+      await saveDcaState();
+      checkMissingDCA();
+      setStatus('led-dot','led-st','ok',`已标记 ${c.code} 定投终止（${terminatedInfo.terminatedDate}），区间内无需补记`);
+    } else {
+      setStatus('led-dot','led-st','err','补齐失败：服务器未返回应补记录，请重试');
+    }
     return;
   }
-  
+
   setStatus('led-dot','led-st','run','补齐保存中...');
   const txns = LEDGER_TXNS.slice().concat(txnsToAdd);
-  const j = await (await fetch('/api/ledger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({txns})})).json();
+  let j;
+  try{
+    j = await (await fetch('/api/ledger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({txns})})).json();
+  }catch(e){
+    setStatus('led-dot','led-st','err','补齐保存失败：无法连接服务器，请重试');
+    return;
+  }
   if(j.ok){
+    ignoredDCAs.add(c.code + '|' + c.lastDate);
+    if(terminatedInfo){
+      DCA_STATE.terminated[c.code] = terminatedInfo;
+      await saveDcaState();
+    }
     await updateLedger();
-    setStatus('led-dot','led-st','ok',`已成功补齐 ${txnsToAdd.length} 笔定投记录${terminatedInfo ? '，并已标记该轮定投终止（不再重复询问）' : ''}`);
+    const pending = Number(pj.pending||0);
+    setStatus('led-dot','led-st','ok',`已成功补齐 ${txnsToAdd.length} 笔定投记录${pending?`（其中 ${pending} 笔净值待确认）`:''}${terminatedInfo ? '，并已标记该轮定投终止（不再重复询问）' : ''}`);
   } else {
-    alert(j.message || '保存失败');
     setStatus('led-dot','led-st','err',j.message || '保存失败');
   }
 }
@@ -1366,7 +1460,7 @@ function renderLedger(j){
     const col=st.status==='triggered'?'var(--danger)':(st.status==='near'?'var(--warn)':'var(--muted)');
     const stBadge=st.status==='triggered'?'<span class="badge b-red">止损清仓</span>':(st.status==='near'?'<span class="badge b-amber">接近止损</span>':'<span class="badge b-green">正常</span>');
     const over=st.over_sell?' <span class="badge b-amber" title="卖出金额超过持有份额，请核对记录">超额卖出</span>':'';
-    const exp=j.nav_expected; const stale=st.nav_asof&&exp&&st.nav_asof<exp; const feeTxt=st.buy_fee!=null?`费 ${(st.buy_fee*100).toFixed(2)}%`:`费 —`; const asof=st.nav_asof?(stale?`净值停在 ${st.nav_asof}`:`净值 ${st.nav_asof}`):''; const pend=st.pending_buy>0?` · 在途 ${fmtYuanFull(st.pending_buy)}`:'';
+    const exp=j.nav_expected; const stale=st.nav_asof&&exp&&st.nav_asof<exp; const feeSrc={override:'单基设置',auto:'自动',default:'默认'}[st.buy_fee_source]||''; const feeTxt=st.buy_fee!=null?`费 ${(st.buy_fee*100).toFixed(2)}%${feeSrc?'（'+feeSrc+'）':''}`:`费 —`; const asof=st.nav_asof?(stale?`净值停在 ${st.nav_asof}`:`净值 ${st.nav_asof}`):''; const pend=st.pending_buy>0?` · 在途 ${fmtYuanFull(st.pending_buy)}`:'';
     return `<tr ${click}><td class="mono">${f.code}</td><td class="name">${f.name}<div class="hint">${feeTxt}${asof?' · '+asof:''}${pend}</div></td><td class="mono" style="text-align:center">${st.lots_n??'—'}</td><td style="text-align:right" class="mono">${fmtYuanFull(st.mv_now)}</td><td style="text-align:right" class="mono">${fmtYuanFull(st.basis)}</td><td style="text-align:right" class="mono">${fmtPct(st.ret_held)}</td><td class="mono" style="text-align:right;color:${col}">${dd}</td><td>${stBadge}${over}</td></tr>`;
   }).join('');
   let mv=0,basis=0;

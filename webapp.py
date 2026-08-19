@@ -27,7 +27,7 @@ from config import (
     STRAT_CPPI_HYSTERESIS, STRAT_STYLE_CAP,
     STRAT_OVERLAP_SKIP, STRAT_OVERSEAS_SLOT_CAP,
     STRAT_INDEX_TOP1, STRAT_INDEX_PORT, STRAT_CLUSTER_MAX, STRAT_CLONE_L1,
-    OVERSEAS_FUND_TYPES,
+    OVERSEAS_FUND_TYPES, BUY_FEE_RATE, BUY_FEE_BY_FUND,
 )
 
 app = Flask(__name__)
@@ -57,6 +57,68 @@ LEDGER_FILE = os.path.join(OUTPUT_DIR, "ledger.json")
 # 标记按「基金代码 + 该轮定投最后扣款日(lastDate)」唯一识别：同一轮已结束 → 不再反复询问；
 # 若之后重新开始新一轮定投（出现更晚的扣款记录），lastDate 变化 → 自动重新提醒，互不冲突。
 DCA_STATE_FILE = os.path.join(OUTPUT_DIR, "dca_state.json")
+# 用户可在页面修改：默认费率用于自动查询失败时兜底；单基金费率始终优先。
+FEE_SETTINGS_FILE = os.path.join(OUTPUT_DIR, "fee_settings.json")
+
+
+def _base_fee_settings() -> dict:
+    overrides = {}
+    for code, rate in (BUY_FEE_BY_FUND or {}).items():
+        try:
+            code, rate = str(code).zfill(6), float(rate)
+            if re.fullmatch(r"\d{6}", code) and 0 <= rate <= 0.1:
+                overrides[code] = rate
+        except (TypeError, ValueError):
+            pass
+    return {"default_rate": float(BUY_FEE_RATE), "overrides": overrides}
+
+
+def _load_fee_settings() -> dict:
+    """读取用户费率设置；首次使用以 config 默认值初始化，文件损坏时安全回退。"""
+    base = _base_fee_settings()
+    try:
+        with open(FEE_SETTINGS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        default = float(data.get("default_rate", base["default_rate"]))
+        if not 0 <= default <= 0.1:
+            default = base["default_rate"]
+        overrides = {}
+        for code, rate in (data.get("overrides", {}) or {}).items():
+            code, rate = str(code).zfill(6), float(rate)
+            if re.fullmatch(r"\d{6}", code) and 0 <= rate <= 0.1:
+                overrides[code] = rate
+        return {"default_rate": default, "overrides": overrides}
+    except Exception:
+        return base
+
+
+def _save_fee_settings(settings: dict) -> bool:
+    try:
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        tmp = FEE_SETTINGS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, **settings}, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, FEE_SETTINGS_FILE)
+        return True
+    except Exception:
+        return False
+
+
+def _resolve_buy_fee(code, settings=None):
+    """解析实扣申购费率 → (rate, source)。优先级：单基金覆盖 > 自动查费 > 用户默认。"""
+    code = str(code or "").zfill(6)
+    settings = settings or _load_fee_settings()
+    if code in settings["overrides"]:
+        return float(settings["overrides"][code]), "override"
+    try:
+        info = provider.get_fund_buy_fee(code)
+        if isinstance(info, dict) and info.get("source") != "default":
+            rate = float(info.get("rate"))
+            if 0 <= rate <= 0.1:
+                return rate, "auto"
+    except (TypeError, ValueError):
+        pass
+    return float(settings["default_rate"]), "default"
 
 
 def _load_dca_state() -> dict:
@@ -268,12 +330,15 @@ def ledger_get():
     except Exception:
         pass
     curves = {}
+    fee_settings = _load_fee_settings()
     for code in sorted(by.keys()):
         lots = by[code]
         st = None
         try:
             nav_df = provider.get_fund_nav(code)
-            st = holding_diag.fund_lots_diag(lots, nav_df, code=code)
+            fee, fee_source = _resolve_buy_fee(code, fee_settings)
+            st = holding_diag.fund_lots_diag(lots, nav_df, code=code, buy_fee=fee)
+            st["buy_fee_source"] = fee_source
             if st.get("curve") is not None:
                 curves[code] = st["curve"]
         except Exception as e:
@@ -293,7 +358,7 @@ def ledger_get():
                                                   (STRAT_CPPI_DD3, STRAT_CPPI_SLOTS3)],
                                            full_slots=STRAT_SLOTS, hysteresis=STRAT_CPPI_HYSTERESIS)
     return jsonify(clean(dict(ok=True, txns=txns, funds=states, cppi=cppi,
-                              dca_state=_load_dca_state(),
+                              dca_state=_load_dca_state(), fee_settings=fee_settings,
                               nav_expected=provider.expected_last_td())))
 
 
@@ -325,6 +390,39 @@ def ledger_post():
     if not _save_ledger(txns):
         return jsonify({"ok": False, "message": "台账写入失败（output 目录不可写？）"}), 500
     return jsonify(clean(dict(ok=True, txns=txns, message=f"已保存 {len(txns)} 条记录")))
+
+
+@app.get("/api/fee_settings")
+def fee_settings_get():
+    return jsonify(clean(dict(ok=True, **_load_fee_settings())))
+
+
+@app.post("/api/fee_settings")
+def fee_settings_post():
+    """保存默认申购费率和单基金覆盖。API 使用小数费率：0.0012 = 0.12%。"""
+    body = request.get_json(silent=True) or {}
+    try:
+        default = float(body.get("default_rate"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "message": "默认费率无效"}), 400
+    if not np.isfinite(default) or not 0 <= default <= 0.1:
+        return jsonify({"ok": False, "message": "默认费率须在 0%～10% 之间"}), 400
+    raw = body.get("overrides", {})
+    if not isinstance(raw, dict):
+        return jsonify({"ok": False, "message": "单基金费率格式无效"}), 400
+    overrides = {}
+    try:
+        for code, rate in raw.items():
+            code, rate = str(code).zfill(6), float(rate)
+            if code == "000000" or not re.fullmatch(r"\d{6}", code) or not np.isfinite(rate) or not 0 <= rate <= 0.1:
+                raise ValueError
+            overrides[code] = rate
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "message": "基金代码需为6位，费率须在0%～10%之间"}), 400
+    settings = {"default_rate": default, "overrides": overrides}
+    if not _save_fee_settings(settings):
+        return jsonify({"ok": False, "message": "费率设置保存失败（output 目录不可写？）"}), 500
+    return jsonify(clean(dict(ok=True, **settings)))
 
 
 @app.post("/api/dca_state")
@@ -638,7 +736,7 @@ def ledger_import():
         # 导入得到的 cost 为"净成本（确认金额）"；台账金额按"含费总金额"存，
         # 因此转回 gross = cost×(1+费率)，fund_lots_diag 计算净申购= gross/(1+费率)，
         # 恰好还原 cost，避免二次扣费。
-        fee = holding_diag.buy_fee_rate(code)
+        fee, _ = _resolve_buy_fee(code)
         gross = cost * (1.0 + fee)
         t = _norm_txn({"code": code, "date": buy_date, "side": "buy", "amount": gross, "note": "导入"})
         key = (t["code"], t["date"], t["side"], round(t["amount"], 2)) if t else None
@@ -917,11 +1015,15 @@ def dca_preview():
         return jsonify({"ok": False, "message": f"净值获取失败: {str(e)[:120]}"}), 400
     adj = holding_diag.adj_series(nav_df)
     end = _parse_date(body.get("end_date"))
-    lots = holding_diag.dca_lots(start, amt, freq, end, adj=adj)
+    # 台账记录的是实际下单/扣款日，不应受净值披露时滞限制。尤其 QDII 的今日净值
+    # 往往要 T+1/T+2 才发布；历史日期仍严格按真实净值日过滤，最新净值之后的工作日
+    # 则作为“待确认扣款”保留，避免“补齐至今日”永远只能补到昨天。
+    lots = holding_diag.dca_lots(start, amt, freq, end, adj=adj, include_pending=True)
     if not lots:
-        return jsonify({"ok": False, "message": "生成 0 期（开始日期晚于净值最新日？）"}), 400
-    # 序列当前市值估算（每期按当日净值折份额 × 最新净值；已自动扣申购费）
-    fee = holding_diag.buy_fee_rate(code)
+        return jsonify({"ok": False, "message": "区间内没有应扣款的工作日（周末或休市）"}), 400
+    # 序列当前市值估算（每期按当日净值折份额 × 最新净值；已自动扣申购费；
+    # 尚未披露净值的在途记录暂按最新净值估算）。
+    fee, _ = _resolve_buy_fee(code)
     now = float(adj.iloc[-1])
     n = len(adj)
     mv = 0.0
@@ -931,8 +1033,12 @@ def dca_preview():
     total = sum(a for _, _, a in lots)
     return jsonify(clean(dict(
         ok=True, code=code, freq=freq, freq_label=holding_diag.DCA_FREQ_LABELS.get(freq, freq),
-        lots=[{"date": d, "amount": a} for d, _, a in lots],
+        lots=[{"date": d, "amount": a,
+               "nav_pending": pd.Timestamp(d).date() > adj.index[-1].date()}
+              for d, _, a in lots],
         n=len(lots), first=lots[0][0], last=lots[-1][0],
+        pending=sum(pd.Timestamp(d).date() > adj.index[-1].date() for d, _, _ in lots),
+        nav_asof=adj.index[-1].date().isoformat(),
         total=round(total, 2), implied_mv=round(mv, 2))))
 
 
@@ -1429,6 +1535,7 @@ def rebalance():
             portfolio_rbsa = None
 
     scored_holdings = []
+    fee_settings = _load_fee_settings()
     for h in norm_holdings:
         code = h["code"]
         amt = code_to_amount.get(code, 0.0) or 0.0
@@ -1444,7 +1551,8 @@ def rebalance():
                 stop = holding_diag.fund_lots_diag(
                     ledger_by[code], nav_df,
                     anchor_amount=amt if amt and amt > 0 else None,
-                    stop=STRAT_TRAIL_STOP, code=code)
+                    stop=STRAT_TRAIL_STOP, code=code,
+                    buy_fee=_resolve_buy_fee(code, fee_settings)[0])
             else:
                 # 用户输入(买入日期/成本/收益率)合并进评分行，供净值曲线反推入场
                 rec_in = dict(rec) if isinstance(rec, dict) else {"code": code, "name": code}
