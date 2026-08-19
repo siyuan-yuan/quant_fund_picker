@@ -14,6 +14,23 @@ python webapp.py
 
 浏览器打开 **http://127.0.0.1:8000**。
 
+### Windows 闪退：`Check failed: !IsConfigurablePoolInitialized()`
+
+这不是 Flask 业务报错，是 **akshare → py_mini_racer 内嵌的 V8** 进程级致命断言。
+新版 Chromium PartitionAlloc 每个进程只能 Init 一次；waitress 多线程、超时弃线程、
+或 akshare 每次调用都 `MiniRacer()`，第二次就会把 `python.exe` 直接打死（栈顶是 `mini_racer.dll`）。
+
+本仓库已处理：启动时把 MiniRacer 钉成永不销毁的单例（`v8_guard.py`），净值/名录改走东财 HTTP。
+若仍崩溃，降级到旧 V8：
+
+```bash
+pip uninstall mini-racer py-mini-racer -y
+pip install py-mini-racer==0.6.0
+python webapp.py
+```
+
+不要用 Flask `debug=True` / reloader（会 fork 出第二个 V8）。
+
 | 功能 | 操作 |
 |---|---|
 | 估值地形图 | 打开页面自动加载（12因子面板 5年PE分位） |
@@ -60,6 +77,8 @@ V4 实验代码、模型文件与产物已全部移除，评分引擎只保留 V
 
 ```
 config.py     模型参数/12因子面板定义
+v8_guard.py   Windows V8/MiniRacer 单例护栏（防进程级 FATAL）
+em_fetch.py   东财净值/名录 HTTP 直连（绕开 MiniRacer）
 provider.py   数据层（天天基金/乐咕/中证/雪球，本地缓存）
 rbsa.py       Ridge-RBSA 底层穿透（60日窗口×3错位取均，L2非负约束）
 factors.py    F_value/F_alpha/F_momentum 三大因子

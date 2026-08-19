@@ -1,15 +1,19 @@
 # -*- coding: utf-8 -*-
 """
 数据层: 全免费数据源, 带本地缓存
-  - 基金净值/日增长率: 天天基金(EM)
+  - 基金净值/日增长率: 天天基金(EM) HTTP 直连（绕开 MiniRacer）
   - 基金档案(规模变动/仓位配置/经理任期): 天天基金 pingzhongdata
   - 指数日行情: 新浪
   - 指数PE历史: 乐咕乐股 (Point-in-Time时序)
 """
+import v8_guard
+v8_guard.install()
+
 import os, re, json, time, datetime as dt, threading, tempfile
 import requests
 import pandas as pd
 import akshare as ak
+import em_fetch
 
 from config import CACHE_DIR
 
@@ -229,6 +233,40 @@ def _retry(fn, n=3, sleep=1.5):
     raise last
 
 
+def _ak(fn, *args, **kwargs):
+    """akshare 调用入口：串行化，避免并发 MiniRacer() 把进程打死。"""
+    return v8_guard.call_ak(fn, *args, **kwargs)
+
+
+def _nav_frame_from_rows(rows) -> pd.DataFrame:
+    df = pd.DataFrame(rows, columns=["date", "nav", "ret"])
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["nav"] = pd.to_numeric(df["nav"], errors="coerce")
+    df["ret"] = pd.to_numeric(df["ret"], errors="coerce").div(100.0)
+    df = (df.dropna(subset=["date", "nav"])
+            .sort_values("date")
+            .drop_duplicates("date")
+            .reset_index(drop=True))
+    if df.empty:
+        raise RuntimeError("净值空表")
+    return df
+
+
+def _fetch_nav_df(code: str) -> pd.DataFrame:
+    """优先东财 HTTP（无 V8）；失败再回退 akshare（已加锁）。"""
+    try:
+        return _nav_frame_from_rows(em_fetch.fetch_nav_lsjz(
+            code, timeout=_HTTP_TIMEOUT))
+    except Exception:
+        raw = _retry(lambda: _ak(ak.fund_open_fund_info_em,
+                                 symbol=code, indicator="单位净值走势"))
+        return pd.DataFrame({
+            "date": pd.to_datetime(raw["净值日期"]),
+            "nav": raw["单位净值"].astype(float).values,
+            "ret": raw["日增长率"].astype(float).div(100).values,
+        }).dropna().sort_values("date").reset_index(drop=True)
+
+
 # ---------------- 基金净值 ----------------
 def get_fund_nav(code: str) -> pd.DataFrame:
     """返回 [date, nav, ret(日增长率小数)] —— ret为东财官方复权日收益"""
@@ -239,12 +277,7 @@ def get_fund_nav(code: str) -> pd.DataFrame:
     path = f"{CACHE_DIR}/nav_{code}.csv"
 
     def _build():
-        raw = _retry(lambda: ak.fund_open_fund_info_em(symbol=code, indicator="单位净值走势"))
-        return pd.DataFrame({
-            "date": pd.to_datetime(raw["净值日期"]),
-            "nav": raw["单位净值"].astype(float).values,
-            "ret": raw["日增长率"].astype(float).div(100).values,
-        }).dropna().sort_values("date").reset_index(drop=True)
+        return _fetch_nav_df(code)
 
     df = _cached_or_fetch(path, _build)
     _memo[key] = df
@@ -259,13 +292,7 @@ def refresh_fund_nav(code: str, timeout=15):
     _roll_day()
 
     def _build():
-        raw = _retry(lambda: ak.fund_open_fund_info_em(symbol=code, indicator="单位净值走势"),
-                     n=2, sleep=1.0)
-        return pd.DataFrame({
-            "date": pd.to_datetime(raw["净值日期"]),
-            "nav": raw["单位净值"].astype(float).values,
-            "ret": raw["日增长率"].astype(float).div(100).values,
-        }).dropna().sort_values("date").reset_index(drop=True)
+        return _fetch_nav_df(code)
 
     try:
         df = _run_with_timeout(_build, timeout=timeout)
@@ -380,7 +407,7 @@ def get_index_close(sina_code: str) -> pd.Series:
     path = f"{CACHE_DIR}/idx_{sina_code}.csv"
 
     def _build():
-        raw = _retry(lambda: ak.stock_zh_index_daily(symbol=sina_code))
+        raw = _retry(lambda: _ak(ak.stock_zh_index_daily, symbol=sina_code))
         df = raw[["date", "close"]].copy()
         df["date"] = pd.to_datetime(df["date"])
         return df
@@ -400,7 +427,7 @@ def get_index_ohlcv(sina_code: str) -> pd.DataFrame:
     path = f"{CACHE_DIR}/idxfull_{sina_code}.csv"
 
     def _build():
-        raw = _retry(lambda: ak.stock_zh_index_daily(symbol=sina_code))
+        raw = _retry(lambda: _ak(ak.stock_zh_index_daily, symbol=sina_code))
         df = raw.copy()
         df["date"] = pd.to_datetime(df["date"])
         return df.sort_values("date").reset_index(drop=True)
@@ -433,9 +460,9 @@ def _csindex_df(csicode: str) -> pd.DataFrame:
     path = f"{CACHE_DIR}/csi_{csicode}.csv"
 
     def _build():
-        raw = _retry(lambda: ak.stock_zh_index_hist_csindex(
-            symbol=csicode, start_date="20210801",
-            end_date=dt.date.today().strftime("%Y%m%d")))   # V3.7.3: 修硬编码20260801化石
+        raw = _retry(lambda: _ak(ak.stock_zh_index_hist_csindex,
+                                 symbol=csicode, start_date="20210801",
+                                 end_date=dt.date.today().strftime("%Y%m%d")))   # V3.7.3: 修硬编码20260801化石
         return pd.DataFrame({"date": pd.to_datetime(raw["日期"]),
                              "close": raw["收盘"].astype(float).values,
                              "pe": raw["滚动市盈率"].astype(float).values})
@@ -465,7 +492,7 @@ def get_us_index_close(us_code: str) -> pd.Series:
     path = f"{CACHE_DIR}/idx_us_{us_code.replace('.','_')}.csv"
 
     def _build():
-        raw = _retry(lambda: ak.stock_us_daily(symbol=us_code, adjust=""))
+        raw = _retry(lambda: _ak(ak.stock_us_daily, symbol=us_code, adjust=""))
         df = raw[["date", "close"]].copy()
         df["date"] = pd.to_datetime(df["date"])
         return df
@@ -485,7 +512,7 @@ def get_hk_index_close(hk_code: str) -> pd.Series:
     path = f"{CACHE_DIR}/idx_hk_{hk_code}.csv"
 
     def _build():
-        raw = _retry(lambda: ak.stock_hk_index_daily_sina(symbol=hk_code))
+        raw = _retry(lambda: _ak(ak.stock_hk_index_daily_sina, symbol=hk_code))
         df = raw[["date", "close"]].copy()
         df["date"] = pd.to_datetime(df["date"])
         return df
@@ -530,7 +557,7 @@ def get_index_pe(lg_symbol: str) -> pd.Series:
     path = f"{CACHE_DIR}/pe_{lg_symbol}.csv"
 
     def _build():
-        raw = _retry(lambda: ak.stock_index_pe_lg(symbol=lg_symbol))
+        raw = _retry(lambda: _ak(ak.stock_index_pe_lg, symbol=lg_symbol))
         return pd.DataFrame({"date": pd.to_datetime(raw["日期"]),
                              "pe": raw["滚动市盈率"].astype(float).values})
 
@@ -551,7 +578,11 @@ def get_fund_meta() -> pd.DataFrame:
         # 名录是全场共享文件：多线程评分会同时触发重抓，加锁串行化 + 原子写防并发读空文件
         with _lock_for(path):
             if not _fresh(path):
-                df = _retry(lambda: ak.fund_name_em())
+                try:
+                    df = pd.DataFrame(em_fetch.fetch_fund_meta(
+                        timeout=max(_HTTP_TIMEOUT, 20)))
+                except Exception:
+                    df = _retry(lambda: _ak(ak.fund_name_em))
                 df["基金代码"] = df["基金代码"].astype(str).str.zfill(6)
                 _atomic_write_csv(df, path)
             else:
@@ -625,7 +656,7 @@ def get_fund_buy_fee(code: str) -> dict:
             d = None
     if d is None:
         try:
-            df = _retry(lambda: ak.fund_fee_em(symbol=code, indicator="申购费率"),
+            df = _retry(lambda: _ak(ak.fund_fee_em, symbol=code, indicator="申购费率"),
                         n=2, sleep=1.0)
             if df is not None and len(df):
                 df = df.reset_index(drop=True)
