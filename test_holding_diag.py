@@ -508,6 +508,34 @@ def test_dca_preview_keeps_today_with_lagging_nav():
     print("test_dca_preview_keeps_today_with_lagging_nav OK")
 
 
+def test_user_fee_settings():
+    """页面费率设置：默认值持久化、单基金覆盖优先、自动查费优先于默认值。"""
+    import tempfile
+    import webapp
+    orig_file = webapp.FEE_SETTINGS_FILE
+    orig_lookup = webapp.provider.get_fund_buy_fee
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            webapp.FEE_SETTINGS_FILE = os.path.join(td, "fee_settings.json")
+            c = webapp.app.test_client()
+            initial = c.get("/api/fee_settings").get_json()
+            assert initial["overrides"]["016452"] == 0.0012
+            saved = c.post("/api/fee_settings", json={
+                "default_rate": 0.002, "overrides": {"016452": 0.001, "123456": 0.003}})
+            assert saved.status_code == 200, saved.get_json()
+            assert abs(webapp._resolve_buy_fee("016452")[0] - 0.001) < 1e-12
+            webapp.provider.get_fund_buy_fee = lambda code: {"rate": 0.004, "source": "discounted"}
+            assert webapp._resolve_buy_fee("999999") == (0.004, "auto")
+            webapp.provider.get_fund_buy_fee = lambda code: {"rate": 0.0, "source": "default"}
+            assert webapp._resolve_buy_fee("999999") == (0.002, "default")
+            bad = c.post("/api/fee_settings", json={"default_rate": 20, "overrides": {}})
+            assert bad.status_code == 400
+        finally:
+            webapp.FEE_SETTINGS_FILE = orig_file
+            webapp.provider.get_fund_buy_fee = orig_lookup
+    print("test_user_fee_settings OK")
+
+
 def test_buy_fee_deduction():
     """买入自动扣申购费：填总金额190 → 净申购=190×(1-费率) → 折份额。"""
     dates = pd.date_range("2021-01-01", periods=40, freq="D")
@@ -572,7 +600,7 @@ if __name__ == "__main__":
     for fn in [test_adj_series, test_infer_entry_date, test_infer_ambiguous, test_fund_stop_diag, test_fund_lots_diag, test_portfolio_cppi_curve_input, test_portfolio_cppi_stale_nav, test_portfolio_cppi_auto_start,
                test_dca_dates_lots_infer, test_confirm_nav_pos_and_holiday, test_dca_skips_holiday,
                test_dca_keeps_pending_business_days, test_dca_preview_keeps_today_with_lagging_nav,
-               test_buy_fee_deduction,
+               test_user_fee_settings, test_buy_fee_deduction,
                test_fund_buy_fee_lookup,
                test_exposure_overlap, test_clone_detection, test_cppi_tier_sim, test_portfolio_cppi, test_webapp_endpoint]:
         fn()
