@@ -917,10 +917,14 @@ def dca_preview():
         return jsonify({"ok": False, "message": f"净值获取失败: {str(e)[:120]}"}), 400
     adj = holding_diag.adj_series(nav_df)
     end = _parse_date(body.get("end_date"))
-    lots = holding_diag.dca_lots(start, amt, freq, end, adj=adj)
+    # 台账记录的是实际下单/扣款日，不应受净值披露时滞限制。尤其 QDII 的今日净值
+    # 往往要 T+1/T+2 才发布；历史日期仍严格按真实净值日过滤，最新净值之后的工作日
+    # 则作为“待确认扣款”保留，避免“补齐至今日”永远只能补到昨天。
+    lots = holding_diag.dca_lots(start, amt, freq, end, adj=adj, include_pending=True)
     if not lots:
-        return jsonify({"ok": False, "message": "生成 0 期（开始日期晚于净值最新日？）"}), 400
-    # 序列当前市值估算（每期按当日净值折份额 × 最新净值；已自动扣申购费）
+        return jsonify({"ok": False, "message": "区间内没有应扣款的工作日（周末或休市）"}), 400
+    # 序列当前市值估算（每期按当日净值折份额 × 最新净值；已自动扣申购费；
+    # 尚未披露净值的在途记录暂按最新净值估算）。
     fee = holding_diag.buy_fee_rate(code)
     now = float(adj.iloc[-1])
     n = len(adj)
@@ -931,8 +935,12 @@ def dca_preview():
     total = sum(a for _, _, a in lots)
     return jsonify(clean(dict(
         ok=True, code=code, freq=freq, freq_label=holding_diag.DCA_FREQ_LABELS.get(freq, freq),
-        lots=[{"date": d, "amount": a} for d, _, a in lots],
+        lots=[{"date": d, "amount": a,
+               "nav_pending": pd.Timestamp(d).date() > adj.index[-1].date()}
+              for d, _, a in lots],
         n=len(lots), first=lots[0][0], last=lots[-1][0],
+        pending=sum(pd.Timestamp(d).date() > adj.index[-1].date() for d, _, _ in lots),
+        nav_asof=adj.index[-1].date().isoformat(),
         total=round(total, 2), implied_mv=round(mv, 2))))
 
 

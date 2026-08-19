@@ -224,13 +224,18 @@ def dca_dates(start, freq="monthly", end=None):
     return [d.date() for d in pd.date_range(start, end, freq=f"{step}D")]
 
 
-def dca_lots(start, amount, freq="monthly", end=None, adj=None):
+def dca_lots(start, amount, freq="monthly", end=None, adj=None, include_pending=False):
     """生成定投买入记录 [(date_str, 'buy', amount), ...]。
 
     adj 提供时自动跳过休市：
-      - 裁剪到净值覆盖范围 [首个净值日, 最新净值日]（早于成立日的期次丢弃）；
-      - **只保留实际有净值的交易日**（A股/海外的周末与法定/境外休市在净值序列里
-        都是缺行）→ 定投落在休市日直接不投，无需再手动删除。
+      - 已公布净值的历史区间只保留真实净值日（周末/法定休市自动排除）；
+      - ``include_pending=True`` 时，最新净值日之后至 ``end`` 的工作日也保留为
+        **待确认扣款**。这对 QDII 尤其重要：其净值通常滞后 1～2 天，不能因为今日
+        净值尚未发布，就把用户今日已经发生的定投从台账中漏掉。
+
+    include_pending 默认关闭以保持历史回测/反推的严格净值日口径；台账生成与“补齐至
+    今日”应显式开启。待确认区间只能可靠排除周末，之后净值发布时诊断会自动使用真实
+    确认净值；若平台因特殊休市未实际扣款，用户仍可在台账删除该笔。
     """
     amount = float(amount)
     if amount <= 0:
@@ -238,7 +243,9 @@ def dca_lots(start, amount, freq="monthly", end=None, adj=None):
     dates = dca_dates(start, freq, end)
     if adj is not None and len(adj):
         trading = set(adj.index.date)      # 有净值的日子 = 该基金真实交易日
-        dates = [d for d in dates if d in trading]
+        last_nav_date = max(trading)
+        dates = [d for d in dates
+                 if d in trading or (include_pending and d > last_nav_date and d.weekday() < 5)]
     return [(str(d), "buy", amount) for d in dates]
 
 

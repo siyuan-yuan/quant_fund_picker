@@ -659,6 +659,11 @@ function addToRebalance(c){
 // ============ 操作台账（买卖历史 · 自动保存到服务器 output/ledger.json） ============
 let LEDGER_TXNS=[];
 let LEDGER_VIEW_CODE=''; // 空=全部基金流水
+// 使用浏览器本地日期而不是 toISOString() 的 UTC 日期；北京时间 00:00～07:59
+// 若取 UTC 会误判成“昨天”，导致“补齐至今天”少补一天。
+function localDateStr(d=new Date()){
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
 // 定投终止/忽略/止盈标记（持久化，output/dca_state.json）。
 // 终止/忽略以「该轮定投最后扣款日 lastDate」为轮次指纹：同一轮已终止 → 不再反复询问；
 // 之后开始新一轮定投（出现更晚的扣款记录）→ lastDate 变化 → 自动重新提醒。
@@ -844,8 +849,8 @@ function checkMissingDCA() {
     byCode[t.code].push(t);
   }
   
-  const todayStr = new Date().toISOString().slice(0,10);
-  const today = new Date(todayStr);
+  const todayStr = localDateStr();
+  const today = new Date(todayStr + 'T00:00:00');
   const candidates = [];
   
   for(const code in byCode) {
@@ -941,47 +946,72 @@ async function ignoreMissingDCA(idx) {
 async function fillMissingDCA(idx, toToday) {
   const c = missingDcaCandidates[idx];
   if(!c) return;
-  const endStr = toToday ? new Date().toISOString().slice(0,10) : document.getElementById('dca-term-'+idx).value.trim();
+  const endStr = toToday ? localDateStr() : document.getElementById('dca-term-'+idx).value.trim();
   const norm = d => { const x = String(d).replace(/[/.]/g,'-'); return /^\d{8}$/.test(x)?`${x.slice(0,4)}-${x.slice(4,6)}-${x.slice(6,8)}`:x; };
-  const endD = new Date(norm(endStr));
-  if(isNaN(endD)) { alert("日期格式无效，请填写 YYYY-MM-DD"); return; }
-  
+  const endD = new Date(norm(endStr) + 'T00:00:00');
+  if(isNaN(endD)) { setStatus('led-dot','led-st','err','日期格式无效，请填写 YYYY-MM-DD'); return; }
+
   const nd = c.nextDate;
-  const startStr = `${nd.getFullYear()}-${String(nd.getMonth()+1).padStart(2,'0')}-${String(nd.getDate()).padStart(2,'0')}`;
-  let txnsToAdd = [];
+  const startStr = localDateStr(nd);
+  setStatus('led-dot','led-st','run',`正在计算 ${c.code} ${startStr} 至 ${norm(endStr)} 的应补记录…`);
+  let pj;
   try{
-    const pj = await (await fetch('/api/dca/preview',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({code:c.code, start_date:startStr, amount:c.amount, freq:c.freq, end_date:norm(endStr)})})).json();
-    if(pj.ok) txnsToAdd = (pj.lots||[]).map(x=>({code:c.code, side:'buy', isDca:true, date:x.date, amount:x.amount}));
-  }catch(e){}
-  
-  ignoredDCAs.add(c.code + '|' + c.lastDate);
-  
-  // 选择了「补齐至此日」= 明确告知定投已终止：记录该轮最后扣款日并持久化，
-  // 之后同一轮（lastDate 相同）不再询问；若重新开始新一轮（lastDate 更晚）会自动恢复提醒。
+    const resp = await fetch('/api/dca/preview',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({code:c.code, start_date:startStr, amount:c.amount, freq:c.freq, end_date:norm(endStr)})});
+    pj = await resp.json();
+  }catch(e){
+    setStatus('led-dot','led-st','err','补齐失败：无法连接服务器，请重试');
+    return;
+  }
+  // 旧逻辑吞掉 preview 的错误后仍把候选隐藏，造成“点了按钮但没有补”的假成功。
+  // 现在只有明确生成并成功保存后才改变本地状态；失败会展示原因并保留按钮供重试。
+  if(!pj.ok){
+    setStatus('led-dot','led-st','err',`补齐失败：${pj.message||'无法生成定投记录'}`);
+    return;
+  }
+  const txnsToAdd = (pj.lots||[]).map(x=>({code:c.code, side:'buy', isDca:true, date:x.date, amount:x.amount}));
+
+  // 选择了「补齐至此日」= 明确告知定投已终止。先准备标记，必须等台账保存成功后
+  // 再持久化，避免“台账写失败但状态已终止”把尚未补齐的记录永久隐藏。
   let terminatedInfo = null;
   if(!toToday){
     let lastDcaDate = c.lastDate;
     for(const t of txnsToAdd) if(t.date > lastDcaDate) lastDcaDate = t.date;
     terminatedInfo = { lastDate: lastDcaDate, terminatedDate: norm(endStr) };
-    DCA_STATE.terminated[c.code] = terminatedInfo;
-    await saveDcaState();
   }
-  
+
   if(!txnsToAdd.length) {
-    checkMissingDCA();
-    if(terminatedInfo) setStatus('led-dot','led-st','ok',`已标记 ${c.code} 定投终止（${terminatedInfo.terminatedDate}），不再重复询问`);
+    if(terminatedInfo){
+      DCA_STATE.terminated[c.code] = terminatedInfo;
+      ignoredDCAs.add(c.code + '|' + c.lastDate);
+      await saveDcaState();
+      checkMissingDCA();
+      setStatus('led-dot','led-st','ok',`已标记 ${c.code} 定投终止（${terminatedInfo.terminatedDate}），区间内无需补记`);
+    } else {
+      setStatus('led-dot','led-st','err','补齐失败：服务器未返回应补记录，请重试');
+    }
     return;
   }
-  
+
   setStatus('led-dot','led-st','run','补齐保存中...');
   const txns = LEDGER_TXNS.slice().concat(txnsToAdd);
-  const j = await (await fetch('/api/ledger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({txns})})).json();
+  let j;
+  try{
+    j = await (await fetch('/api/ledger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({txns})})).json();
+  }catch(e){
+    setStatus('led-dot','led-st','err','补齐保存失败：无法连接服务器，请重试');
+    return;
+  }
   if(j.ok){
+    ignoredDCAs.add(c.code + '|' + c.lastDate);
+    if(terminatedInfo){
+      DCA_STATE.terminated[c.code] = terminatedInfo;
+      await saveDcaState();
+    }
     await updateLedger();
-    setStatus('led-dot','led-st','ok',`已成功补齐 ${txnsToAdd.length} 笔定投记录${terminatedInfo ? '，并已标记该轮定投终止（不再重复询问）' : ''}`);
+    const pending = Number(pj.pending||0);
+    setStatus('led-dot','led-st','ok',`已成功补齐 ${txnsToAdd.length} 笔定投记录${pending?`（其中 ${pending} 笔净值待确认）`:''}${terminatedInfo ? '，并已标记该轮定投终止（不再重复询问）' : ''}`);
   } else {
-    alert(j.message || '保存失败');
     setStatus('led-dot','led-st','err',j.message || '保存失败');
   }
 }

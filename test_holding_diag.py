@@ -469,6 +469,45 @@ def test_dca_skips_holiday():
     print("test_dca_skips_holiday OK, lots:", sorted(got))
 
 
+def test_dca_keeps_pending_business_days():
+    """“补齐至今日”须保留净值尚未披露的工作日（QDII 常见 T+1/T+2）。"""
+    # 已知净值只到周三 3/6；3/5 是历史缺失净值日，应继续视为休市并跳过。
+    dates = pd.to_datetime(["2024-03-01", "2024-03-04", "2024-03-06"])
+    adj = pd.Series([1.0, 1.01, 1.02], index=dates)
+    strict = hd.dca_lots("2024-03-01", 100, "daily", end="2024-03-11", adj=adj)
+    assert [x[0] for x in strict] == ["2024-03-01", "2024-03-04", "2024-03-06"]
+
+    pending = hd.dca_lots("2024-03-01", 100, "daily", end="2024-03-11",
+                          adj=adj, include_pending=True)
+    got = [x[0] for x in pending]
+    assert "2024-03-05" not in got               # 已知历史缺口仍跳过
+    assert got[-3:] == ["2024-03-07", "2024-03-08", "2024-03-11"], got
+    assert "2024-03-09" not in got and "2024-03-10" not in got  # 待确认区间排除周末
+    print("test_dca_keeps_pending_business_days OK, lots:", got)
+
+
+def test_dca_preview_keeps_today_with_lagging_nav():
+    """端到端回归：016452 净值只到 18 日时，补齐仍必须返回 19 日扣款。"""
+    import webapp
+    orig_nav = webapp.provider.get_fund_nav
+    orig_fee = webapp.holding_diag.buy_fee_rate
+    try:
+        webapp.provider.get_fund_nav = lambda code: pd.DataFrame({
+            "date": pd.to_datetime(["2026-08-17", "2026-08-18"]),
+            "nav": [2.0, 2.1], "ret": [0.0, 0.05]})
+        webapp.holding_diag.buy_fee_rate = lambda code: 0.0
+        r = webapp.app.test_client().post("/api/dca/preview", json={
+            "code": "016452", "start_date": "2026-08-19", "end_date": "2026-08-19",
+            "amount": 100, "freq": "daily"})
+        j = r.get_json()
+        assert r.status_code == 200 and j["last"] == "2026-08-19", j
+        assert j["pending"] == 1 and j["lots"][0]["nav_pending"] is True, j
+    finally:
+        webapp.provider.get_fund_nav = orig_nav
+        webapp.holding_diag.buy_fee_rate = orig_fee
+    print("test_dca_preview_keeps_today_with_lagging_nav OK")
+
+
 def test_buy_fee_deduction():
     """买入自动扣申购费：填总金额190 → 净申购=190×(1-费率) → 折份额。"""
     dates = pd.date_range("2021-01-01", periods=40, freq="D")
@@ -529,7 +568,9 @@ def test_fund_buy_fee_lookup():
 
 if __name__ == "__main__":
     for fn in [test_adj_series, test_infer_entry_date, test_infer_ambiguous, test_fund_stop_diag, test_fund_lots_diag, test_portfolio_cppi_curve_input, test_portfolio_cppi_stale_nav, test_portfolio_cppi_auto_start,
-               test_dca_dates_lots_infer, test_confirm_nav_pos_and_holiday, test_dca_skips_holiday, test_buy_fee_deduction,
+               test_dca_dates_lots_infer, test_confirm_nav_pos_and_holiday, test_dca_skips_holiday,
+               test_dca_keeps_pending_business_days, test_dca_preview_keeps_today_with_lagging_nav,
+               test_buy_fee_deduction,
                test_fund_buy_fee_lookup,
                test_exposure_overlap, test_clone_detection, test_cppi_tier_sim, test_portfolio_cppi, test_webapp_endpoint]:
         fn()
