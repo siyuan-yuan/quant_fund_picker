@@ -11,6 +11,9 @@ import argparse
 import time, datetime as dt, os, json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
+import v8_guard
+v8_guard.install()
+
 import numpy as np
 import pandas as pd
 import akshare as ak
@@ -39,7 +42,7 @@ def _load_rank_table() -> pd.DataFrame:
     if provider._fresh(rank_path):
         rank = pd.read_csv(rank_path, dtype={"基金代码": str})
     else:
-        rank = ak.fund_open_fund_rank_em(symbol="全部")
+        rank = v8_guard.call_ak(ak.fund_open_fund_rank_em, symbol="全部")
         rank["基金代码"] = rank["基金代码"].astype(str).str.zfill(6)
         rank.to_csv(rank_path, index=False)
     return rank

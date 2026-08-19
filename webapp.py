@@ -4,6 +4,9 @@
 手动触发爬取→计算→出榜, 本地运行
 启动: python webapp.py  (默认运行于 0.0.0.0:8000，生产级 WSGI 服务)
 """
+import v8_guard
+v8_guard.install()
+
 import os, glob, json, time, re, random, threading, datetime as dt
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from math import sqrt
@@ -2195,6 +2198,10 @@ if __name__ == "__main__":
     print(" 量化选基系统 V3.8 — 生产级 WSGI 引擎启动 (Production WSGI Server)", flush=True)
     print("============================================================", flush=True)
     print(" * Running on all addresses (0.0.0.0:8000)", flush=True)
+    vst = v8_guard.prewarm()
+    print(f" * V8/MiniRacer guard: singleton={vst.get('singleton')} "
+          f"available={vst.get('available')}"
+          + (f" ({vst['error']})" if vst.get("error") else ""), flush=True)
     print("============================================================", flush=True)
     try:
         from waitress import serve
