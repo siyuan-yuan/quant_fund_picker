@@ -527,8 +527,10 @@ def test_buy_fee_deduction():
 
 
 def test_fund_buy_fee_lookup():
-    """自动查申购费率：优先天天基金优惠费率，无优惠回退原费率（模拟无网络）。"""
+    """自动查申购费率：代码覆盖优先；否则优惠费率优先，无优惠回退原费率。"""
     import provider
+    # 016452 A 类互联网渠道折后 0.12%；必须固定覆盖，避免费率源断网时按 0 估算。
+    assert abs(hd.buy_fee_rate("016452") - 0.0012) < 1e-12
     # 解析器
     assert provider._parse_fee_pct("0.12%") == 0.0012
     assert provider._parse_fee_pct("1.20%") == 0.012
