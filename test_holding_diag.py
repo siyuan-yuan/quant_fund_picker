@@ -446,7 +446,49 @@ def test_confirm_nav_pos_and_holiday():
     assert str(idx[p1].date()) == "2024-03-04"
     plast = hd.confirm_nav_pos(idx, "2024-12-31", 0)
     assert plast == len(idx) - 1
+    assert hd.confirm_nav_pos(idx, "2024-12-31", 0, fallback=False) is None
     print("test_confirm_nav_pos_and_holiday OK")
+
+
+def test_qdi_pending_unpublished_nav():
+    """QDII：确认净值尚未公布的下单不得按最新净值折份额（016452 / 8-19 在途）。
+
+    复现：净值只到 8-18，诊断日 8-20。8-18 已确认；8-19/8-20 在途。
+    旧逻辑只把 date>=今天 当在途，会把 8-19 按 8-18 净值折成已确认份额，
+    市值少计一笔在途、多计一笔份额，整数显示正好变成「2045 vs 2053.88」。
+    A 股对照：即使 8-19 净值尚未进缓存，仍按旧口径确认（其它基金不受影响）。
+    """
+    dates = pd.bdate_range("2026-06-01", "2026-08-18")
+    df = mk_nav([str(d.date()) for d in dates], [0.0] * len(dates))
+    # 净值恒 2.0，便于心算：10 元 @0.12% → 净申购 9.9880 → 4.9940 份
+    df["nav"] = 2.0
+    lots = [
+        ("2026-07-01", "buy", 2000.0),
+        ("2026-08-18", "buy", 10.0),
+        ("2026-08-19", "buy", 10.0),
+        ("2026-08-20", "buy", 10.0),
+    ]
+    orig = hd.nav_confirm_delay
+    try:
+        hd.nav_confirm_delay = lambda code: 1
+        d = hd.fund_lots_diag(lots, df, buy_fee=0.0012, asof="2026-08-20", code="016452")
+        assert d["computable"] and d["pending_n"] == 2, d
+        assert abs(d["pending_buy"] - 20.0) < 1e-9, d
+        # 已确认 = 2000+10，在途 20 不得折份额
+        exp_sh = (2010.0 / 1.0012) / 2.0
+        assert abs(d["shares_now"] - exp_sh) < 1e-4, d
+        assert abs(d["mv_now"] - exp_sh * 2.0) < 0.02, d
+        assert abs(d["holding_amount"] - (d["mv_now"] + 20.0)) < 0.02, d
+        assert abs(d["holding_basis"] - (d["basis"] + 20.0)) < 0.02, d
+        # A 股：8-19 即使无净值也仍确认（缓存滞后兜底），只有今天在途
+        hd.nav_confirm_delay = lambda code: 0
+        a = hd.fund_lots_diag(lots, df, buy_fee=0.0012, asof="2026-08-20", code="110011")
+        assert a["pending_n"] == 1 and abs(a["pending_buy"] - 10.0) < 1e-9, a
+        exp_sh_a = (2020.0 / 1.0012) / 2.0
+        assert abs(a["shares_now"] - exp_sh_a) < 1e-4, a
+    finally:
+        hd.nav_confirm_delay = orig
+    print("test_qdi_pending_unpublished_nav OK")
 
 
 def test_dca_skips_holiday():
@@ -598,7 +640,8 @@ def test_fund_buy_fee_lookup():
 
 if __name__ == "__main__":
     for fn in [test_adj_series, test_infer_entry_date, test_infer_ambiguous, test_fund_stop_diag, test_fund_lots_diag, test_portfolio_cppi_curve_input, test_portfolio_cppi_stale_nav, test_portfolio_cppi_auto_start,
-               test_dca_dates_lots_infer, test_confirm_nav_pos_and_holiday, test_dca_skips_holiday,
+               test_dca_dates_lots_infer, test_confirm_nav_pos_and_holiday,
+               test_qdi_pending_unpublished_nav, test_dca_skips_holiday,
                test_dca_keeps_pending_business_days, test_dca_preview_keeps_today_with_lagging_nav,
                test_user_fee_settings, test_buy_fee_deduction,
                test_fund_buy_fee_lookup,

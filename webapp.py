@@ -1598,8 +1598,11 @@ def rebalance():
         penalties = _safe_list(rec.get("penalties"))
         penalty_detail = _safe_dict(rec.get("penalty_detail"))
         rbsa_detail = _safe_dict(rec.get("rbsa"))
-        # 台账路径下当前市值由份额×净值自动算出（锚定用户填写值）；用户没填市值时直接用计算值
-        if isinstance(stop, dict) and stop.get("mv_now"):
+        # 台账路径下当前市值由份额×净值自动算出（锚定用户填写值）；用户没填市值时直接用计算值。
+        # 展示/调仓金额优先用持有金额（已确认市值+在途申购），对齐支付宝「持有金额」。
+        if isinstance(stop, dict) and stop.get("holding_amount"):
+            amt = float(stop["holding_amount"])
+        elif isinstance(stop, dict) and stop.get("mv_now"):
             amt = float(stop["mv_now"])
         holdings_detail.append({
             "code": code,

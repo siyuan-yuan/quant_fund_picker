@@ -76,37 +76,62 @@ def unit_series(nav_df):
                      index=pd.DatetimeIndex(df["date"]), name="nav")
 
 
-def confirm_nav_pos(idx, d, delay=0):
+def confirm_nav_pos(idx, d, delay=0, fallback=True):
     """下单日 → 确认净值在序列中的位置。
 
     规则（用户填的是北京 15:00 切日后的下单日）：
       1. 下单日若无净值（周末/法定休市/海外休市）→ 顺延到下一交易日；
       2. delay=1（QDII）再往后一个交易日（T 日下单，按 T+1 净值确认）；
-      3. 下单日晚于最新净值 → 暂用最新净值（在途/缓存未更新）。
+      3. 下单日晚于最新净值：fallback=True 时暂用最新净值（A 股缓存滞后兜底）；
+         fallback=False 时返回 None，表示确认净值尚未公布（在途，不得折份额）。
     """
     if idx is None or len(idx) == 0:
-        return 0
+        return 0 if fallback else None
     p = int(idx.searchsorted(pd.Timestamp(d)))
     n = len(idx)
-    if p >= n:
-        return n - 1
-    p = min(max(p, 0) + int(delay or 0), n - 1)
+    shift = int(delay or 0)
+    if p >= n or p + shift >= n:
+        return (n - 1) if fallback else None
+    p = min(max(p, 0) + shift, n - 1)
     return max(p, 0)
 
 
 def nav_confirm_delay(code):
-    """QDII / 海外基金：下单日 T 按 T+1 净值确认；A 股为 0（当天净值）。"""
+    """是否按海外/QDII 在途规则处理。
+
+    返回 1 表示海外：确认净值尚未写入序列的下单记在途（不得用最新净值折份额）。
+    返回 0 表示 A 股：仅下单日≥诊断日的单为在途。
+    份额本身仍按下单日（或下一有净值日）单位净值确认——016452 等品种
+    实际是 T 日净值、T+2 份额到账，到账日与净值公布日重合。
+    """
     code = str(code or "").zfill(6) if code else ""
     if not code or code == "000000":
         return 0
+    ft = ""
     try:
         import provider
-        from config import OVERSEAS_FUND_TYPES
         ft = str(provider.fund_type(code) or "")
-        if ft in OVERSEAS_FUND_TYPES or "QDII" in ft or "海外" in ft:
-            return 1
     except Exception:
-        pass
+        ft = ""
+    if not ft:
+        try:
+            import os
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cache", "fund_meta.csv")
+            import csv
+            with open(path, encoding="utf-8") as f:
+                for row in csv.reader(f):
+                    if row and str(row[0]).zfill(6) == code:
+                        ft = row[3] if len(row) > 3 else ""
+                        break
+        except Exception:
+            ft = ""
+    try:
+        from config import OVERSEAS_FUND_TYPES
+        overseas_types = OVERSEAS_FUND_TYPES
+    except Exception:
+        overseas_types = set()
+    if ft in overseas_types or "QDII" in ft or "海外" in ft:
+        return 1
     return 0
 
 
@@ -465,7 +490,7 @@ def find_clone_exposure(cand_expo, ref_list, max_l1=0.02):
 
 
 def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15, code=None,
-                   buy_fee=None):
+                   buy_fee=None, asof=None):
     """多笔买入/卖出 → 单基金持仓诊断（FIFO 成本 + 持仓市值曲线 + 入场高点回撤）。
 
     lots: [(date, side, amount), ...]  side ∈ {'buy','sell'}，amount 为金额（元）。
@@ -492,6 +517,7 @@ def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15, co
         over_sell=False, total_bought=0.0, total_sold=0.0, lots_n=0,
         flat=False, curve=None, stop=float(stop),
         nav_asof=None, buy_fee=None, confirm_delay=0, pending_buy=0.0, pending_n=0,
+        holding_amount=None, holding_basis=None,
     )
     if len(navs) < 30:
         out["reason"] = "净值历史不足，无法计算入场高点回撤"
@@ -499,29 +525,53 @@ def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15, co
     lots = sorted([(pd.Timestamp(d), str(side).lower(), float(a))
                    for d, side, a in lots if a is not None and a > 0])
     lots = [(d, s, a) for d, s, a in lots if s in ("buy", "sell")]
-    # 当天及以后的单 = 待确认（支付宝「持有金额」不含在途），不计入当前市值
-    today0 = pd.Timestamp(pd.Timestamp.today().date())
-    pending = [(d, s, a) for d, s, a in lots if d.normalize() >= today0]
-    lots = [(d, s, a) for d, s, a in lots if d.normalize() < today0]
+    n = len(navs)
+    idx = navs.index
+    delay = 0   # 份额确认用下单日（或下一有净值日）单位净值；QDII 未公布日另作在途
+    overseas = bool(nav_confirm_delay(code)) if code else False
+    try:
+        asof0 = pd.Timestamp(pd.Timestamp(asof).date() if asof is not None
+                             else pd.Timestamp.today().date())
+    except Exception:
+        asof0 = pd.Timestamp(pd.Timestamp.today().date())
+
+    def _is_pending(d):
+        # 当天及以后的单 = 待确认。
+        # QDII/海外：确认净值尚未写入序列（净值披露 T+1/T+2）也视为在途，
+        # 绝不能用最新已公布净值折成已确认份额——那会把「8-19 未确认的 10 元」
+        # 错记进市值，而 A 股基金不受影响（T 日净值当日即有）。
+        if d.normalize() >= asof0:
+            return True
+        if overseas and confirm_nav_pos(idx, d, delay, fallback=False) is None:
+            return True
+        return False
+
+    pending = [(d, s, a) for d, s, a in lots if _is_pending(d)]
+    lots = [(d, s, a) for d, s, a in lots if not _is_pending(d)]
+    pending_buy = round(sum(a for d, s, a in pending if s == "buy"), 2)
     out["pending_n"] = len(pending)
-    out["pending_buy"] = round(sum(a for d, s, a in pending if s == "buy"), 2)
+    out["pending_buy"] = pending_buy
+    out["holding_amount"] = pending_buy
+    out["holding_basis"] = pending_buy
     if not lots:
         out["status"] = "need_entry"
         out["reason"] = "缺少买入记录，无法定位入场高点（在操作台账中添加买入，或输入 代码 市值 买入日期）"
         if pending:
-            out["reason"] = "仅有待确认交易（下单日≥今天），支付宝持有金额尚未计入"
+            out["reason"] = "仅有待确认交易（确认净值未公布或下单日≥今天），支付宝持有金额按在途金额计"
+            out["computable"] = True
+            out["mv_now"] = 0.0
+            out["basis"] = 0.0
+            out["shares_now"] = 0.0
+            out["ret_held"] = None
         return out
     out["lots_n"] = len(lots)
-    n = len(navs)
-    idx = navs.index
-    delay = 0
 
     def _pos(d):
         return confirm_nav_pos(idx, d, delay)
 
     fee = buy_fee_rate(code) if buy_fee is None else float(buy_fee)
     out["buy_fee"] = round(float(fee), 6)
-    out["confirm_delay"] = 0
+    out["confirm_delay"] = 1 if overseas else 0
     out["nav_asof"] = str(idx[-1].date())
     deltas = np.zeros(n)
     run = 0.0
@@ -565,7 +615,8 @@ def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15, co
     basis = float(sum(x[1] for x in q))
     if shares_now <= 1e-9:
         out.update(status="flat", computable=True, flat=True, shares_now=0.0,
-                   basis=0.0, total_bought=total_bought, total_sold=total_sold,
+                   basis=0.0, mv_now=0.0, total_bought=total_bought, total_sold=total_sold,
+                   holding_amount=pending_buy, holding_basis=pending_buy,
                    reason="台账中该基金已全部卖出，不计入组合")
         return out
     mv = shares_now * float(navs.iloc[-1])
@@ -598,6 +649,8 @@ def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15, co
         ret_held=ret_held,
         mv_now=round(mv, 2),
         basis=round(basis, 2),
+        holding_amount=round(mv + pending_buy, 2),
+        holding_basis=round(basis + pending_buy, 2),
         shares_now=round(shares_now, 4),
         total_bought=round(total_bought, 2),
         total_sold=round(total_sold, 2),
