@@ -305,12 +305,33 @@ def test_fund_lots_diag():
     assert abs(d["basis"] - 24000.0) < 1e-6           # 9000 + 15000（FIFO扣1000股成本）
     assert abs(d["shares_now"] - 19000.0) < 1e-6
     assert abs(d["ret_held"] - (22800 / 24000 - 1)) < 1e-9
-    assert abs(d["dd"] - (22800 / 30000 - 1)) < 1e-9  # 持仓曲线高点=20000股×1.5 @d10
+    # 回撤按现金流中性口径：只反映 NAV 从 1.5 跌至 1.2 的 -20%，部分卖出不能
+    # 机械放大成旧实现的 -24%。当前剩余 19000 股反算历史高点价值=28500。
+    assert abs(d["dd"] - (1.2 / 1.5 - 1)) < 1e-9
     assert abs(d["trigger_nav"] - 1.5 * 0.8) < 1e-9   # 净值口径触发价
     assert d["peak_date"] == str(idx[10].date()) and d["peak"] == 1.5
     assert d["lots_n"] == 3 and not d["over_sell"] and not d["flat"]
     assert d["curve"] is not None and abs(d["curve"].iloc[-1] - 22800.0) < 1e-6
-    assert d["curve"].max() == 30000.0
+    assert abs(d["curve"].max() - 28500.0) < 1e-6
+
+    # 高点后、最新日加仓：绝不能因投入现金把高点回撤错误刷新为 0。
+    added = hd.fund_lots_diag([
+        ("2021-01-01", "buy", 10000.0),
+        (d30, "buy", 12000.0),
+    ], df, buy_fee=0.0)
+    assert abs(added["dd"] - (1.2 / 1.5 - 1)) < 1e-9, added
+    assert abs(added["curve"].iloc[-1] - 24000.0) < 1e-6
+    assert abs(added["curve"].max() - 30000.0) < 1e-6
+
+    # 高点处部分卖出不构成投资亏损，回撤仍为 0。
+    sold_at_peak = hd.fund_lots_diag([
+        ("2021-01-01", "buy", 10000.0),
+        (d10, "sell", 3000.0),
+    ], mk_nav([str(x.date()) for x in idx],
+              [0.0] + [([1.0] * 10 + [1.5] * 30)[i] /
+                       ([1.0] * 10 + [1.5] * 30)[i - 1] - 1 for i in range(1, n)]),
+        buy_fee=0.0)
+    assert abs(sold_at_peak["dd"]) < 1e-12, sold_at_peak
     # 锚定市值：整体缩放，收益率不变
     d2 = hd.fund_lots_diag(lots, df, anchor_amount=18240.0, buy_fee=0.0)
     assert abs(d2["mv_now"] - 18240.0) < 1e-6
@@ -615,6 +636,8 @@ def test_fund_buy_fee_lookup():
                          "天天基金优惠费率": ["0.12%"]})
     orig = provider._retry
     provider._memo.pop("fee_999999", None)
+    if os.path.exists("cache/fee_999999.json"):
+        os.remove("cache/fee_999999.json")
     try:
         provider._retry = lambda fn, *a, **k: fake
         info = provider.get_fund_buy_fee("999999")
@@ -634,6 +657,8 @@ def test_fund_buy_fee_lookup():
     finally:
         provider._retry = orig
         provider._memo.pop("fee_999999", None)
+        if os.path.exists("cache/fee_999999.json"):
+            os.remove("cache/fee_999999.json")
     assert abs(info2["rate"] - 0.015) < 1e-9 and info2["source"] == "nominal"
     print("test_fund_buy_fee_lookup OK")
 

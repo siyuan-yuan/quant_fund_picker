@@ -1,19 +1,22 @@
-# Python cache
+# Python / test / editor caches
 __pycache__/
 *.py[cod]
 .venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.pyright/
+*.log
 
-# Local/generated strategy experiment artifacts (large, reproducible)
-output/strategy_experiment_*.csv
-output/strategy_experiment_*.md
-output/strategy_experiment_*.png
+# 数据源缓存均可按需重新抓取。仓库仍保留少量历史基线文件，但不再提交新增缓存。
+cache/
 
-# 用户操作台账（本地用户数据，不提交）
+# 运行、扫描、回测和研究产物默认不入库；仅保留一份可启动快照与模型裁决报告。
+output/*
+!output/scan_20260810.csv
+!output/model_zoo_report.md
+
+# 本地私人数据明确列出，提醒维护者绝不能强制提交。
 output/ledger.json
-# 定投终止/忽略标记、用户费率设置（本地用户数据，不提交）
 output/dca_state.json
 output/fee_settings.json
-
-# 模型动物园实验中间产物（大, 可由 _build_ml_panel.py + _model_zoo.py 复现）
-output/ml_work/
-output/ml_panel.csv
