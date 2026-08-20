@@ -2,7 +2,7 @@
 """
 量化选基系统 V3.1 — Web 控制台
 手动触发爬取→计算→出榜, 本地运行
-启动: python webapp.py  (默认运行于 0.0.0.0:8000，生产级 WSGI 服务)
+启动: python webapp.py  (默认仅监听 127.0.0.1:8000；QFP_HOST 可覆盖)
 """
 import v8_guard
 v8_guard.install()
@@ -10,13 +10,14 @@ v8_guard.install()
 import os, glob, json, time, re, random, threading, datetime as dt
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from math import sqrt
+from urllib.parse import urlsplit
 
 import numpy as np
 import pandas as pd
 from flask import Flask, jsonify, request, render_template
 
-import provider, rbsa, factors, risk
-from engine import score_fund, finalize, market_water, resolve_weights
+import provider, rbsa
+from engine import score_fund, finalize, market_water
 from scan_market import build_universe
 import holding_diag
 from config import (
@@ -34,19 +35,44 @@ from config import (
 )
 
 app = Flask(__name__)
-app.config["TEMPLATES_AUTO_RELOAD"] = True
+app.config.update(
+    TEMPLATES_AUTO_RELOAD=True,
+    # 台账/调仓接口只接收小型 JSON；限制请求体可避免误传大文件耗尽内存。
+    MAX_CONTENT_LENGTH=2 * 1024 * 1024,
+)
 app.jinja_env.auto_reload = True
 
 
+@app.before_request
+def _reject_cross_origin_write():
+    """阻止其它网站借浏览器修改本地台账或触发高成本扫描。
+
+    curl/脚本通常不带 Origin，继续允许；浏览器的写请求必须与当前 Host 同源。
+    Arena 预览虽嵌在外层页面中，但 fetch 仍从预览站点自身发起，因此不受影响。
+    """
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return None
+    origin = request.headers.get("Origin")
+    if not origin:
+        return None
+    origin_host = (urlsplit(origin).netloc or "").lower()
+    forwarded_host = request.headers.get("X-Forwarded-Host", "").split(",", 1)[0].strip().lower()
+    allowed_hosts = {request.host.lower()}
+    if forwarded_host:
+        allowed_hosts.add(forwarded_host)
+    if origin_host not in allowed_hosts:
+        return jsonify({"ok": False, "message": "拒绝跨站写入请求"}), 403
+    return None
+
+
 @app.after_request
-def _preview_headers(resp):
-    """Arena / iframe 预览：不要用 CSP 卡死内联脚本，允许跨源预览域名。"""
-    resp.headers.pop("X-Frame-Options", None)
-    resp.headers.pop("Content-Security-Policy", None)
-    resp.headers["Access-Control-Allow-Origin"] = "*"
-    resp.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    resp.headers["Access-Control-Allow-Methods"] = "GET,POST,DELETE,OPTIONS"
+def _security_headers(resp):
+    """兼容 iframe 预览，同时为本地金融台账补齐基础浏览器安全头。"""
+    # 不设置 X-Frame-Options/CSP frame-ancestors，保留 Arena iframe 预览能力。
     resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Referrer-Policy"] = "same-origin"
+    resp.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
     return resp
 
 
@@ -264,7 +290,8 @@ def _load_ledger() -> list:
             data = data.get("txns", [])
         if not isinstance(data, list):
             return []
-        return [t for t in data if isinstance(t, dict)]
+        # 旧版文件或手工导入内容也必须走同一规范化路径，避免脏 id/note 直达前端。
+        return [norm for norm in (_norm_txn(t) for t in data) if norm]
     except Exception:
         return []
 
@@ -306,7 +333,9 @@ def _norm_txn(t) -> dict:
     amt = _parse_yuan(t.get("amount"))
     if not amt or amt <= 0:
         return None
-    tid = str(t.get("id") or f"l{int(time.time()*1000)}{random.randint(0,9999)}")
+    tid = str(t.get("id") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", tid):
+        tid = f"l{int(time.time()*1000)}{random.randint(0,9999)}"
     return {"id": tid, "code": code, "date": d, "side": side,
             "amount": round(float(amt), 2), "note": str(t.get("note", "") or "")[:120], "isDca": isDca}
 
@@ -1185,6 +1214,8 @@ def _final_single(r: dict) -> dict:
 @app.post("/api/fund/<code>")
 def fund(code):
     code = str(code).zfill(6)
+    if not re.fullmatch(r"\d{6}", code):
+        return jsonify({"ok": False, "message": "基金代码无效"}), 400
     try:
         r = score_fund(code)
         if "error" in r and r.get("error"):
@@ -1198,7 +1229,15 @@ def fund(code):
 @app.post("/api/watchlist")
 def watchlist():
     body = request.get_json(silent=True) or {}
-    codes = [str(c).zfill(6) for c in body.get("codes", [])][:50]
+    raw_codes = body.get("codes", [])
+    if not isinstance(raw_codes, list):
+        return jsonify({"ok": False, "message": "codes 需要是数组"}), 400
+    codes = list(dict.fromkeys(
+        code for code in (str(c).zfill(6) for c in raw_codes)
+        if re.fullmatch(r"\d{6}", code)
+    ))[:50]
+    if not codes:
+        return jsonify({"ok": False, "message": "请提供至少一个有效的6位基金代码"}), 400
     rows = []
     # V3.7: 并行打分(4线程), 单只异常不拖垮整批
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1295,8 +1334,9 @@ def _parse_yuan(v):
     # 去掉可能的 '¥' '￥'
     s = s.replace("¥", "").replace("￥", "")
     try:
-        return float(s) * mult
-    except:
+        amount = float(s) * mult
+        return amount if np.isfinite(amount) else None
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
@@ -1660,7 +1700,7 @@ def rebalance():
     fund_series = []
     for h in holdings_detail:
         st = h.get("stop") or {}
-        # 优先用台账/单笔引擎算出的持仓市值曲线（已锚定当前市值，含多笔买卖）
+        # 优先用台账/单笔引擎算出的现金流中性曲线（已锚定当前市值；申赎不制造回撤）
         if st.get("computable") and h.get("stop_curve") is not None and len(h["stop_curve"]) >= 5:
             fund_series.append((h["stop_curve"],))
             continue
@@ -2023,7 +2063,6 @@ def rebalance():
         n_buy = len(candidates)
         if share > 0:
             n_buy = min(n_buy, int(cash_after_sells // share))
-        per_buy = share
         for c in candidates:
             if len(buys) >= n_buy:
                 break
@@ -2200,7 +2239,11 @@ if __name__ == "__main__":
     print("============================================================", flush=True)
     print(" 量化选基系统 V3.8 — 生产级 WSGI 引擎启动 (Production WSGI Server)", flush=True)
     print("============================================================", flush=True)
-    print(" * Running on all addresses (0.0.0.0:8000)", flush=True)
+    host = os.environ.get("QFP_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    port = _parse_int(os.environ.get("QFP_PORT", 8000), 8000, low=1, high=65535)
+    print(f" * Listening on {host}:{port}", flush=True)
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        print(" * Warning: network access enabled; APIs contain private local portfolio data", flush=True)
     vst = v8_guard.prewarm()
     print(f" * V8/MiniRacer guard: singleton={vst.get('singleton')} "
           f"available={vst.get('available')}"
@@ -2208,7 +2251,7 @@ if __name__ == "__main__":
     print("============================================================", flush=True)
     try:
         from waitress import serve
-        serve(app, host="0.0.0.0", port=8000, threads=8, ident="quant-fund-picker")
+        serve(app, host=host, port=port, threads=8, ident="quant-fund-picker")
     except ImportError:
         # 禁止回退到单线程 wsgiref：任一慢接口都会让整页一直转圈
-        app.run(host="0.0.0.0", port=8000, threaded=True, use_reloader=False)
+        app.run(host=host, port=port, threaded=True, use_reloader=False)

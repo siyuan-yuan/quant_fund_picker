@@ -491,7 +491,7 @@ def find_clone_exposure(cand_expo, ref_list, max_l1=0.02):
 
 def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15, code=None,
                    buy_fee=None, asof=None):
-    """多笔买入/卖出 → 单基金持仓诊断（FIFO 成本 + 持仓市值曲线 + 入场高点回撤）。
+    """多笔买入/卖出 → 单基金持仓诊断（FIFO 成本 + 现金流中性曲线 + 入场高点回撤）。
 
     lots: [(date, side, amount), ...]  side ∈ {'buy','sell'}，amount 为金额（元）。
       买入金额 = 用户填写的**扣款总金额（含申购费）**，系统自动扣费后折份额：
@@ -573,23 +573,28 @@ def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15, co
     out["buy_fee"] = round(float(fee), 6)
     out["confirm_delay"] = 1 if overseas else 0
     out["nav_asof"] = str(idx[-1].date())
+    # 逐笔重建已确认份额。卖出只能扣减实际持有份额；不能先记负份额再对累计值
+    # 做 maximum(0)，否则一次超额卖出会“吞掉”之后重新买入的份额。
     deltas = np.zeros(n)
     run = 0.0
     for d, side, amt in lots:
-        pxv = float(navs.iloc[_pos(d)])
+        pos = _pos(d)
+        pxv = float(navs.iloc[pos])
         if pxv <= 0:
             continue
         if side == "buy":
             sh = amt / (1.0 + fee) / pxv
-            deltas[_pos(d)] += sh
+            deltas[pos] += sh
             run += sh
         else:
-            sh = amt / pxv
-            if sh > run + 1e-6:
+            requested = amt / pxv
+            if requested > run + 1e-6:
                 out["over_sell"] = True
-            deltas[_pos(d)] -= sh
-            run = max(0.0, run - sh)
-    shares_t = np.maximum(np.cumsum(deltas), 0.0)
+            sh = min(requested, run)
+            deltas[pos] -= sh
+            run -= sh
+    shares_t = np.cumsum(deltas)
+    shares_t[np.abs(shares_t) <= 1e-9] = 0.0
 
     q = []
     total_bought = total_sold = 0.0
@@ -623,11 +628,23 @@ def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15, co
     k = 1.0
     if anchor_amount and anchor_amount > 0 and mv > 0:
         k = anchor_amount / mv
-    curve = pd.Series(shares_t * navs.values * k, index=idx, name="value")
-    curve[shares_t <= 1e-9] = np.nan
     basis *= k
-    mv = float(curve.iloc[-1])
-    first_pos = int(np.argmax(shares_t > 1e-9))
+    mv *= k
+
+    # 高点回撤必须剔除申赎现金流。
+    #
+    # 旧实现直接用“当日实际份额 × NAV”的绝对市值曲线：加仓会把市值机械抬高并
+    # 刷新高点（尤其最后一日加仓时回撤被错误显示为 0）；减仓则会被误认为亏损。
+    # 移动止损衡量的是基金价格自本轮持仓高点的跌幅，而不是账户投入金额变化，故用
+    # 当前剩余份额反算整个本轮持仓期的现金流中性曲线。它与
+    # NAV_now / max(NAV_since_entry) - 1 严格等价，买卖本身不会改变回撤。
+    # 若期间曾完全清仓后再买入，则只从最后一次重新开仓日起计算，避免沿用旧仓高点。
+    active = shares_t > 1e-9
+    zero_before_now = np.flatnonzero(~active)
+    first_pos = int(zero_before_now[-1] + 1) if len(zero_before_now) else 0
+    first_pos = min(first_pos, n - 1)
+    curve = pd.Series(np.nan, index=idx, name="value", dtype=float)
+    curve.iloc[first_pos:] = shares_now * k * navs.iloc[first_pos:].values
     peak_adj = float(navs.iloc[first_pos:].max())
     peak_adj_date = navs.iloc[first_pos:].idxmax()
     peak_val = float(curve.iloc[first_pos:].max())
@@ -656,9 +673,10 @@ def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15, co
         total_sold=round(total_sold, 2),
         curve=curve,
     )
-    if dd <= -stop:
+    # 浮点边界容差：数学上恰好 -20% 不应因 1e-16 舍入误差漏掉触发。
+    if dd <= -stop + 1e-12:
         out["status"] = "triggered"      # 清仓
-    elif dd <= -warn_dd:
+    elif dd <= -warn_dd + 1e-12:
         out["status"] = "near"           # 接近止损
     else:
         out["status"] = "ok"
@@ -786,8 +804,8 @@ def portfolio_cppi(fund_series, cash=0.0, rules=None, full_slots=10,
     """组合级 CPPI：重建组合净值曲线 → HWM → 当前回撤 → 档位/槽位/回补提示。
 
     fund_series: 每个元素为一条持仓曲线，两种形式：
-      - (curve,)：pd.Series 直接给出持仓市值曲线（多笔买卖台账用，index=日期，
-        入场前为 NaN）；已锚定市值，不再缩放。
+      - (curve,)：pd.Series 直接给出现金流中性的持仓价值曲线（多笔买卖台账用，
+        index=日期，入场前为 NaN）；已锚定当前市值，不再缩放。
       - (entry_date, scale_value, adj_series)：单笔买入用，曲线按
         市值×adj(t)/adj(now) 重建（与 成本×adj(t)/adj(entry) 完全等价）。
     cash: 可用现金（按常数并入组合净值，近似处理）
@@ -871,7 +889,6 @@ def portfolio_cppi(fund_series, cash=0.0, rules=None, full_slots=10,
     tier_names = {full_slots: "正常·满仓", 6: "风控档·减槽", 3: "防御档·深度减槽", 0: "清仓档·禁权益"}
     tier_name = tier_names.get(slots, f"{slots} 槽")
     # 当前档位的下一触发线 & 回补线
-    rules_by_slots = {s: line for line, s in rules}
     next_trigger = None
     if slots > 0:
         for line, s in sorted(rules, key=lambda r: -r[1]):   # 6,3,0

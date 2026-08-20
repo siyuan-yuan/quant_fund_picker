@@ -6,10 +6,10 @@ import numpy as np
 import pandas as pd
 
 from config import (W_VALUE, W_ALPHA, W_MOMENTUM, RATING_BANDS,
-                    REGIME_LOW_WATER, REGIME_HIGH_WATER,
+                    REGIME_LOW_WATER,
                     W_VALUE_LOW, W_ALPHA_LOW, W_MOM_LOW,
-                    RBSA_INDICES, OVERSEAS_NAMES, OVERSEAS_SRCS,
-                    OVERSEAS_SWITCH_THRESHOLD, TENURE_CAP_DAYS, YOUNG_MAX_DAYS)
+                    RBSA_INDICES, OVERSEAS_SRCS,
+                    TENURE_CAP_DAYS, YOUNG_MAX_DAYS)
 import provider, rbsa, factors, risk
 
 
