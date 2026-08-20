@@ -507,6 +507,7 @@ const G={
 function setStatus(a,b,k,t){const d=document.getElementById(a);if(d)d.className='dot '+(k||'');const e=document.getElementById(b);if(e)e.textContent=t}
 function fmtYuan(n){if(n==null||isNaN(n))return '—';n=Number(n);if(Math.abs(n)>=10000)return (n/10000).toFixed(n%10000===0?0:2)+'万';return n.toLocaleString('zh-CN')}
 function fmtYuanFull(n){if(n==null||isNaN(n))return '—';return Number(n).toLocaleString('zh-CN',{minimumFractionDigits:0,maximumFractionDigits:0})+' 元'}
+function fmtYuan2(n){if(n==null||isNaN(n))return '—';return Number(n).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2})+' 元'}
 function parseYuan(s){if(s==null||s==='')return 0;if(typeof s==='number')return s;let t=String(s).trim().replace(/,/g,'').replace(/，/g,'').replace(/\s+/g,'');if(!t)return 0;let m=1;const low=t.toLowerCase();if(low.endsWith('万元')||low.endsWith('万')){t=t.replace(/万元?$/,'').replace(/万$/,'');m=10000}else if(low.endsWith('w')){t=t.slice(0,-1);m=10000}else if(low.endsWith('k')){t=t.slice(0,-1);m=1000}t=t.replace(/[¥￥元]/g,'');const v=parseFloat(t);return isNaN(v)?0:v*m}
 function updateScanModeUI(){const mode=document.getElementById('scan-mode')?.value||'default'; const r=document.getElementById('in-right'), l=document.getElementById('in-left'), h=document.getElementById('scan-mode-hint'); const useFunnel=(mode==='default'); if(r) r.disabled=!useFunnel; if(l) l.disabled=!useFunnel; if(r) r.title=useFunnel?'':'全量模式下忽略右侧池'; if(l) l.title=useFunnel?'':'全量模式下忽略左侧池'; if(h){h.textContent=mode==='all_main'?'扫描全部主池：近3年完整的目标基金（A股四类 + 海外指数QDII），约 4580 只。' : (mode==='all_target'?'扫描全部目标类型：混合型-偏股 / 股票型 / 指数型-股票 / 混合型-灵活 / 指数型-海外股票，含次新基金，约 6630 只。':'默认模式会按右侧池 / 左侧池 / 新星池做漏斗深算。')}}
 
@@ -1486,11 +1487,11 @@ function renderLedger(j){
       <table><thead><tr><th>日期</th><th>方向</th><th>代码</th><th>金额</th><th></th></tr></thead><tbody>${tRows||emptyTx}</tbody></table>
     </div></div>
     <div style="flex:1.4 1 480px;min-width:320px"><div class="table-wrap" style="border:none;border-radius:0;padding:0">
-      <table><thead><tr><th>代码</th><th>名称</th><th>笔数</th><th>当前市值</th><th>剩余成本</th><th>持有收益</th><th>高点回撤</th><th>状态</th></tr></thead>
-      <tbody>${fRows}<tr style="border-top:2px solid var(--line);font-weight:600"><td colspan="3">合计</td><td class="mono" style="text-align:right">${fmtYuanFull(mv)}</td><td class="mono" style="text-align:right">${fmtYuanFull(basis)}</td><td class="mono" style="text-align:right">${ret}</td><td colspan="2"></td></tr></tbody></table>
+      <table><thead><tr><th>代码</th><th>名称</th><th>笔数</th><th>持有金额</th><th>剩余成本</th><th>持有收益</th><th>高点回撤</th><th>状态</th></tr></thead>
+      <tbody>${fRows}<tr style="border-top:2px solid var(--line);font-weight:600"><td colspan="3">合计</td><td class="mono" style="text-align:right">${fmtYuan2(mv)}</td><td class="mono" style="text-align:right">${fmtYuan2(basis)}</td><td class="mono" style="text-align:right">${ret}</td><td colspan="2"></td></tr></tbody></table>
     </div></div>
   </div>
-  <div class="hint" style="margin-top:8px">市值=已确认份额×最新单位净值（当天及以后的单算在途，对齐全额宝「持有金额」）。净值落后时点「刷新净值」。止盈确认卖出后再删流水会把仓位加回。</div>`;
+  <div class="hint" style="margin-top:8px">持有金额=已确认份额×最新单位净值 + 在途申购（对齐支付宝「持有金额」）。QDII 在确认净值尚未公布前不会按最新净值折份额。净值落后时点「刷新净值」。止盈确认卖出后再删流水会把仓位加回。</div>`;
 }
 
 function rbSave(){localStorage.setItem('rb_data',JSON.stringify({total:document.getElementById('rb-total').value,cash:document.getElementById('rb-cash').value})); setStatus('rb-dot','rb-st','ok','已记忆')}
@@ -1639,6 +1640,15 @@ refreshScanStatus().then(s=>{ if(s && (s.phase==='universe' || s.phase==='scorin
 setTimeout(()=>{
   const d=document.getElementById('hd-date');
   if(d && d.textContent==='加载中…'){
+    d.textContent='本地缓存';
+    const dot=document.getElementById('hd-dot');
+    if(dot) dot.className='dot';
+  }
+}, 4000);
+</script>
+</body>
+</html>
+f(d && d.textContent==='加载中…'){
     d.textContent='本地缓存';
     const dot=document.getElementById('hd-dot');
     if(dot) dot.className='dot';
