@@ -665,6 +665,73 @@ def test_dca_preview_keeps_today_with_lagging_nav():
     print("test_dca_preview_keeps_today_with_lagging_nav OK")
 
 
+def test_exported_fee_settings_roundtrip():
+    """导出台账 #买入费率 块：百分数列 ↔ 小数费率，导入合并不丢已有覆盖。"""
+    import webapp
+    csv = (
+        "日期,方向,代码,金额,备注\n"
+        "2026-08-10,买入,016452,100,\n"
+        "\n"
+        "#买入费率（导入时自动恢复，不必重新填写）\n"
+        "类型,代码,费率%\n"
+        "默认,,0.15\n"
+        "覆盖,016452,0.12\n"
+        "覆盖,001092,0\n"
+    )
+    parsed = webapp.parse_exported_fee_settings(csv)
+    assert abs(parsed["default_rate"] - 0.0015) < 1e-12
+    assert abs(parsed["overrides"]["016452"] - 0.0012) < 1e-12
+    assert parsed["overrides"]["001092"] == 0.0
+
+    block = webapp.format_exported_fee_settings({
+        "default_rate": 0.0015,
+        "overrides": {"016452": 0.0012, "001092": 0.0},
+    })
+    assert block.startswith("#买入费率")
+    again = webapp.parse_exported_fee_settings(block)
+    assert again["default_rate"] == parsed["default_rate"]
+    assert again["overrides"] == parsed["overrides"]
+
+    merged = webapp.merge_fee_settings(
+        {"default_rate": 0.002, "overrides": {"123456": 0.003, "016452": 0.005}},
+        parsed,
+    )
+    assert abs(merged["default_rate"] - 0.0015) < 1e-12
+    assert abs(merged["overrides"]["016452"] - 0.0012) < 1e-12
+    assert merged["overrides"]["001092"] == 0.0
+    assert abs(merged["overrides"]["123456"] - 0.003) < 1e-12
+
+    old = webapp.parse_exported_fee_settings("日期,方向,代码,金额\n2026-08-10,买入,016452,100")
+    assert old["default_rate"] is None and old["overrides"] == {}
+    print("test_exported_fee_settings_roundtrip OK")
+
+
+def test_import_fee_settings_persists():
+    """导入合并后的费率会写进 /api/fee_settings，刷新后仍在。"""
+    import tempfile
+    import webapp
+    orig_file = webapp.FEE_SETTINGS_FILE
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            webapp.FEE_SETTINGS_FILE = os.path.join(td, "fee_settings.json")
+            c = webapp.app.test_client()
+            seed = c.post("/api/fee_settings", json={
+                "default_rate": 0.002, "overrides": {"123456": 0.003}})
+            assert seed.status_code == 200, seed.get_json()
+            imported = webapp.parse_exported_fee_settings(
+                "#买入费率\n类型,代码,费率%\n默认,,0.15\n覆盖,016452,0.12\n")
+            merged = webapp.merge_fee_settings(c.get("/api/fee_settings").get_json(), imported)
+            saved = c.post("/api/fee_settings", json=merged)
+            assert saved.status_code == 200, saved.get_json()
+            got = c.get("/api/fee_settings").get_json()
+            assert abs(got["default_rate"] - 0.0015) < 1e-12
+            assert abs(got["overrides"]["016452"] - 0.0012) < 1e-12
+            assert abs(got["overrides"]["123456"] - 0.003) < 1e-12
+        finally:
+            webapp.FEE_SETTINGS_FILE = orig_file
+    print("test_import_fee_settings_persists OK")
+
+
 def test_user_fee_settings():
     """页面费率设置：默认值持久化、单基金覆盖优先、自动查费优先于默认值。"""
     import tempfile
@@ -764,6 +831,7 @@ if __name__ == "__main__":
                test_dca_keeps_pending_business_days, test_overdue_dca_friday_to_monday,
                test_ledger_dca_due_uses_client_today, test_fund_vs_holding_drawdown,
                test_dca_preview_keeps_today_with_lagging_nav,
+               test_exported_fee_settings_roundtrip, test_import_fee_settings_persists,
                test_user_fee_settings, test_buy_fee_deduction,
                test_fund_buy_fee_lookup,
                test_exposure_overlap, test_clone_detection, test_cppi_tier_sim, test_portfolio_cppi, test_webapp_endpoint]:

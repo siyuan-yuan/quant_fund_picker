@@ -374,7 +374,7 @@
         <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line)">
           <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
             <b style="font-size:13px">买入费率设置</b>
-            <span class="hint">优先级：单基金覆盖 ＞ 自动查询折后费率 ＞ 默认费率；填写 0 表示免申购费</span>
+            <span class="hint">优先级：单基金覆盖 ＞ 自动查询折后费率 ＞ 默认费率；填写 0 表示免申购费。导出台账会带上费率，导入时自动恢复</span>
           </div>
           <div class="form-row" style="margin-top:8px;align-items:end">
             <div class="field" style="max-width:130px"><label>默认费率 %</label><input id="fee-default" class="mono" value="0.15" inputmode="decimal"></div>
@@ -746,7 +746,8 @@ let DCA_STATE = {terminated:{}, ignored:{}, take_profit:{}};
 let LEDGER_NAV_TRIED=false;
 async function updateLedger(){
   try{
-    const j=takeBoot('ledger')||await (await jfetch('/api/ledger',{timeout:15000})).json();
+    const today=localDateStr();
+    const j=takeBoot('ledger')||await (await jfetch('/api/ledger?today='+encodeURIComponent(today),{timeout:15000})).json();
     LEDGER_TXNS=j.txns||[];
     if(j.fee_settings) renderFeeSettings(j.fee_settings);
     if(j.dca_state){
@@ -755,7 +756,7 @@ async function updateLedger(){
       DCA_STATE.take_profit = Object.assign({}, j.dca_state.take_profit||{}, DCA_STATE.take_profit);
     }
     renderLedger(j);
-    if(typeof checkMissingDCA === 'function') checkMissingDCA();
+    if(typeof checkMissingDCA === 'function') checkMissingDCA(j.dca_due);
     if(typeof tpMaybeAutoDetect === 'function') tpMaybeAutoDetect();
     const exp=j.nav_expected;
     const stale=(j.funds||[]).some(f=>f.state&&f.state.nav_asof&&exp&&f.state.nav_asof<exp);
@@ -1293,8 +1294,48 @@ async function tpSkip(){
   }catch(e){ setStatus('tp-dot','tp-st','err','标记失败'); }
 }
 
+function fmtFeePct(rate){
+  const n=Number(rate);
+  if(!Number.isFinite(n)) return '';
+  return (n*100).toFixed(4).replace(/0+$/,'').replace(/\.$/,'');
+}
+function parseFeePctText(s){
+  const t=String(s==null?'':s).trim().replace(/%/g,'').replace(/％/g,'');
+  if(t==='') return null;
+  const v=Number(t);
+  if(!Number.isFinite(v)||v<0||v>10) return null;
+  return v/100;
+}
+function parseFeeSettingsBlock(text){
+  const out={default_rate:null, overrides:{}};
+  const lines=String(text).split(/[\r\n]+/).map(l=>l.trim());
+  let mode=false;
+  for(const line of lines){
+    if(/^#\s*买入费率/.test(line) || /^(类型)[,，\s]+代码/.test(line)){
+      mode=true;
+      if(/^(类型)/.test(line)) continue;
+      continue;
+    }
+    if(/^#/.test(line)){ mode=false; continue; }
+    if(!mode || !line) continue;
+    const parts=line.split(/[,，]/).map(x=>x.trim());
+    const kind=parts[0]||'', rawCode=parts[1]||'', rate=parseFeePctText(parts[2]);
+    if(rate==null) continue;
+    if(/默认|default/i.test(kind)) out.default_rate=rate;
+    else {
+      const code=String(rawCode).replace(/\D/g,'').padStart(6,'0');
+      if(/^\d{6}$/.test(code) && code!=='000000') out.overrides[code]=rate;
+    }
+  }
+  return out;
+}
+function countImportedFees(fees){
+  if(!fees) return 0;
+  return (fees.default_rate!=null?1:0)+Object.keys(fees.overrides||{}).length;
+}
 function ledExport(){
-  if(!LEDGER_TXNS.length){ setStatus('led-dot','led-st','err','台账为空，无可导出'); return; }
+  const hasFees=!!(FEE_SETTINGS && (FEE_SETTINGS.default_rate!=null || Object.keys(FEE_SETTINGS.overrides||{}).length));
+  if(!LEDGER_TXNS.length && !hasFees){ setStatus('led-dot','led-st','err','台账为空，无可导出'); return; }
   const esc=v=>{const s=String(v==null?'':v); return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s};
   const rows=[['日期','方向','代码','金额','备注']];
   for(const t of LEDGER_TXNS) rows.push([t.date, t.side==='buy'?(t.isDca?'定投买入':'买入'):'卖出', t.code, t.amount, esc(t.note||'')]);
@@ -1325,11 +1366,19 @@ function ledExport(){
   if(tpRows.length>1){
     csv += '\n\n#定投止盈（导入时恢复：已卖出 / 不卖出，不再重复提示）\n'+tpRows.map(r=>r.join(',')).join('\n');
   }
+  const feeRows=[['类型','代码','费率%']];
+  if(FEE_SETTINGS && FEE_SETTINGS.default_rate!=null) feeRows.push(['默认','',fmtFeePct(FEE_SETTINGS.default_rate)]);
+  for(const [code,rate] of Object.entries((FEE_SETTINGS&&FEE_SETTINGS.overrides)||{}).sort(([a],[b])=>a.localeCompare(b))){
+    feeRows.push(['覆盖', code, fmtFeePct(rate)]);
+  }
+  if(feeRows.length>1){
+    csv += '\n\n#买入费率（导入时自动恢复，不必重新填写）\n'+feeRows.map(r=>r.join(',')).join('\n');
+  }
   const b=new Blob(["\uFEFF"+csv],{type:'text/csv'});
   const a=document.createElement('a'); a.href=URL.createObjectURL(b);
   a.download='ledger_'+new Date().toISOString().slice(0,10)+'.csv'; a.click();
-  const nMark=stRows.length-1, nTp=tpRows.length-1;
-  setStatus('led-dot','led-st','ok',`已导出 ${LEDGER_TXNS.length} 条流水`+(nMark?` + ${nMark} 条定投终止/忽略`:'')+(nTp?` + ${nTp} 条止盈决定`:'')+'（CSV，可用 Excel 打开）');
+  const nMark=stRows.length-1, nTp=tpRows.length-1, nFee=feeRows.length-1;
+  setStatus('led-dot','led-st','ok',`已导出 ${LEDGER_TXNS.length} 条流水`+(nMark?` + ${nMark} 条定投终止/忽略`:'')+(nTp?` + ${nTp} 条止盈决定`:'')+(nFee?` + ${nFee} 条费率设置`:'')+'（CSV，可用 Excel 打开）');
 }
 function parseDcaStateBlock(text){
   const out={terminated:{}, ignored:{}, take_profit:{}};
@@ -1375,6 +1424,7 @@ function parseLedgerFile(text){
     if(/^(日期|date)[,\s]/.test(line.toLowerCase())) continue;
     if(/^(代码)[,，\s]+定投状态/.test(line)) continue;
     if(/^(代码)[,，\s]+批次/.test(line)) continue;
+    if(/^(类型)[,，\s]+代码/.test(line)) continue;
     let parts=line.split(',').map(x=>x.trim()).filter(Boolean);
     if(parts.length<4) parts=line.split(/[\s，;；]+/).filter(Boolean);
     if(parts.length<4) continue;
@@ -1392,7 +1442,7 @@ function parseLedgerFile(text){
     if (isDca) txn.isDca = true;
     out.push(txn);
   }
-  return {txns:out, dcaState:parseDcaStateBlock(text)};
+  return {txns:out, dcaState:parseDcaStateBlock(text), feeSettings:parseFeeSettingsBlock(text)};
 }
 async function applyImportedDcaState(st){
   if(!st) return 0;
@@ -1411,11 +1461,35 @@ async function applyImportedDcaState(st){
   await saveDcaState();
   return n;
 }
+async function applyImportedFeeSettings(fees){
+  if(!fees) return 0;
+  let n=0;
+  if(fees.default_rate!=null){
+    const r=Number(fees.default_rate);
+    if(Number.isFinite(r)&&r>=0&&r<=0.1){ FEE_SETTINGS.default_rate=r; n++; }
+  }
+  const ov=fees.overrides||{};
+  for(const [code0, rate0] of Object.entries(ov)){
+    const code=String(code0).replace(/\D/g,'').padStart(6,'0');
+    const rate=Number(rate0);
+    if(!/^\d{6}$/.test(code)||code==='000000') continue;
+    if(!Number.isFinite(rate)||rate<0||rate>0.1) continue;
+    FEE_SETTINGS.overrides[code]=rate;
+    n++;
+  }
+  if(!n) return 0;
+  try{
+    const j=await (await fetch('/api/fee_settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(FEE_SETTINGS)})).json();
+    if(!j.ok) return 0;
+    renderFeeSettings(j);
+    return n;
+  }catch(e){ return 0; }
+}
 async function ledImportFile(){
   const inp=document.getElementById('led-file');
   const f=inp.files&&inp.files[0];
   if(!f) return;
-  let text, parsed=[], importedState=null;
+  let text, parsed=[], importedState=null, importedFees=null;
   try{ text=await f.text(); }catch(e){ setStatus('led-dot','led-st','err','文件读取失败'); inp.value=''; return; }
   if(/\.json$/i.test(f.name)){
     try{
@@ -1429,27 +1503,36 @@ async function ledImportFile(){
         return txn;
       }).filter(x=>/^\d{6}$/.test(x.code)&&x.amount>0);
       importedState = data.dca_state || {terminated:data.terminated||{}, ignored:data.ignored||{}};
+      importedFees = data.fee_settings || data.fees || null;
     }catch(e){ setStatus('led-dot','led-st','err','JSON 解析失败'); inp.value=''; return; }
   } else {
     const pack=parseLedgerFile(text);
-    parsed=pack.txns; importedState=pack.dcaState;
+    parsed=pack.txns; importedState=pack.dcaState; importedFees=pack.feeSettings;
   }
-  if(!parsed.length){ setStatus('led-dot','led-st','err','未解析到有效记录（CSV: 日期,方向,代码,金额）'); inp.value=''; return; }
-  const txns=LEDGER_TXNS.slice();
-  const seen=new Set(txns.map(t=>t.code+'|'+t.date+'|'+t.side+'|'+t.amount));
+  const nFeeIn=countImportedFees(importedFees);
+  const nDcaIn=importedState?Object.keys(importedState.terminated||{}).length+Object.keys(importedState.ignored||{}).length+Object.keys(importedState.take_profit||{}).length:0;
+  if(!parsed.length && !nFeeIn && !nDcaIn){ setStatus('led-dot','led-st','err','未解析到有效记录（CSV: 日期,方向,代码,金额；也可只含买入费率）'); inp.value=''; return; }
   let added=0;
-  for(const r of parsed){
-    const k=r.code+'|'+r.date+'|'+r.side+'|'+r.amount;
-    if(seen.has(k)) continue;
-    seen.add(k); txns.push(r); added++;
+  if(parsed.length){
+    const txns=LEDGER_TXNS.slice();
+    const seen=new Set(txns.map(t=>t.code+'|'+t.date+'|'+t.side+'|'+t.amount));
+    for(const r of parsed){
+      const k=r.code+'|'+r.date+'|'+r.side+'|'+r.amount;
+      if(seen.has(k)) continue;
+      seen.add(k); txns.push(r); added++;
+    }
+    const j=await (await fetch('/api/ledger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({txns})})).json();
+    if(!j.ok){ setStatus('led-dot','led-st','err',j.message||'导入失败'); inp.value=''; return; }
   }
-  const j=await (await fetch('/api/ledger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({txns})})).json();
-  if(j.ok){
-    const nMark=await applyImportedDcaState(importedState);
-    await updateLedger();
-    setStatus('led-dot','led-st','ok',`已导入 ${added} 条（共解析 ${parsed.length} 条，跳过重复 ${parsed.length-added} 条）`+(nMark?`，并恢复 ${nMark} 条定投终止/忽略标记`:'。旧 CSV 不含标记的话请重新点一次「导出台账」'));
-  }
-  else setStatus('led-dot','led-st','err',j.message||'导入失败');
+  const nMark=await applyImportedDcaState(importedState);
+  const nFee=await applyImportedFeeSettings(importedFees);
+  await updateLedger();
+  const bits=[];
+  if(parsed.length) bits.push(`已导入 ${added} 条（共解析 ${parsed.length} 条，跳过重复 ${parsed.length-added} 条）`);
+  if(nMark) bits.push(`恢复 ${nMark} 条定投终止/忽略/止盈`);
+  if(nFee) bits.push(`恢复 ${nFee} 条买入费率`);
+  if(!bits.length) bits.push('文件已读，无新增内容');
+  setStatus('led-dot','led-st','ok',bits.join('，')+(parsed.length&&!nMark&&!nFee?'。旧 CSV 不含标记/费率的话请重新点一次「导出台账」':''));
   inp.value='';
 }
 async function ledRecord(code, side, amount, note){
