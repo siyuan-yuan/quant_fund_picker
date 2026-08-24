@@ -353,6 +353,11 @@ def ledger_get():
     """返回台账全部记录 + 每只基金实时状态（份额/成本/市值/回撤/止损），+组合CPPI(cash可选)"""
     txns = _load_ledger()
     cash = _parse_yuan(request.args.get("cash")) if request.args.get("cash") else None
+    today_s = request.args.get("today")
+    try:
+        today_d = dt.date.fromisoformat(str(today_s)[:10]) if today_s else dt.date.today()
+    except ValueError:
+        today_d = dt.date.today()
     by = _ledger_by_code(txns)
     states = []
     names = {}
@@ -390,6 +395,7 @@ def ledger_get():
                                                   (STRAT_CPPI_DD3, STRAT_CPPI_SLOTS3)],
                                            full_slots=STRAT_SLOTS, hysteresis=STRAT_CPPI_HYSTERESIS)
     return jsonify(clean(dict(ok=True, txns=txns, funds=states, cppi=cppi,
+                              dca_due=holding_diag.overdue_dca_plans(txns, today=today_d),
                               dca_state=_load_dca_state(), fee_settings=fee_settings,
                               nav_expected=provider.expected_last_td())))
 

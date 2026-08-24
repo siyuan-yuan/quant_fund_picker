@@ -915,63 +915,104 @@ function dcaRoundClosed(code, lastDate) {
   return !!b && lastDate <= b;
 }
 
-function checkMissingDCA() {
-  const byCode = {};
-  for(const t of LEDGER_TXNS) {
-    if(t.side !== 'buy' || !t.isDca) continue;
-    if(!byCode[t.code]) byCode[t.code] = [];
+function ymdParts(ymd){
+  const m=String(ymd||'').slice(0,10).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? [+m[1], +m[2], +m[3]] : null;
+}
+function ymdAddDays(ymd, n){
+  const p=ymdParts(ymd); if(!p) return '';
+  return localDateStr(new Date(p[0], p[1]-1, p[2]+n));
+}
+function ymdWeekday(ymd){
+  const p=ymdParts(ymd); if(!p) return -1;
+  return new Date(p[0], p[1]-1, p[2]).getDay();
+}
+function ymdDiffDays(a, b){
+  const pa=ymdParts(a), pb=ymdParts(b);
+  if(!pa||!pb) return NaN;
+  return Math.round((new Date(pa[0],pa[1]-1,pa[2]) - new Date(pb[0],pb[1]-1,pb[2])) / 86400000);
+}
+function ymdAddMonths(ymd, n){
+  const p=ymdParts(ymd); if(!p) return '';
+  const dt=new Date(p[0], p[1]-1+n, 1);
+  const dim=new Date(dt.getFullYear(), dt.getMonth()+1, 0).getDate();
+  dt.setDate(Math.min(p[2], dim));
+  return localDateStr(dt);
+}
+function nextDcaYmd(last, freq){
+  if(!last || !freq) return '';
+  let nxt='';
+  if(freq==='daily') nxt=ymdAddDays(last,1);
+  else if(freq==='weekly') nxt=ymdAddDays(last,7);
+  else if(freq==='biweekly') nxt=ymdAddDays(last,14);
+  else if(freq==='monthly') nxt=ymdAddMonths(last,1);
+  else return '';
+  if(freq==='daily'){
+    while(ymdWeekday(nxt)===0||ymdWeekday(nxt)===6) nxt=ymdAddDays(nxt,1);
+  } else {
+    const wd=ymdWeekday(nxt);
+    if(wd===6) nxt=ymdAddDays(nxt,2);
+    else if(wd===0) nxt=ymdAddDays(nxt,1);
+  }
+  return nxt;
+}
+function inferDcaFreqFromGap(days){
+  if(!(days>=1)) return null;
+  if(days<=4) return {freq:'daily', fqName:'每日'};
+  if(days<=9) return {freq:'weekly', fqName:'每周'};
+  if(days>=12 && days<=16) return {freq:'biweekly', fqName:'每两周'};
+  if(days>=27 && days<=33) return {freq:'monthly', fqName:'每月'};
+  return null;
+}
+function detectOverdueDca(txns, todayStr){
+  const byCode={};
+  for(const t of txns||[]){
+    if(t.side!=='buy' || !t.isDca) continue;
+    if(!byCode[t.code]) byCode[t.code]=[];
     byCode[t.code].push(t);
   }
-  
-  const todayStr = localDateStr();
-  const today = new Date(todayStr + 'T00:00:00');
-  const candidates = [];
-  
-  for(const code in byCode) {
-    const txns = byCode[code].sort((a,b) => new Date(a.date) - new Date(b.date));
-    if(txns.length < 2) continue;
-    
-    const last = txns[txns.length-1];
-    let streak = 1;
-    for(let i=txns.length-2; i>=0; i--) {
-      if(txns[i].amount === last.amount) streak++;
+  const out=[];
+  for(const code in byCode){
+    const rows=byCode[code].slice().sort((a,b)=>String(a.date).localeCompare(String(b.date)));
+    if(rows.length<2) continue;
+    const last=rows[rows.length-1];
+    const lastAmt=Number(last.amount);
+    let streak=1;
+    for(let i=rows.length-2;i>=0;i--){
+      if(Math.abs(Number(rows[i].amount)-lastAmt)<1e-6) streak++;
       else break;
     }
-    
-    if(streak >= 2) {
-      if(ignoredDCAs.has(code + '|' + last.date)) continue;
-      if(dcaRoundClosed(code, last.date)) continue;   // 该轮已终止/已忽略 → 不再询问（新一轮 lastDate 变化后自动恢复）
-      
-      const secondLast = txns[txns.length-2];
-      const diffDays = Math.round((new Date(last.date) - new Date(secondLast.date))/(1000*3600*24));
-      
-      let freq = null;
-      let fqName = '';
-      if (diffDays >= 1 && diffDays <= 4) { freq = 'daily'; fqName='每日'; }
-      else if (diffDays >= 5 && diffDays <= 9) { freq = 'weekly'; fqName='每周'; }
-      else if (diffDays >= 12 && diffDays <= 16) { freq = 'biweekly'; fqName='每两周'; }
-      else if (diffDays >= 27 && diffDays <= 33) { freq = 'monthly'; fqName='每月'; }
-      
-      if(freq) {
-         let nextDate = new Date(last.date);
-         if(freq==='daily') nextDate.setDate(nextDate.getDate()+1);
-         else if(freq==='weekly') nextDate.setDate(nextDate.getDate()+7);
-         else if(freq==='biweekly') nextDate.setDate(nextDate.getDate()+14);
-         else if(freq==='monthly') nextDate.setMonth(nextDate.getMonth()+1);
-         
-         if(freq==='daily') {
-             while(nextDate.getDay()===0||nextDate.getDay()===6) nextDate.setDate(nextDate.getDate()+1);
-         } else {
-             if(nextDate.getDay()===0) nextDate.setDate(nextDate.getDate()+1);
-             else if(nextDate.getDay()===6) nextDate.setDate(nextDate.getDate()+2);
-         }
-         
-         if (nextDate <= today) {
-            candidates.push({ code, amount: last.amount, lastDate: last.date, nextDate, freq, fqName });
-         }
-      }
+    if(streak<2) continue;
+    const gap=ymdDiffDays(last.date, rows[rows.length-2].date);
+    const inf=inferDcaFreqFromGap(gap);
+    if(!inf) continue;
+    const nextDate=nextDcaYmd(last.date, inf.freq);
+    if(nextDate && nextDate<=todayStr){
+      out.push({code, amount:lastAmt, lastDate:last.date, nextDate, freq:inf.freq, fqName:inf.fqName});
     }
   }
+  return out;
+}
+function checkMissingDCA(serverDue) {
+  // 日期一律用本地 YYYY-MM-DD 字符串比较。
+  // 旧逻辑 new Date('YYYY-MM-DD') 被当成 UTC 0 点，再 setDate 后变成「到期日 08:00」；
+  // 与 today=本地 00:00 比较时，周五最后一笔、周一到期会被漏掉（016452 / 001092）。
+  const todayStr = localDateStr();
+  const byCode = {};
+  for(const c of detectOverdueDca(LEDGER_TXNS, todayStr).concat(Array.isArray(serverDue)?serverDue:[])){
+    if(!c || !c.code) continue;
+    const lastDate=String(c.lastDate||c.last_date||'').slice(0,10);
+    if(!lastDate) continue;
+    if(ignoredDCAs.has(c.code + '|' + lastDate)) continue;
+    if(dcaRoundClosed(c.code, lastDate)) continue;
+    const nd=c.nextDate||c.next_date;
+    const nextDate=(typeof nd==='string' && /^\d{4}-\d{2}-\d{2}/.test(nd)) ? nd.slice(0,10) : (nd instanceof Date ? localDateStr(nd) : nextDcaYmd(lastDate, c.freq));
+    byCode[c.code]={
+      code:c.code, amount:Number(c.amount), lastDate, nextDate,
+      freq:c.freq, fqName:c.fqName||c.freq_label||''
+    };
+  }
+  const candidates = Object.values(byCode);
   
   missingDcaCandidates = candidates;
   const panel = document.getElementById('dca-prompt-panel');
@@ -1026,7 +1067,9 @@ async function fillMissingDCA(idx, toToday) {
   if(isNaN(endD)) { setStatus('led-dot','led-st','err','日期格式无效，请填写 YYYY-MM-DD'); return; }
 
   const nd = c.nextDate;
-  const startStr = localDateStr(nd);
+  const startStr = (typeof nd === 'string' && /^\d{4}-\d{2}-\d{2}/.test(nd))
+    ? nd.slice(0,10)
+    : localDateStr(nd instanceof Date ? nd : new Date(nd));
   setStatus('led-dot','led-st','run',`正在计算 ${c.code} ${startStr} 至 ${norm(endStr)} 的应补记录…`);
   let pj;
   try{
@@ -1465,13 +1508,17 @@ function renderLedger(j){
     const st=f.state||{};
     const on=viewCode===f.code?' led-on':'';
     const click=`class="led-click${on}" onclick="setLedgerView('${f.code}')" title="查看该基金全部买卖记录"`;
-    if(st.flat) return `<tr ${click}><td class="mono">${safeFundCode(f.code)}</td><td class="name">${escHtml(f.name)}</td><td class="mono faint" colspan="4">已全部卖出</td><td class="mono faint">—</td><td><span class="badge b-mute">已清仓</span></td></tr>`;
+    if(st.flat) return `<tr ${click}><td class="mono">${safeFundCode(f.code)}</td><td class="name">${escHtml(f.name)}</td><td class="mono faint" colspan="5">已全部卖出</td><td class="mono faint">—</td><td><span class="badge b-mute">已清仓</span></td></tr>`;
     const dd=st.dd==null?'—':fmtPct(st.dd);
+    const fundDd=st.dd_fund==null?'—':fmtPct(st.dd_fund);
     const col=st.status==='triggered'?'var(--danger)':(st.status==='near'?'var(--warn)':'var(--muted)');
+    const fundCol=st.dd_fund==null?'var(--faint)':(st.dd_fund<=-0.20?'var(--danger)':(st.dd_fund<=-0.10?'var(--warn)':'var(--muted)'));
+    const holdTip=`持仓回撤：本轮开仓以来最高净值 ${st.peak??'—'}（${st.peak_date||'—'}）→ 当前；20%止损看这一列`;
+    const fundTip=`整只基金相对历史最高净值 ${st.peak_fund??'—'}（${st.peak_fund_date||'—'}）的当前回撤；与是否持有无关，不触发止损`;
     const stBadge=st.status==='triggered'?'<span class="badge b-red">止损清仓</span>':(st.status==='near'?'<span class="badge b-amber">接近止损</span>':'<span class="badge b-green">正常</span>');
     const over=st.over_sell?' <span class="badge b-amber" title="卖出金额超过持有份额，请核对记录">超额卖出</span>':'';
     const exp=j.nav_expected; const stale=st.nav_asof&&exp&&st.nav_asof<exp; const feeSrc={override:'单基设置',auto:'自动',default:'默认'}[st.buy_fee_source]||''; const feeTxt=st.buy_fee!=null?`费 ${(st.buy_fee*100).toFixed(2)}%${feeSrc?'（'+feeSrc+'）':''}`:`费 —`; const asof=st.nav_asof?(stale?`净值停在 ${st.nav_asof}`:`净值 ${st.nav_asof}`):''; const pend=st.pending_buy>0?` · 在途 ${fmtYuanFull(st.pending_buy)}`:'';
-    return `<tr ${click}><td class="mono">${safeFundCode(f.code)}</td><td class="name">${escHtml(f.name)}<div class="hint">${feeTxt}${asof?' · '+escHtml(asof):''}${pend}</div></td><td class="mono" style="text-align:center">${st.lots_n??'—'}</td><td style="text-align:right" class="mono">${fmtYuanFull(st.mv_now)}</td><td style="text-align:right" class="mono">${fmtYuanFull(st.basis)}</td><td style="text-align:right" class="mono">${fmtPct(st.ret_held)}</td><td class="mono" style="text-align:right;color:${col}">${dd}</td><td>${stBadge}${over}</td></tr>`;
+    return `<tr ${click}><td class="mono">${safeFundCode(f.code)}</td><td class="name">${escHtml(f.name)}<div class="hint">${feeTxt}${asof?' · '+escHtml(asof):''}${pend}</div></td><td class="mono" style="text-align:center">${st.lots_n??'—'}</td><td style="text-align:right" class="mono">${fmtYuanFull(st.mv_now)}</td><td style="text-align:right" class="mono">${fmtYuanFull(st.basis)}</td><td style="text-align:right" class="mono">${fmtPct(st.ret_held)}</td><td class="mono" style="text-align:right;color:${col}" title="${escHtml(holdTip)}">${dd}</td><td class="mono" style="text-align:right;color:${fundCol}" title="${escHtml(fundTip)}">${fundDd}</td><td>${stBadge}${over}</td></tr>`;
   }).join('');
   let mv=0,basis=0;
   for(const f of funds){ const st=f.state||{}; if(!st.flat){ mv+=(st.mv_now||0); basis+=(st.basis||0); } }
@@ -1496,11 +1543,11 @@ function renderLedger(j){
       <table><thead><tr><th>日期</th><th>方向</th><th>代码</th><th>金额</th><th></th></tr></thead><tbody>${tRows||emptyTx}</tbody></table>
     </div></div>
     <div style="flex:1.4 1 480px;min-width:320px"><div class="table-wrap" style="border:none;border-radius:0;padding:0">
-      <table><thead><tr><th>代码</th><th>名称</th><th>笔数</th><th>持有金额</th><th>剩余成本</th><th>持有收益</th><th>高点回撤</th><th>状态</th></tr></thead>
-      <tbody>${fRows}<tr style="border-top:2px solid var(--line);font-weight:600"><td colspan="3">合计</td><td class="mono" style="text-align:right">${fmtYuan2(mv)}</td><td class="mono" style="text-align:right">${fmtYuan2(basis)}</td><td class="mono" style="text-align:right">${ret}</td><td colspan="2"></td></tr></tbody></table>
+      <table><thead><tr><th>代码</th><th>名称</th><th>笔数</th><th>持有金额</th><th>剩余成本</th><th>持有收益</th><th title="本轮开仓以来最高净值→当前；20%止损看这一列">持仓回撤</th><th title="整只基金历史最高净值→当前；只展示，不触发止损">基金高点回撤</th><th>状态</th></tr></thead>
+      <tbody>${fRows}<tr style="border-top:2px solid var(--line);font-weight:600"><td colspan="3">合计</td><td class="mono" style="text-align:right">${fmtYuan2(mv)}</td><td class="mono" style="text-align:right">${fmtYuan2(basis)}</td><td class="mono" style="text-align:right">${ret}</td><td colspan="3"></td></tr></tbody></table>
     </div></div>
   </div>
-  <div class="hint" style="margin-top:8px">持有金额=已确认份额×最新单位净值 + 在途申购（对齐支付宝「持有金额」）。QDII 在确认净值尚未公布前不会按最新净值折份额。净值落后时点「刷新净值」。止盈确认卖出后再删流水会把仓位加回。</div>`;
+  <div class="hint" style="margin-top:8px">持有金额=已确认份额×最新单位净值 + 在途申购（对齐支付宝「持有金额」）。<b>持仓回撤</b>=本轮开仓以来最高净值→当前（20%止损只看这一列）；<b>基金高点回撤</b>=整只基金历史最高净值→当前（只展示）。QDII 在确认净值尚未公布前不会按最新净值折份额。净值落后时点「刷新净值」。止盈确认卖出后再删流水会把仓位加回。</div>`;
 }
 
 function rbSave(){localStorage.setItem('rb_data',JSON.stringify({total:document.getElementById('rb-total').value,cash:document.getElementById('rb-cash').value})); setStatus('rb-dot','rb-st','ok','已记忆')}
@@ -1525,14 +1572,22 @@ function stopBadge(st){
   if(st.status==='ok') return '<span class="badge b-green">正常</span>';
   return '<span class="badge b-mute">需日期</span>';
 }
+function fundDdCell(st){
+  const dd=st&&st.dd_fund;
+  const txt=dd==null?'—':fmtPct(dd);
+  const col=dd==null?'var(--faint)':(dd<=-0.20?'var(--danger)':(dd<=-0.10?'var(--warn)':'var(--muted)'));
+  const tip=`整只基金相对历史最高净值 ${st&&st.peak_fund!=null?st.peak_fund:'—'}（${(st&&st.peak_fund_date)||'—'}）的当前回撤；与是否持有无关，不触发20%止损`;
+  return `<td class="mono" style="color:${col}" title="${escHtml(tip)}">${txt}</td>`;
+}
 function stopCell(h){
   const st=h.stop||{};
-  if(!st.computable) return `<td class="mono faint">—</td><td class="mono faint">—</td><td><span class="badge b-mute">${st.status==='need_entry'?'需日期/收益率':'—'}</span></td>`;
+  const fund=fundDdCell(st);
+  if(!st.computable) return `<td class="mono faint">—</td><td class="mono faint">—</td>${fund}<td><span class="badge b-mute">${st.status==='need_entry'?'需日期/收益率':'—'}</span></td>`;
   const dd=st.dd==null?'—':fmtPct(st.dd);
   const col=st.status==='triggered'?'var(--danger)':(st.status==='near'?'var(--warn)':'var(--muted)');
-  const tip=`入场 ${st.entry_date||'?'}${st.inferred?'（收益率推断）':''} · 入场后高点 ${st.peak}（${st.peak_date}）· 20%触发价 ${st.trigger_nav} · 真实持有收益 ${fmtPct(st.ret_held)}${st.infer_ambiguous?' · ≈疑似多笔/定投买入：入场日与回撤为近似值，建议在操作台账记录每笔买卖后重新诊断':''}`;
+  const tip=`持仓回撤：入场 ${st.entry_date||'?'}${st.inferred?'（收益率推断）':''} · 本轮高点 ${st.peak}（${st.peak_date}）· 20%触发价 ${st.trigger_nav} · 真实持有收益 ${fmtPct(st.ret_held)}${st.infer_ambiguous?' · ≈疑似多笔/定投买入：入场日与回撤为近似值，建议在操作台账记录每笔买卖后重新诊断':''}`;
   const mark=st.infer_ambiguous?' ≈':(st.inferred?'*':'');
-  return `<td class="mono" style="color:${st.infer_ambiguous?'var(--warn)':'var(--muted)'}" title="${tip}">${st.entry_date||'—'}${mark}</td><td class="mono" style="color:${col};font-weight:600" title="${tip}">${dd}</td><td title="${tip}">${stopBadge(st)}</td>`;
+  return `<td class="mono" style="color:${st.infer_ambiguous?'var(--warn)':'var(--muted)'}" title="${escHtml(tip)}">${st.entry_date||'—'}${mark}</td><td class="mono" style="color:${col};font-weight:600" title="${escHtml(tip)}">${dd}</td>${fund}<td title="${escHtml(tip)}">${stopBadge(st)}</td>`;
 }
 function cppiPanelHtml(cp,s){
   if(!cp || !cp.computable) return '';
@@ -1619,7 +1674,7 @@ function renderRebalance(j){
     const act=h.action==='sell'?'卖出':'持有';
     return `<tr><td>${safeFundCode(h.code)}</td><td class="name">${escHtml(h.name)}</td><td style="text-align:right">${fmtYuanFull(h.amount)}</td>${stopCell(h)}<td class="score">${escHtml(h.S_total??'—')}</td><td>${ratingCell(h)}</td><td>${sigOf(h)}</td><td>${escHtml(h.action_label||act)}</td><td style="text-align:right">${fmtYuanFull(h.target_amount)}</td></tr>`;
   }).join('');
-  const hTable=`<div style="margin-top:14px"><div class="table-wrap"><table><thead><tr><th>代码</th><th>名称</th><th>金额</th><th>入场日</th><th>高点回撤</th><th>20%止损</th><th>总分</th><th>评级</th><th>信号</th><th>操作</th><th>目标</th></tr></thead><tbody>${hRows}</tbody></table></div></div>`;
+  const hTable=`<div style="margin-top:14px"><div class="table-wrap"><table><thead><tr><th>代码</th><th>名称</th><th>金额</th><th>入场日</th><th title="本轮开仓以来最高净值→当前；20%止损看这一列">持仓回撤</th><th title="整只基金历史最高净值→当前；只展示，不触发止损">基金高点回撤</th><th>20%止损</th><th>总分</th><th>评级</th><th>信号</th><th>操作</th><th>目标</th></tr></thead><tbody>${hRows}</tbody></table></div></div>`;
   // 重复度过滤在服务端静默执行（同指数/同风格顺位推荐），不展示明细
   const nBuyOrders=orders.filter(o=>o.side==='BUY').length;
   const noteHtml=(j.buy_note&&!nBuyOrders)? `<div style="margin-top:8px;font:12px var(--sans);color:var(--warn)">${escHtml(j.buy_note)}</div>`:'';
@@ -1649,15 +1704,6 @@ refreshScanStatus().then(s=>{ if(s && (s.phase==='universe' || s.phase==='scorin
 setTimeout(()=>{
   const d=document.getElementById('hd-date');
   if(d && d.textContent==='加载中…'){
-    d.textContent='本地缓存';
-    const dot=document.getElementById('hd-dot');
-    if(dot) dot.className='dot';
-  }
-}, 4000);
-</script>
-</body>
-</html>
-f(d && d.textContent==='加载中…'){
     d.textContent='本地缓存';
     const dot=document.getElementById('hd-dot');
     if(dot) dot.className='dot';
