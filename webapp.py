@@ -133,6 +133,108 @@ def _save_fee_settings(settings: dict) -> bool:
         return False
 
 
+def _fmt_exported_fee_pct(rate) -> str:
+    """Decimal rate → percent text used in 导出台账 CSV (0.0012 → '0.12')."""
+    try:
+        n = float(rate)
+    except (TypeError, ValueError):
+        return ""
+    if not np.isfinite(n):
+        return ""
+    s = f"{n * 100:.4f}".rstrip("0").rstrip(".")
+    return s
+
+
+def _parse_exported_fee_pct(s):
+    """CSV 费率% → decimal. 0.12 / 0.12% → 0.0012; reject >10%."""
+    t = str(s or "").strip().replace("%", "").replace("％", "")
+    if not t:
+        return None
+    try:
+        v = float(t)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(v) or v < 0 or v > 10:
+        return None
+    return v / 100.0
+
+
+def parse_exported_fee_settings(text: str) -> dict:
+    """Parse the `#买入费率` block from an exported ledger CSV.
+
+    Rates in the file are percent. Returns decimal rates compatible with
+    /api/fee_settings: {default_rate or None, overrides:{code:rate}}.
+    """
+    out = {"default_rate": None, "overrides": {}}
+    mode = False
+    for raw in str(text or "").splitlines():
+        line = raw.strip()
+        if re.match(r"^#\s*买入费率", line) or re.match(r"^类型[,，\s]+代码", line):
+            mode = True
+            if re.match(r"^类型", line):
+                continue
+            continue
+        if line.startswith("#"):
+            mode = False
+            continue
+        if not mode or not line:
+            continue
+        parts = [p.strip() for p in re.split(r"[,，]", line)]
+        kind = parts[0] if parts else ""
+        raw_code = parts[1] if len(parts) > 1 else ""
+        rate = _parse_exported_fee_pct(parts[2] if len(parts) > 2 else "")
+        if rate is None:
+            continue
+        if re.search(r"默认|default", kind, re.I):
+            out["default_rate"] = rate
+            continue
+        digits = re.sub(r"\D", "", raw_code)
+        code = digits.zfill(6) if digits else ""
+        if re.fullmatch(r"\d{6}", code) and code != "000000":
+            out["overrides"][code] = rate
+    return out
+
+
+def format_exported_fee_settings(settings: dict) -> str:
+    """Serialize fee settings as the `#买入费率` CSV block (percent column)."""
+    settings = settings or {}
+    rows = ["类型,代码,费率%"]
+    if settings.get("default_rate") is not None:
+        rows.append(f"默认,,{_fmt_exported_fee_pct(settings['default_rate'])}")
+    ov = settings.get("overrides") or {}
+    for code in sorted(ov, key=lambda c: str(c).zfill(6)):
+        rows.append(f"覆盖,{str(code).zfill(6)},{_fmt_exported_fee_pct(ov[code])}")
+    return "#买入费率（导入时自动恢复，不必重新填写）\n" + "\n".join(rows)
+
+
+def merge_fee_settings(current, imported) -> dict:
+    """Merge imported fee settings into current; imported values win."""
+    base = current or _base_fee_settings()
+    out = {
+        "default_rate": float(base.get("default_rate", BUY_FEE_RATE)),
+        "overrides": dict(base.get("overrides") or {}),
+    }
+    if not imported:
+        return out
+    if imported.get("default_rate") is not None:
+        try:
+            r = float(imported["default_rate"])
+        except (TypeError, ValueError):
+            r = None
+        if r is not None and np.isfinite(r) and 0 <= r <= 0.1:
+            out["default_rate"] = r
+    for code, rate in (imported.get("overrides") or {}).items():
+        code = re.sub(r"\D", "", str(code or ""))
+        code = code.zfill(6) if code else ""
+        try:
+            rate = float(rate)
+        except (TypeError, ValueError):
+            continue
+        if re.fullmatch(r"\d{6}", code) and code != "000000" and np.isfinite(rate) and 0 <= rate <= 0.1:
+            out["overrides"][code] = rate
+    return out
+
+
 def _resolve_buy_fee(code, settings=None):
     """解析实扣申购费率 → (rate, source)。优先级：单基金覆盖 > 自动查费 > 用户默认。"""
     code = str(code or "").zfill(6)
@@ -353,6 +455,11 @@ def ledger_get():
     """返回台账全部记录 + 每只基金实时状态（份额/成本/市值/回撤/止损），+组合CPPI(cash可选)"""
     txns = _load_ledger()
     cash = _parse_yuan(request.args.get("cash")) if request.args.get("cash") else None
+    today_s = request.args.get("today")
+    try:
+        today_d = dt.date.fromisoformat(str(today_s)[:10]) if today_s else dt.date.today()
+    except ValueError:
+        today_d = dt.date.today()
     by = _ledger_by_code(txns)
     states = []
     names = {}
@@ -390,6 +497,7 @@ def ledger_get():
                                                   (STRAT_CPPI_DD3, STRAT_CPPI_SLOTS3)],
                                            full_slots=STRAT_SLOTS, hysteresis=STRAT_CPPI_HYSTERESIS)
     return jsonify(clean(dict(ok=True, txns=txns, funds=states, cppi=cppi,
+                              dca_due=holding_diag.overdue_dca_plans(txns, today=today_d),
                               dca_state=_load_dca_state(), fee_settings=fee_settings,
                               nav_expected=provider.expected_last_td())))
 

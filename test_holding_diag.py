@@ -549,6 +549,100 @@ def test_dca_keeps_pending_business_days():
     print("test_dca_keeps_pending_business_days OK, lots:", got)
 
 
+def test_fund_vs_holding_drawdown():
+    """基金高点回撤 ≠ 持仓回撤：入场后未再创新高时两列分开；ATH 落在持仓期内则相等。"""
+    dates = pd.date_range("2020-01-01", periods=120, freq="D")
+    vals = np.linspace(1.0, 2.0, 60).tolist() + np.linspace(2.0, 1.2, 60).tolist()
+    rets = [0.0] + [vals[i] / vals[i - 1] - 1 for i in range(1, len(vals))]
+    df = mk_nav([str(d.date()) for d in dates], rets)
+
+    late = hd.fund_stop_diag(dict(code="X", amount=10000, buy_date="2020-04-28"), df)
+    assert late["computable"] and late["status"] == "ok"
+    assert abs(late["dd"]) < 0.03
+    assert abs(late["dd_fund"] - (1.2 / 2.0 - 1)) < 1e-6
+    assert abs(late["peak_fund"] - 2.0) < 1e-6
+
+    during_ath = hd.fund_stop_diag(dict(code="X", amount=10000, buy_date="2020-02-01"), df)
+    assert abs(during_ath["dd"] - during_ath["dd_fund"]) < 1e-9
+    assert during_ath["status"] == "triggered"
+
+    empty = hd.fund_lots_diag([], df, buy_fee=0.0)
+    assert empty["status"] == "need_entry"
+    assert empty["dd"] is None
+    assert abs(empty["dd_fund"] - (1.2 / 2.0 - 1)) < 1e-6
+    print("test_fund_vs_holding_drawdown OK")
+
+
+def test_overdue_dca_friday_to_monday():
+    """周五最后一笔每日定投，周一必须到期（日历日比较，不被 UTC 解析吃掉）。"""
+    from datetime import date
+    assert hd.next_dca_date("2026-08-21", "daily") == date(2026, 8, 24)
+    assert hd.next_dca_date("2026-08-21", "weekly") == date(2026, 8, 28)
+    assert hd.next_dca_date("2026-01-20", "monthly") == date(2026, 2, 20)
+    assert hd.next_dca_date("2026-01-31", "monthly") == date(2026, 3, 2)  # 2/28 周六 → 下周一
+
+    txns = [
+        dict(code="016452", date="2026-08-20", side="buy", amount=10, isDca=True),
+        dict(code="016452", date="2026-08-21", side="buy", amount=10, isDca=True),
+        dict(code="001092", date="2026-08-20", side="buy", amount=100, isDca=True),
+        dict(code="001092", date="2026-08-21", side="buy", amount=100, isDca=True),
+    ]
+    due = {p["code"]: p for p in hd.overdue_dca_plans(txns, today="2026-08-24")}
+    assert set(due) == {"016452", "001092"}
+    assert due["016452"]["nextDate"] == "2026-08-24" and due["016452"]["freq"] == "daily"
+    assert hd.overdue_dca_plans(txns, today="2026-08-21") == []
+
+    weekly = [
+        dict(code="016452", date="2026-08-14", side="buy", amount=10, isDca=True),
+        dict(code="016452", date="2026-08-21", side="buy", amount=10, isDca=True),
+    ]
+    assert hd.overdue_dca_plans(weekly, today="2026-08-24") == []
+    due_w = hd.overdue_dca_plans(weekly, today="2026-08-28")
+    assert len(due_w) == 1 and due_w[0]["freq"] == "weekly" and due_w[0]["nextDate"] == "2026-08-28"
+
+    unmarked = [
+        dict(code="016452", date="2026-08-20", side="buy", amount=10, isDca=False),
+        dict(code="016452", date="2026-08-21", side="buy", amount=10, isDca=False),
+    ]
+    assert hd.overdue_dca_plans(unmarked, today="2026-08-24") == []
+    print("test_overdue_dca_friday_to_monday OK")
+
+
+def test_ledger_dca_due_uses_client_today():
+    """/api/ledger?today= 用调用方日历日判定到期，不依赖服务器时区。"""
+    import tempfile
+    import webapp
+    orig_led = webapp.LEDGER_FILE
+    orig_dca = webapp.DCA_STATE_FILE
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            webapp.LEDGER_FILE = os.path.join(td, "ledger.json")
+            webapp.DCA_STATE_FILE = os.path.join(td, "dca_state.json")
+            c = webapp.app.test_client()
+            txns = [
+                {"code": "016452", "date": "2026-08-20", "side": "buy", "amount": 10, "isDca": True},
+                {"code": "016452", "date": "2026-08-21", "side": "buy", "amount": 10, "isDca": True},
+            ]
+            saved = c.post("/api/ledger", json={"txns": txns})
+            assert saved.status_code == 200, saved.get_json()
+            orig_nav = webapp.provider.get_fund_nav
+            webapp.provider.get_fund_nav = lambda code: pd.DataFrame({
+                "date": pd.to_datetime(["2026-08-17", "2026-08-18"]),
+                "nav": [2.0, 2.1], "ret": [0.0, 0.05]})
+            try:
+                j = c.get("/api/ledger?today=2026-08-24").get_json()
+                codes = {p["code"] for p in (j.get("dca_due") or [])}
+                assert "016452" in codes, j.get("dca_due")
+                j2 = c.get("/api/ledger?today=2026-08-21").get_json()
+                assert j2.get("dca_due") == []
+            finally:
+                webapp.provider.get_fund_nav = orig_nav
+        finally:
+            webapp.LEDGER_FILE = orig_led
+            webapp.DCA_STATE_FILE = orig_dca
+    print("test_ledger_dca_due_uses_client_today OK")
+
+
 def test_dca_preview_keeps_today_with_lagging_nav():
     """端到端回归：016452 净值只到 18 日时，补齐仍必须返回 19 日扣款。"""
     import webapp
@@ -569,6 +663,73 @@ def test_dca_preview_keeps_today_with_lagging_nav():
         webapp.provider.get_fund_nav = orig_nav
         webapp.holding_diag.buy_fee_rate = orig_fee
     print("test_dca_preview_keeps_today_with_lagging_nav OK")
+
+
+def test_exported_fee_settings_roundtrip():
+    """导出台账 #买入费率 块：百分数列 ↔ 小数费率，导入合并不丢已有覆盖。"""
+    import webapp
+    csv = (
+        "日期,方向,代码,金额,备注\n"
+        "2026-08-10,买入,016452,100,\n"
+        "\n"
+        "#买入费率（导入时自动恢复，不必重新填写）\n"
+        "类型,代码,费率%\n"
+        "默认,,0.15\n"
+        "覆盖,016452,0.12\n"
+        "覆盖,001092,0\n"
+    )
+    parsed = webapp.parse_exported_fee_settings(csv)
+    assert abs(parsed["default_rate"] - 0.0015) < 1e-12
+    assert abs(parsed["overrides"]["016452"] - 0.0012) < 1e-12
+    assert parsed["overrides"]["001092"] == 0.0
+
+    block = webapp.format_exported_fee_settings({
+        "default_rate": 0.0015,
+        "overrides": {"016452": 0.0012, "001092": 0.0},
+    })
+    assert block.startswith("#买入费率")
+    again = webapp.parse_exported_fee_settings(block)
+    assert again["default_rate"] == parsed["default_rate"]
+    assert again["overrides"] == parsed["overrides"]
+
+    merged = webapp.merge_fee_settings(
+        {"default_rate": 0.002, "overrides": {"123456": 0.003, "016452": 0.005}},
+        parsed,
+    )
+    assert abs(merged["default_rate"] - 0.0015) < 1e-12
+    assert abs(merged["overrides"]["016452"] - 0.0012) < 1e-12
+    assert merged["overrides"]["001092"] == 0.0
+    assert abs(merged["overrides"]["123456"] - 0.003) < 1e-12
+
+    old = webapp.parse_exported_fee_settings("日期,方向,代码,金额\n2026-08-10,买入,016452,100")
+    assert old["default_rate"] is None and old["overrides"] == {}
+    print("test_exported_fee_settings_roundtrip OK")
+
+
+def test_import_fee_settings_persists():
+    """导入合并后的费率会写进 /api/fee_settings，刷新后仍在。"""
+    import tempfile
+    import webapp
+    orig_file = webapp.FEE_SETTINGS_FILE
+    with tempfile.TemporaryDirectory() as td:
+        try:
+            webapp.FEE_SETTINGS_FILE = os.path.join(td, "fee_settings.json")
+            c = webapp.app.test_client()
+            seed = c.post("/api/fee_settings", json={
+                "default_rate": 0.002, "overrides": {"123456": 0.003}})
+            assert seed.status_code == 200, seed.get_json()
+            imported = webapp.parse_exported_fee_settings(
+                "#买入费率\n类型,代码,费率%\n默认,,0.15\n覆盖,016452,0.12\n")
+            merged = webapp.merge_fee_settings(c.get("/api/fee_settings").get_json(), imported)
+            saved = c.post("/api/fee_settings", json=merged)
+            assert saved.status_code == 200, saved.get_json()
+            got = c.get("/api/fee_settings").get_json()
+            assert abs(got["default_rate"] - 0.0015) < 1e-12
+            assert abs(got["overrides"]["016452"] - 0.0012) < 1e-12
+            assert abs(got["overrides"]["123456"] - 0.003) < 1e-12
+        finally:
+            webapp.FEE_SETTINGS_FILE = orig_file
+    print("test_import_fee_settings_persists OK")
 
 
 def test_user_fee_settings():
@@ -667,7 +828,10 @@ if __name__ == "__main__":
     for fn in [test_adj_series, test_infer_entry_date, test_infer_ambiguous, test_fund_stop_diag, test_fund_lots_diag, test_portfolio_cppi_curve_input, test_portfolio_cppi_stale_nav, test_portfolio_cppi_auto_start,
                test_dca_dates_lots_infer, test_confirm_nav_pos_and_holiday,
                test_qdi_pending_unpublished_nav, test_dca_skips_holiday,
-               test_dca_keeps_pending_business_days, test_dca_preview_keeps_today_with_lagging_nav,
+               test_dca_keeps_pending_business_days, test_overdue_dca_friday_to_monday,
+               test_ledger_dca_due_uses_client_today, test_fund_vs_holding_drawdown,
+               test_dca_preview_keeps_today_with_lagging_nav,
+               test_exported_fee_settings_roundtrip, test_import_fee_settings_persists,
                test_user_fee_settings, test_buy_fee_deduction,
                test_fund_buy_fee_lookup,
                test_exposure_overlap, test_clone_detection, test_cppi_tier_sim, test_portfolio_cppi, test_webapp_endpoint]:

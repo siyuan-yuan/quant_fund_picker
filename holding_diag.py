@@ -7,9 +7,10 @@
   - 当前市值（持有金额）
   - 买入日期（交易记录） 或 持仓成本金额 或 持有收益率%
 输出（全部由真实净值历史自动计算，天天基金复权日收益）：
-  1) 单基金：自入场日起最高复权净值 → 当前回撤
-     - 回撤 > STRAT_TRAIL_STOP(20%) → 清仓提示（移动止损）
-     - 回撤 > 15% → 接近止损提示
+  1) 单基金两条回撤（同一条净值，窗口不同）：
+     - 持仓回撤 dd：本轮开仓以来最高净值 → 当前；> STRAT_TRAIL_STOP(20%) → 清仓
+     - 基金高点回撤 dd_fund：成立以来/有数据以来最高净值 → 当前；只展示，不触发止损
+     - 回撤 > 15% → 接近止损提示（只看持仓回撤）
   2) 组合级 CPPI：重建组合净值曲线（成本×复权净值折算 + 现金）
      - HWM（历史最高水位）→ 当前回撤 → 触发档位
      - 档位规则来自 config.STRAT_CPPI_DD1/2/3: -15%→6槽 / -20%→3槽 / -25%→清仓
@@ -17,6 +18,9 @@
      - 回撤回升至 -13% → 恢复 10 槽；-18% → 6 槽；-23% → 3 槽；创新高 → 满槽
      并按日序模拟状态机，给出历史上"何时触发/何时回补"的真实事件与日期。
 """
+
+import calendar
+from datetime import date, timedelta
 
 import numpy as np
 import pandas as pd
@@ -223,6 +227,144 @@ DCA_FREQ_LABELS = {"daily": "每日", "monthly": "每月", "biweekly": "每两�
 _DCA_FREQ_DAYS = {"daily": 1, "monthly": None, "biweekly": 14, "weekly": 7}
 # 反推时每月扣款日的候选日（覆盖发薪日/常见定投日；均 ≤28，避免大小月问题）
 DCA_DAY_OF_MONTH_GRID = (1, 5, 10, 15, 20, 25, 28)
+
+
+def infer_dca_freq_from_gap(days):
+    """由相邻两笔定投的间隔天数推断频率。与前端 checkMissingDCA 档位一致。"""
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        return None
+    if 1 <= days <= 4:
+        return "daily"
+    if 5 <= days <= 9:
+        return "weekly"
+    if 12 <= days <= 16:
+        return "biweekly"
+    if 27 <= days <= 33:
+        return "monthly"
+    return None
+
+
+def next_dca_date(last, freq):
+    """上一笔定投日后的下一扣款日（只跳过周末，不查净值日历）。
+
+    日期一律按日历日加减，避免 ``datetime('YYYY-MM-DD')`` 被当成 UTC
+    后与本地「今天 00:00」比较、在到期当天漏提醒。
+    """
+    if last is None or not freq:
+        return None
+    if not isinstance(last, date):
+        try:
+            last = date.fromisoformat(str(last)[:10])
+        except ValueError:
+            return None
+    if freq == "monthly":
+        month = last.month + 1
+        year = last.year + (month - 1) // 12
+        month = (month - 1) % 12 + 1
+        nxt = date(year, month, min(last.day, calendar.monthrange(year, month)[1]))
+    elif freq == "daily":
+        nxt = last + timedelta(days=1)
+    elif freq == "weekly":
+        nxt = last + timedelta(days=7)
+    elif freq == "biweekly":
+        nxt = last + timedelta(days=14)
+    else:
+        return None
+    if freq == "daily":
+        while nxt.weekday() >= 5:
+            nxt += timedelta(days=1)
+    else:
+        if nxt.weekday() == 5:
+            nxt += timedelta(days=2)
+        elif nxt.weekday() == 6:
+            nxt += timedelta(days=1)
+    return nxt
+
+
+def overdue_dca_plans(txns, today=None):
+    """台账里到期未补的定投计划。
+
+    txns: ledger 记录 dict（code/date/side/amount/isDca）或
+          (code, date, side, amount, isDca) 元组。
+    只看 isDca 买入；连续同金额 ≥2 笔才认定仍在定投。
+    """
+    today = today or date.today()
+    if not isinstance(today, date):
+        today = date.fromisoformat(str(today)[:10])
+    by = {}
+    for t in txns or []:
+        if isinstance(t, dict):
+            code, d, side, amt = t.get("code"), t.get("date"), t.get("side"), t.get("amount")
+            is_dca = bool(t.get("isDca"))
+        else:
+            code, d, side, amt = t[0], t[1], t[2], t[3]
+            is_dca = bool(t[4]) if len(t) > 4 else False
+        side_l = str(side or "").lower()
+        if side_l not in ("buy", "买", "买入", "dca") or not is_dca:
+            continue
+        try:
+            amt = float(amt)
+        except (TypeError, ValueError):
+            continue
+        if not code or amt <= 0 or not d:
+            continue
+        by.setdefault(str(code).zfill(6), []).append((str(d)[:10], amt))
+    out = []
+    for code, lots in by.items():
+        lots = sorted(lots, key=lambda x: x[0])
+        if len(lots) < 2:
+            continue
+        last_d, last_a = lots[-1]
+        streak = 1
+        for _, a0 in reversed(lots[:-1]):
+            if abs(a0 - last_a) < 1e-6:
+                streak += 1
+            else:
+                break
+        if streak < 2:
+            continue
+        try:
+            gap = (date.fromisoformat(last_d) - date.fromisoformat(lots[-2][0])).days
+        except ValueError:
+            continue
+        freq = infer_dca_freq_from_gap(gap)
+        nxt = next_dca_date(last_d, freq) if freq else None
+        if nxt is None or nxt > today:
+            continue
+        out.append(dict(
+            code=code, amount=last_a, lastDate=last_d, nextDate=str(nxt),
+            freq=freq, freq_label=DCA_FREQ_LABELS.get(freq, freq),
+        ))
+    return out
+
+
+def fund_peak_stats(navs):
+    """整只基金相对历史最高净值的当前回撤（与是否持有无关，不触发止损）。"""
+    empty = dict(dd_fund=None, peak_fund=None, peak_fund_date=None)
+    if navs is None or len(navs) < 2:
+        return empty
+    try:
+        s = navs.dropna().astype(float)
+    except (TypeError, ValueError):
+        return empty
+    if len(s) < 2:
+        return empty
+    peak = float(s.max())
+    now = float(s.iloc[-1])
+    if not np.isfinite(peak) or peak <= 0 or not np.isfinite(now) or now <= 0:
+        return empty
+    peak_date = s.idxmax()
+    try:
+        peak_date_s = str(peak_date.date())
+    except Exception:
+        peak_date_s = str(peak_date)[:10]
+    return dict(
+        dd_fund=float(now / peak - 1.0),
+        peak_fund=round(peak, 4),
+        peak_fund_date=peak_date_s,
+    )
 
 
 def dca_dates(start, freq="monthly", end=None):
@@ -504,6 +646,7 @@ def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15, co
     返回 dict（字段与 fund_stop_diag 兼容的超集）：
       computable / status(ok|near|triggered|no_data|flat) / reason
       entry_date / entry_nav / days_held / peak / peak_date / dd / trigger_nav
+      dd_fund / peak_fund / peak_fund_date（整基历史最高点回撤，只展示）
       ret_held / mv_now(当前市值) / basis(FIFO剩余成本) / shares_now / over_sell
       total_bought / total_sold / lots_n / flat / curve(持仓市值曲线 Series)
     """
@@ -513,12 +656,14 @@ def fund_lots_diag(lots, nav_df, anchor_amount=None, stop=0.20, warn_dd=0.15, co
     out = dict(
         computable=False, status="no_data", reason="", entry_date=None, entry_nav=None,
         inferred=False, days_held=None, peak=None, peak_date=None, dd=None,
+        dd_fund=None, peak_fund=None, peak_fund_date=None,
         trigger_nav=None, ret_held=None, mv_now=None, basis=None, shares_now=None,
         over_sell=False, total_bought=0.0, total_sold=0.0, lots_n=0,
         flat=False, curve=None, stop=float(stop),
         nav_asof=None, buy_fee=None, confirm_delay=0, pending_buy=0.0, pending_n=0,
         holding_amount=None, holding_basis=None,
     )
+    out.update(fund_peak_stats(navs))
     if len(navs) < 30:
         out["reason"] = "净值历史不足，无法计算入场高点回撤"
         return out
@@ -689,10 +834,12 @@ def fund_stop_diag(rec, nav_df, stop=0.20, warn_dd=0.15):
     返回 dict：
       computable / status(ok|near|triggered|no_data|need_entry|flat)
       entry_date / entry_nav / inferred(收益率反推) / days_held
-      peak / peak_date / dd(自入场高点回撤) / trigger_nav(触发清仓净值)
+      peak / peak_date / dd(持仓回撤) / trigger_nav(触发清仓净值)
+      dd_fund / peak_fund / peak_fund_date（整基历史最高点回撤，只展示）
       ret_held(真实持有收益) / ret_user(用户报的收益率) / reason
     """
     adj = adj_series(nav_df)
+    unit = unit_series(nav_df)
     ui = parse_user_inputs(rec)
     last_date = None
     if nav_df is not None and len(nav_df):
@@ -701,9 +848,11 @@ def fund_stop_diag(rec, nav_df, stop=0.20, warn_dd=0.15):
         computable=False, status="no_data", reason="",
         entry_date=None, entry_nav=None, inferred=False, infer_ambiguous=False,
         days_held=None, peak=None, peak_date=None, dd=None, trigger_nav=None,
+        dd_fund=None, peak_fund=None, peak_fund_date=None,
         ret_held=None, ret_user=ui["ret_pct"], stop=float(stop), last_date=last_date,
         amount=ui["amount"], cost=ui["cost"],
     )
+    out.update(fund_peak_stats(unit if len(unit) else adj))
     if len(adj) < 30:
         out["reason"] = "净值历史不足，无法计算入场高点回撤"
         return out
