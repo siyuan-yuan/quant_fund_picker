@@ -85,16 +85,14 @@ def mdd_factor(rm, w):
 
 
 def score_from_raw(g):
-    """原料行 → V4.1 双系统Regime-Adaptive总分。
+    """原料行 → V4.0 固定权重总分。
     
-    V4.1改进（基于exp_comprehensive.py + exp_regime_switch.py实验）:
+    V4.0改进（基于exp_comprehensive.py + exp_implementation.py实验）:
     1. F_alpha只用IR胜率（移除down_capture，IC≈0）
-    2. 新增F_earn_momentum（行业盈利动量，熊市IC=+0.29）
-    3. 双系统权重：
-       - 牛市(MA120上方): 0.40×F_momentum + 0.30×F_alpha + 0.15×val_pct + 0.15×F_value
-       - 熊市(MA120下方): 0.40×F_earn_momentum + 0.30×F_alpha + 0.30×F_momentum
+    2. 新增F_earn_momentum（行业盈利动量，IC=+0.102，稳定度71%）
+    3. 固定权重：0.35×F_momentum + 0.30×F_alpha + 0.20×F_earn_momentum + 0.15×F_value
     
-    如果存在S_engine列（engine.finalize()的V4.1分数），直接使用；
+    如果存在S_engine列（engine.finalize()的V4.0分数），直接使用；
     否则用V3.7逻辑计算（向后兼容旧数据）。
     """
     g = g.copy()
@@ -102,7 +100,7 @@ def score_from_raw(g):
     # V4.1: 如果存在S_engine列，直接使用engine.finalize()的V4.1分数
     if "S_engine" in g.columns and g["S_engine"].notna().any():
         g["S"] = g["S_engine"]
-        g["model_version"] = "V4.1"
+        g["model_version"] = "V4.0"
         return g
     
     # 向后兼容：如果没有S_engine，用V3.7逻辑

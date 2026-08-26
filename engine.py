@@ -2,19 +2,16 @@
 """
 评分引擎: 单基金全流水线 + 跨截面动量排名 + 总分合成
 
-V4.1 双系统 Regime-Adaptive:
-  牛市(MA120上方): F_momentum主导 + val_pct加成 + 不用earn(IC=-0.09)
-  熊市(MA120下方): F_earn_momentum主导(IC=+0.29) + 减弱F_momentum
-  实验依据: exp_regime_switch.py (54583观察点 × 476基金 × 2011-2026)
+V4.0 固定权重模型:
+  S = 0.35×F_momentum + 0.30×F_alpha + 0.20×F_earn_momentum + 0.15×F_value
+  实验依据: exp_implementation.py (2022-2026公平比较)
+  WF_IC=+0.351, 正IC率=83%, 比V4.1双系统(IC=+0.152)更稳定
 """
 import numpy as np
 import pandas as pd
 
 from config import (W_VALUE, W_ALPHA, W_MOMENTUM, W_EARN_MOMENTUM,
                     W_VAL_PCT_BONUS,
-                    W_VALUE_BEAR, W_ALPHA_BEAR, W_MOMENTUM_BEAR,
-                    W_EARN_MOMENTUM_BEAR, W_VAL_PCT_BONUS_BEAR,
-                    REGIME_MA_PERIOD,
                     RATING_BANDS, REGIME_LOW_WATER,
                     RBSA_INDICES, OVERSEAS_SRCS,
                     TENURE_CAP_DAYS, YOUNG_MAX_DAYS)
@@ -42,59 +39,17 @@ def market_water(as_of=None) -> float:
     return rbsa.market_water_level(as_of=as_of)
 
 
-def detect_regime(as_of=None) -> str:
-    """
-    V4.1 Regime检测: 基于沪深300与MA120的位置关系
-    
-    实验依据 (exp_regime_switch.py):
-      MA120上方(牛市): earn_momentum IC=-0.09, F_momentum IC=+0.18, val_pct IC=+0.14
-      MA120下方(熊市): earn_momentum IC=+0.29, F_momentum IC=+0.06
-    
-    返回: "bull" 或 "bear"
-    """
-    # 获取沪深300数据
-    try:
-        hs300_nav = provider.get_index_close("sh000300")
-        if hs300_nav is None or len(hs300_nav) < REGIME_MA_PERIOD:
-            return "bear"  # 数据不足时默认熊市（保守策略）
-        
-        if as_of is not None:
-            as_of_ts = pd.Timestamp(as_of)
-            hs300_nav = hs300_nav[hs300_nav.index <= as_of_ts]
-        
-        if len(hs300_nav) < REGIME_MA_PERIOD:
-            return "bear"
-        
-        # 计算MA120
-        ma = hs300_nav.rolling(window=REGIME_MA_PERIOD).mean().iloc[-1]
-        current = hs300_nav.iloc[-1]
-        
-        # 判断regime
-        if current > ma:
-            return "bull"
-        else:
-            return "bear"
-    except Exception:
-        return "bear"  # 异常时默认熊市
 
-
-def resolve_weights(water: float, regime: str = "bull"):
+def resolve_weights(water: float):
     """
-    V4.1 双系统权重解析:
-      - regime="bull" (MA120上方): 动量主导 + 估值加成，不用earn
-      - regime="bear" (MA120下方): earn_momentum主导，减弱动量
+    V4.0 固定权重解析
     
     返回: (w_value, w_alpha, w_momentum, w_earn_momentum, w_val_pct_bonus), mode_str
     """
-    if regime == "bull":
-        weights = (W_VALUE, W_ALPHA, W_MOMENTUM, W_EARN_MOMENTUM, W_VAL_PCT_BONUS)
-        mode = "牛市(MA120上方)"
-    else:
-        weights = (W_VALUE_BEAR, W_ALPHA_BEAR, W_MOMENTUM_BEAR, 
-                   W_EARN_MOMENTUM_BEAR, W_VAL_PCT_BONUS_BEAR)
-        mode = "熊市(MA120下方)"
-    
+    weights = (W_VALUE, W_ALPHA, W_MOMENTUM, W_EARN_MOMENTUM, W_VAL_PCT_BONUS)
+    mode = "V4.0固定权重"
     return weights, mode
+
 
 
 def score_fund(code: str, as_of: str = None, bt: bool = False, indices=None,
@@ -350,11 +305,9 @@ def finalize(rows: list, as_of: str = None, use_global_ref: bool = False) -> pd.
     df["penalties"] = df["penalties"].apply(_safe_list)
     df["penalty_detail"] = df["penalty_detail"].apply(_safe_dict)
 
-    # V4.1: Regime检测 + 双系统权重
+    # V4.0: 固定权重
     water = market_water(as_of)
-    regime = detect_regime(as_of)
-    (wv, wa, wm, we, wval_bonus), mode = resolve_weights(water, regime)
-    
+    (wv, wa, wm, we, wval_bonus), mode = resolve_weights(water)
     ref = get_global_ref_universe(as_of) if use_global_ref else None
     global_mom_ok = ref is not None
     if global_mom_ok:
@@ -404,10 +357,10 @@ def finalize(rows: list, as_of: str = None, use_global_ref: bool = False) -> pd.
     df["S_v37"] = [total(r) for _, r in df.iterrows()]
 
     df["S_total"] = df["S_v37"]
-    df["model_version"] = "V4.1"
+    df["model_version"] = "V4.0"
 
     df["water"] = None if water != water else round(water, 4)
-    df["regime"] = regime
+    df["regime"] = "FIXED"  # V4.0: 固定权重，无regime切换
     df["weights_mode"] = mode
     df["w_value"], df["w_alpha"], df["w_mom"], df["w_earn"], df["w_val"] = wv, wa, wm, we, wval_bonus
 

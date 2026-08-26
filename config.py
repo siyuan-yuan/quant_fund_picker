@@ -28,26 +28,20 @@
 """
 
 # ============ V3.7 线性合成的因子权重 ============
-# ============ V4.0 双系统权重 (Regime-Adaptive) ============
-# 实验依据 (exp_regime_switch.py, 54583观察点 × 2011-2026):
-#   MA120上方(牛市): earn_momentum IC=-0.09, F_momentum IC=+0.18, val_pct IC=+0.14
-#   MA120下方(熊市): earn_momentum IC=+0.29, F_momentum IC=+0.06
-#   → 牛市和熊市需要完全不同的因子组合
+# ============ V4.0 固定权重（最优组合）============
+# 实验依据 (exp_implementation.py, 2022-2026公平比较):
+#   最优方案 WF_IC=+0.351 vs 当前系统+0.238 (提升47%), 正IC率=83%
+#   比V4.1双系统（IC=+0.152）更稳定，无需regime切换
 
-# --- 默认权重（牛市模式：MA120上方）---
-# 动量主导 + 估值辅助 + 不用earn(牛市中earn反向)
-W_VALUE, W_ALPHA, W_MOMENTUM = 0.15, 0.30, 0.40
-W_EARN_MOMENTUM = 0.00  # 牛市中earn_momentum IC=-0.09，不用
-W_VAL_PCT_BONUS = 0.15  # 牛市中val_pct IC=+0.14，作为额外奖励
+# V4.0固定权重：Mom35 + IR30 + Earn20 + Alpha15
+W_VALUE, W_ALPHA, W_MOMENTUM = 0.15, 0.30, 0.35
+W_EARN_MOMENTUM = 0.20  # 行业盈利动量（前视性信号）
+W_VAL_PCT_BONUS = 0.00  # 不使用（实验证明不稳定）
 
-# --- 熊市模式权重（MA120下方）---
-# earn_momentum主导（IC=+0.29，最强信号）
-W_VALUE_BEAR, W_ALPHA_BEAR, W_MOMENTUM_BEAR = 0.00, 0.30, 0.30
-W_EARN_MOMENTUM_BEAR = 0.40  # 熊市中earn_momentum IC=+0.29
-W_VAL_PCT_BONUS_BEAR = 0.00  # 熊市中val_pct IC=+0.05，不用
-
-# --- Regime检测参数 ---
-REGIME_MA_PERIOD = 120  # MA120（120交易日≈6个月）
+# --- V3.2 Regime 自适应（保留兼容）---
+REGIME_LOW_WATER = 0.20
+W_VALUE_LOW, W_ALPHA_LOW, W_MOM_LOW = 0.10, 0.30, 0.40
+W_EARN_MOMENTUM_LOW = 0.20
 # 检测逻辑：沪深300收盘价 > MA120 → 牛市，否则 → 熊市
 
 # ============ V3.2 旧Regime参数（保留兼容）============
