@@ -1,13 +1,21 @@
 # -*- coding: utf-8 -*-
 """
 评分引擎: 单基金全流水线 + 跨截面动量排名 + 总分合成
+
+V4.1 双系统 Regime-Adaptive:
+  牛市(MA120上方): F_momentum主导 + val_pct加成 + 不用earn(IC=-0.09)
+  熊市(MA120下方): F_earn_momentum主导(IC=+0.29) + 减弱F_momentum
+  实验依据: exp_regime_switch.py (54583观察点 × 476基金 × 2011-2026)
 """
 import numpy as np
 import pandas as pd
 
-from config import (W_VALUE, W_ALPHA, W_MOMENTUM, W_EARN_MOMENTUM, RATING_BANDS,
-                    REGIME_LOW_WATER,
-                    W_VALUE_LOW, W_ALPHA_LOW, W_MOM_LOW, W_EARN_MOMENTUM_LOW,
+from config import (W_VALUE, W_ALPHA, W_MOMENTUM, W_EARN_MOMENTUM,
+                    W_VAL_PCT_BONUS,
+                    W_VALUE_BEAR, W_ALPHA_BEAR, W_MOMENTUM_BEAR,
+                    W_EARN_MOMENTUM_BEAR, W_VAL_PCT_BONUS_BEAR,
+                    REGIME_MA_PERIOD,
+                    RATING_BANDS, REGIME_LOW_WATER,
                     RBSA_INDICES, OVERSEAS_SRCS,
                     TENURE_CAP_DAYS, YOUNG_MAX_DAYS)
 import provider, rbsa, factors, risk, industry_signals
@@ -34,12 +42,59 @@ def market_water(as_of=None) -> float:
     return rbsa.market_water_level(as_of=as_of)
 
 
-def resolve_weights(water: float):
-    """V4.0 regime自适应: 水位≤20% → 左侧模式(动量↑ 估值↓)
-    返回: (w_value, w_alpha, w_momentum, w_earn_momentum), mode"""
-    if water is not None and water == water and water <= REGIME_LOW_WATER:
-        return (W_VALUE_LOW, W_ALPHA_LOW, W_MOM_LOW, W_EARN_MOMENTUM_LOW), "左侧低估区"
-    return (W_VALUE, W_ALPHA, W_MOMENTUM, W_EARN_MOMENTUM), "标准"
+def detect_regime(as_of=None) -> str:
+    """
+    V4.1 Regime检测: 基于沪深300与MA120的位置关系
+    
+    实验依据 (exp_regime_switch.py):
+      MA120上方(牛市): earn_momentum IC=-0.09, F_momentum IC=+0.18, val_pct IC=+0.14
+      MA120下方(熊市): earn_momentum IC=+0.29, F_momentum IC=+0.06
+    
+    返回: "bull" 或 "bear"
+    """
+    # 获取沪深300数据
+    try:
+        hs300_nav = provider.get_index_close("sh000300")
+        if hs300_nav is None or len(hs300_nav) < REGIME_MA_PERIOD:
+            return "bear"  # 数据不足时默认熊市（保守策略）
+        
+        if as_of is not None:
+            as_of_ts = pd.Timestamp(as_of)
+            hs300_nav = hs300_nav[hs300_nav.index <= as_of_ts]
+        
+        if len(hs300_nav) < REGIME_MA_PERIOD:
+            return "bear"
+        
+        # 计算MA120
+        ma = hs300_nav.rolling(window=REGIME_MA_PERIOD).mean().iloc[-1]
+        current = hs300_nav.iloc[-1]
+        
+        # 判断regime
+        if current > ma:
+            return "bull"
+        else:
+            return "bear"
+    except Exception:
+        return "bear"  # 异常时默认熊市
+
+
+def resolve_weights(water: float, regime: str = "bull"):
+    """
+    V4.1 双系统权重解析:
+      - regime="bull" (MA120上方): 动量主导 + 估值加成，不用earn
+      - regime="bear" (MA120下方): earn_momentum主导，减弱动量
+    
+    返回: (w_value, w_alpha, w_momentum, w_earn_momentum, w_val_pct_bonus), mode_str
+    """
+    if regime == "bull":
+        weights = (W_VALUE, W_ALPHA, W_MOMENTUM, W_EARN_MOMENTUM, W_VAL_PCT_BONUS)
+        mode = "牛市(MA120上方)"
+    else:
+        weights = (W_VALUE_BEAR, W_ALPHA_BEAR, W_MOMENTUM_BEAR, 
+                   W_EARN_MOMENTUM_BEAR, W_VAL_PCT_BONUS_BEAR)
+        mode = "熊市(MA120下方)"
+    
+    return weights, mode
 
 
 def score_fund(code: str, as_of: str = None, bt: bool = False, indices=None,
@@ -295,8 +350,11 @@ def finalize(rows: list, as_of: str = None, use_global_ref: bool = False) -> pd.
     df["penalties"] = df["penalties"].apply(_safe_list)
     df["penalty_detail"] = df["penalty_detail"].apply(_safe_dict)
 
+    # V4.1: Regime检测 + 双系统权重
     water = market_water(as_of)
-    (wv, wa, wm, we), mode = resolve_weights(water)
+    regime = detect_regime(as_of)
+    (wv, wa, wm, we, wval_bonus), mode = resolve_weights(water, regime)
+    
     ref = get_global_ref_universe(as_of) if use_global_ref else None
     global_mom_ok = ref is not None
     if global_mom_ok:
@@ -324,7 +382,7 @@ def finalize(rows: list, as_of: str = None, use_global_ref: bool = False) -> pd.
         df["F_earn_momentum"] = np.nan
 
     def total(r):
-        # V4.0: 四因子加权 (F_momentum + F_alpha + F_earn_momentum + F_value)
+        # V4.1: 五因子加权 (F_value + F_alpha + F_momentum + F_earn_momentum + val_pct_bonus)
         # 缺失因子 → 按剩余因子归一化, 不做惩罚性置零
         num, den = 0.0, 0.0
         if not pd.isna(r["F_value"]):
@@ -335,22 +393,23 @@ def finalize(rows: list, as_of: str = None, use_global_ref: bool = False) -> pd.
             num += wm * r["F_momentum"]; den += wm
         if not pd.isna(r.get("F_earn_momentum", np.nan)):
             num += we * r["F_earn_momentum"]; den += we
+        # V4.1: val_pct加成（牛市中val_pct IC=+0.14，熊市中IC=+0.05可忽略）
+        if wval_bonus > 0 and not pd.isna(r.get("val_pct", np.nan)):
+            # val_pct转为0-100分（低PE=高分，与F_value方向一致但独立）
+            val_score = (1 - r["val_pct"]) * 100
+            num += wval_bonus * val_score; den += wval_bonus
         base = (num / den) if den > 1e-9 else 0.0
         return round(risk.apply_penalties(base, r["penalties"] or []), 1)
 
     df["S_v37"] = [total(r) for _, r in df.iterrows()]
 
-    # ---------- 模型裁决 (2026-08-10 模型动物园) ----------
-    # V3.7 规则合成模型 = 唯一最优模型:
-    #   全历史严格 walk-forward (2006-09→2026-03, 235季×217只, 无前视) IC=0.113 (t=8.1),
-    #   高于全部 66 个 ML 配置; 端到端回测三窗口 Calmar 0.33/0.27/0.64 全胜。
-    # 详见 output/model_zoo_report.md; V4 实验代码与产物已全部移除。
     df["S_total"] = df["S_v37"]
-    df["model_version"] = "V4.0"
+    df["model_version"] = "V4.1"
 
     df["water"] = None if water != water else round(water, 4)
+    df["regime"] = regime
     df["weights_mode"] = mode
-    df["w_value"], df["w_alpha"], df["w_mom"], df["w_earn"] = wv, wa, wm, we
+    df["w_value"], df["w_alpha"], df["w_mom"], df["w_earn"], df["w_val"] = wv, wa, wm, we, wval_bonus
 
     def rate(s):
         for th, lab in RATING_BANDS:

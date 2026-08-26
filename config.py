@@ -28,14 +28,30 @@
 """
 
 # ============ V3.7 线性合成的因子权重 ============
-W_VALUE, W_ALPHA, W_MOMENTUM = 0.15, 0.30, 0.35
-W_EARN_MOMENTUM = 0.20  # V4.0: 行业盈利动量权重（前视性信号）
+# ============ V4.0 双系统权重 (Regime-Adaptive) ============
+# 实验依据 (exp_regime_switch.py, 54583观察点 × 2011-2026):
+#   MA120上方(牛市): earn_momentum IC=-0.09, F_momentum IC=+0.18, val_pct IC=+0.14
+#   MA120下方(熊市): earn_momentum IC=+0.29, F_momentum IC=+0.06
+#   → 牛市和熊市需要完全不同的因子组合
 
-# ============ V3.2 Regime 自适应 (回测证据驱动) ============
-# 底部水位 7.6%~18.3%, 非底部最低47% → 20%阈值最大间隔分离
-REGIME_LOW_WATER = 0.20                       # 大盘水位≤20% → 左侧低估区
-W_VALUE_LOW, W_ALPHA_LOW, W_MOM_LOW = 0.10, 0.30, 0.40  # V4.0: 左侧区也降低估值权重
-W_EARN_MOMENTUM_LOW = 0.20  # 左侧区盈利动量权重不变
+# --- 默认权重（牛市模式：MA120上方）---
+# 动量主导 + 估值辅助 + 不用earn(牛市中earn反向)
+W_VALUE, W_ALPHA, W_MOMENTUM = 0.15, 0.30, 0.40
+W_EARN_MOMENTUM = 0.00  # 牛市中earn_momentum IC=-0.09，不用
+W_VAL_PCT_BONUS = 0.15  # 牛市中val_pct IC=+0.14，作为额外奖励
+
+# --- 熊市模式权重（MA120下方）---
+# earn_momentum主导（IC=+0.29，最强信号）
+W_VALUE_BEAR, W_ALPHA_BEAR, W_MOMENTUM_BEAR = 0.00, 0.30, 0.30
+W_EARN_MOMENTUM_BEAR = 0.40  # 熊市中earn_momentum IC=+0.29
+W_VAL_PCT_BONUS_BEAR = 0.00  # 熊市中val_pct IC=+0.05，不用
+
+# --- Regime检测参数 ---
+REGIME_MA_PERIOD = 120  # MA120（120交易日≈6个月）
+# 检测逻辑：沪深300收盘价 > MA120 → 牛市，否则 → 熊市
+
+# ============ V3.2 旧Regime参数（保留兼容）============
+REGIME_LOW_WATER = 0.20
 REGIME_HIGH_WATER = 0.90                      # ≥90% → 防御姿态(展示)
 WATER_PANEL = "style6"                        # 水位计仅用6风格等权(宽基水位的代表)
 
