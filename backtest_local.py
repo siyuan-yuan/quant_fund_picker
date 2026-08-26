@@ -85,23 +85,33 @@ def mdd_factor(rm, w):
 
 
 def score_from_raw(g):
-    """原料行 → V3.7 规则合成总分（唯一模型，2026-08-10 模型动物园裁决）。
-
-    与 engine.finalize 保持同口径，保证线上/回测/榜单一致。
-    全历史严格 walk-forward 验证 V3.7 为最优模型（IC 0.113 > 全部 66 个 ML 配置），
-    详见 output/model_zoo_report.md；V4 评分分支已移除。
+    """原料行 → V4.0 固定权重总分。
+    
+    V4.0改进（基于exp_comprehensive.py + exp_implementation.py实验）:
+    1. F_alpha只用IR胜率（移除down_capture，IC≈0）
+    2. 新增F_earn_momentum（行业盈利动量，IC=+0.102，稳定度71%）
+    3. 固定权重：0.35×F_momentum + 0.30×F_alpha + 0.20×F_earn_momentum + 0.15×F_value
+    
+    如果存在S_engine列（engine.finalize()的V4.0分数），直接使用；
+    否则用V3.7逻辑计算（向后兼容旧数据）。
     """
     g = g.copy()
+    
+    # V4.1: 如果存在S_engine列，直接使用engine.finalize()的V4.1分数
+    if "S_engine" in g.columns and g["S_engine"].notna().any():
+        g["S"] = g["S_engine"]
+        g["model_version"] = "V4.0"
+        return g
+    
+    # 向后兼容：如果没有S_engine，用V3.7逻辑
     g["rank4"] = g["r4"].rank(pct=True)
     g["rank7"] = g["r7"].rank(pct=True)
     v37 = []
     for _, r in g.iterrows():
         fv = (np.nan if (r.val_cov < 0.5 or pd.isna(r.val_pct))
               else factors.valuation_base_score(r.val_pct, r.trend_ok))
-        al = [x for x in [factors.ir_score_smooth(r.wr) if pd.notna(r.wr) else np.nan,
-                          factors.dc_score_smooth(r.dc) if pd.notna(r.dc) else np.nan]
-              if pd.notna(x)]
-        fa = float(np.mean(al)) if al else np.nan
+        # V4.0: F_alpha只用IR胜率（移除down_capture）
+        fa = factors.ir_score_smooth(r.wr) if pd.notna(r.wr) else np.nan
         fm = factors.momentum_score_smooth_m1(r.rank4, r.rank7)
         pen = r.other_pen * mdd_factor(r.R_MDD, r.water)
         num = ((r.wv * min(max(fv, 0), 100)) if pd.notna(fv) else 0) \
