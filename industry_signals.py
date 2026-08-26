@@ -54,27 +54,26 @@ def get_industry_earn_momentum(as_of: str = None) -> dict:
     
     result = {}
     
-    for src, _, name, pe_key, _ in RBSA_INDICES:
+    for src, code, name, pe_key, _ in RBSA_INDICES:
         if pe_key.startswith("none") or not pe_key:
             continue  # 无PE数据的跳过
-        
+
         try:
             pe = provider.get_pe_by_key(pe_key)
             if pe is None or len(pe) < 200:
                 continue
-            
-            # 获取价格数据
+
+            # 获取价格数据(一律用指数代码而非 pe_key 取本地缓存;
+            # 旧代码把 pe_key("lg:上证50"/"csi:H30090")当新浪代码调 get_index_close,
+            # 找不到缓存就同步打网络源失败, 每个季度拖慢数十秒, 且相关腿永远算不出盈利动量)
             if src == "csindex":
-                close = provider.get_index_close_csindex(pe_key.split(":")[-1] if ":" in pe_key else pe_key)
+                close = provider.get_index_close_csindex(code)
             elif src in ("us_sina", "hk_sina"):
-                # 境外指数用价格
-                code = pe_key.replace("csi:", "")
-                close = provider.get_index_close(pe_key)
-                if close is None or len(close) < 200:
-                    continue
+                # HK 腿: PE 来自中证代理指数(H30090/H30533), 收盘价取同源中证指数
+                close = provider.get_index_close_csindex(pe_key.replace("csi:", ""))
             else:
-                close = provider.get_index_close(pe_key)
-            
+                close = provider.get_index_close(code)
+
             if close is None or len(close) < 200:
                 continue
             
