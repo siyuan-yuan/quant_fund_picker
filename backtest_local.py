@@ -26,6 +26,10 @@ import numpy as np
 import pandas as pd
 
 import provider
+# 历史回测: 过期缓存就是事实(与 wf_backtest.py 一致)。回测/现打分期间绝不后台打
+# 今日源刷新缓存, 也不因缓存过期而阻塞 —— 历史净值/PE 不会变, 缺失文件仍会同步抓取。
+provider.STALE_OK = True
+
 import rbsa, factors
 from engine import score_fund, finalize
 from config import (STRAT_BUY_TH, STRAT_SELL_TH, STRAT_SLOTS, STRAT_VERSION,
@@ -72,6 +76,27 @@ def resolve_score_suffix(suffix_arg, cache_dir=CACHE_DIR):
         if suf and not suf.startswith("_"):
             suf = "_" + suf
         return suf
+
+
+def load_pit_universe(path=None):
+    """PiT 模式缺缓存时自动打分的候选宇宙。
+
+    默认 top100_history_pool.txt —— 该文件在 top100_history_pool.py 中就是为
+    "缓存预热"准备的(217只, 与仓库内建评分缓存后缀 _2e4ec0f5 同源);
+    可通过 --pit-universe 指定其他代码文件(每行一个6位代码)。
+
+    注意: 它只是"打分宇宙"。买入仍严格限制为当日 S 分 TopN(eligible_by_date),
+    不会因为宇宙文件是历史并集池而在买入端引入未来函数。
+    """
+    if not path:
+        path = "top100_history_pool.txt"
+    if not os.path.exists(path):
+        raise FileNotFoundError(f"PiT 打分宇宙文件不存在: {path}")
+    codes = [l.strip().zfill(6) for l in open(path, encoding="utf-8")
+             if l.strip() and l.strip()[0].isdigit()]
+    if not codes:
+        raise ValueError(f"PiT 打分宇宙文件为空: {path}")
+    return path, sorted(set(codes))
 
 
 # ============ 1. 打分面板: 每个季点一份(优先复用已有, 缺失则现打现存) ============
@@ -161,23 +186,55 @@ def harvest_date(d, codes):
     return df
 
 
-def build_panel(dates, codes, default_universe, rebuild=False, pool_mode="default", score_suffix="auto"):
+def build_panel(dates, codes, default_universe, rebuild=False, pool_mode="default",
+                score_suffix="auto", pit_universe=None):
     """返回 DataFrame: date × code 的原始量+S; 逐季点缓存"""
     os.makedirs(CACHE_DIR, exist_ok=True)
     parts = []
     if pool_mode == "pit-top":
         suf = resolve_score_suffix(score_suffix, CACHE_DIR)
+        universe_path, universe = None, None
+        if not suf and score_suffix == "auto":
+            # 本地完全没有评分缓存 → 首次运行: 默认采用打分宇宙同源后缀,
+            # 与仓库内建缓存(如 *_2e4ec0f5.csv)保持一致, 后续 auto 可直接复用。
+            try:
+                universe_path, universe = load_pit_universe(pit_universe)
+                suf = "_" + hashlib.md5(",".join(universe).encode()).hexdigest()[:8]
+            except Exception as e:
+                print(f"  [PiT] 无法加载打分宇宙: {e}")
+                suf = ""
         print(f"  [PiT] 使用评分缓存后缀: '{suf or '(无后缀)'}'")
         for d in dates:
             ck = f"{CACHE_DIR}/{d}{suf}.csv"
-            if os.path.exists(ck):
+            if (not rebuild) and os.path.exists(ck):
                 g = pd.read_csv(ck, dtype={"code": str})
                 if not g.empty:
                     g = score_from_raw(g)
                     g["date"] = d
                     parts.append(g[["date", "code", "S", "water", "R_MDD"]])
+                continue
+            # 缓存缺失(或 --rebuild 强制重打): 现打分并永久缓存
+            if universe is None:
+                try:
+                    universe_path, universe = load_pit_universe(pit_universe)
+                    print(f"  [PiT] 缺失/需重打的季度将逐季现打分并永久缓存 "
+                          f"(宇宙: {universe_path} {len(universe)}只; 全区间一次性约10-40分钟, 之后秒级)",
+                          flush=True)
+                except Exception as e:
+                    print(f"  [PiT] ⚠ 无法加载打分宇宙({e}), 缺失季度无法自动补齐", flush=True)
+                    universe = []
+            if not universe:
+                print(f"  [warn] {d} 无评分缓存且无法自动打分, 跳过")
+                continue
+            print(f"  [PiT] {d} 无缓存 → 现打分 {len(universe)} 只...", flush=True)
+            g = harvest_date(d, universe)
+            if not g.empty:
+                g.to_csv(ck, index=False, encoding="utf-8-sig")
+                g = score_from_raw(g)
+                g["date"] = d
+                parts.append(g[["date", "code", "S", "water", "R_MDD"]])
             else:
-                print(f"  [warn] {d} 无评分缓存数据 ({ck}), 跳过")
+                print(f"  [warn] {d} 现打分无结果(该时点宇宙内基金均无足够历史), 跳过")
         return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
     uid = "" if default_universe else "_" + hashlib.md5(",".join(sorted(codes)).encode()).hexdigest()[:8]
@@ -544,9 +601,15 @@ def report(ec, tr, bench, args, dates, names, tag):
     cagr = (1 + tot) ** (1 / yrs) - 1
     dd = ec.drawdown.min()
     bb = bench.loc[T0:T1]; btot = bb.iloc[-1] / bb.iloc[0] - 1
-    win = (tr.net_ret > 0).mean() if len(tr) else np.nan
-    aw = tr.loc[tr.net_ret > 0, "net_ret"].mean() if (tr.net_ret > 0).any() else np.nan
-    al = tr.loc[tr.net_ret <= 0, "net_ret"].mean() if (tr.net_ret <= 0).any() else np.nan
+    # 空交易表防护: 区间内无任何买卖信号时 tr 无列, 直接访问会 AttributeError
+    if len(tr):
+        n_pos = tr.net_ret > 0
+        win = n_pos.mean()
+        aw = tr.loc[n_pos, "net_ret"].mean() if n_pos.any() else np.nan
+        al = tr.loc[~n_pos, "net_ret"].mean() if (~n_pos).any() else np.nan
+    else:
+        n_pos = pd.Series(dtype=bool)
+        win = aw = al = np.nan
     invested = (ec.n_pos > 0).mean()
 
     S = []
@@ -582,7 +645,8 @@ def report(ec, tr, bench, args, dates, names, tag):
         S.append(f"| 交易笔数 | {len(tr)} |")
         S.append(f"| 胜率 | **{win:.1%}** ({(tr.net_ret > 0).sum()}胜{(tr.net_ret <= 0).sum()}负) |")
         S.append(f"| 平均净收益/笔 | {tr.net_ret.mean():+.1%} |")
-        pf = f"{abs(aw / al):.2f}" if pd.notna(al) and al != 0 else "—(无亏损笔)"
+        pf = (f"{abs(aw / al):.2f}" if (pd.notna(aw) and pd.notna(al) and al != 0)
+              else "—(样本不足: 无盈利笔或无亏损笔)")
         S.append(f"| 盈亏比 | {pf} (均盈{aw:+.1%} / 均亏{al if pd.notna(al) else 0:+.1%}) |")
         S.append(f"| 平均持有 | {tr.hold_days.mean():.0f} 天 |")
         S.append(f"| 累计盈亏 | {tr.pnl_yuan.sum():+,.0f} 元 |")
@@ -679,13 +743,18 @@ def main():
     ap.add_argument("--crisis-ma", type=int, default=STRAT_CRISIS_MA)
     ap.add_argument("--crisis-vol-window", type=int, default=STRAT_CRISIS_VOL_WINDOW)
     ap.add_argument("--crisis-vol-q", type=float, default=STRAT_CRISIS_VOL_Q)
-    ap.add_argument("--pool-mode", choices=["default", "pit-top"], default="pit-top",
-                    help="候选池模式: default 为普通模式, pit-top 为严格历史动态池复盘")
+    ap.add_argument("--pool-mode", choices=["default", "pit-top"], default=None,
+                    help="候选池模式: default 为普通模式, pit-top 为严格历史动态池复盘(默认)")
     ap.add_argument("--pit-top-n", dest="pit_top_n", type=int, default=100,
                     help="严格历史复盘模式下，每个决策日买入仅限当日 S 分排名前 N 的基金")
     ap.add_argument("--score-suffix", dest="score_suffix", default="auto",
                     help="评分缓存后缀，如 _2e4ec0f5，或者 auto 自动选择覆盖行数最多的后缀")
+    ap.add_argument("--pit-universe", dest="pit_universe", default=None,
+                    help="PiT 模式缺失缓存时自动打分的宇宙文件(默认 top100_history_pool.txt, 每行一个6位代码)")
     args = ap.parse_args()
+    # 未显式指定候选池模式时: 给了 --codes 视为普通自选池(兼容 README 用法), 否则默认严格 PiT 复盘
+    if args.pool_mode is None:
+        args.pool_mode = "default" if args.codes else "pit-top"
 
     # 读取基金池
     if args.pool_mode == "pit-top":
@@ -703,6 +772,11 @@ def main():
         default_universe = False
         print(f"[池] 自定义 {len(codes)} 只: {args.codes}")
     else:
+        if not os.path.isdir(FACTOR_ROWS) or not os.listdir(FACTOR_ROWS):
+            print(f"❌ {FACTOR_ROWS}/ 不存在或为空, 无法构建全市场池。")
+            print("   建议: 用 --pool-mode pit-top (缺失缓存会自动逐季现打分并缓存),")
+            print("         或 --codes <代码文件> 指定自选池回测。")
+            return
         codes = sorted(set(pd.concat([pd.read_csv(f"{FACTOR_ROWS}/{f}", dtype={"code": str})["code"]
                                       for f in os.listdir(FACTOR_ROWS) if f.endswith(".csv")]).tolist()))
         default_universe = True
@@ -714,7 +788,15 @@ def main():
     print(f"[打分区间] {qs[0]} → {qs[-1]} 共 {len(qs)} 个月末")
 
     panel = build_panel(qs, codes, default_universe, args.rebuild,
-                        pool_mode=args.pool_mode, score_suffix=args.score_suffix)
+                        pool_mode=args.pool_mode, score_suffix=args.score_suffix,
+                        pit_universe=args.pit_universe)
+
+    if panel is None or len(panel) == 0:
+        print("❌ 面板为空: 没有任何可用打分月份, 程序退出。")
+        print("   常见原因: 首次运行但网络不可用(净值/指数抓取失败) → 联网后重试;")
+        print("             或 --start 早于宇宙内所有基金成立日期;")
+        print("             或 --pit-universe 指定的宇宙文件为空/路径错误。")
+        return
     print(f"[面板] 评分行 {len(panel)} | S>{args.buy:.0f} 信号 {int((panel.S > args.buy).sum())} 个")
 
     # 过滤掉没有打分数据的月份

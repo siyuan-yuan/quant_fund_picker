@@ -355,6 +355,7 @@ python backtest_local.py --codes mypool.txt   # 自定义池(每行一个6位代
 python backtest_local.py --rebuild            # 换模型参数后强制重打分
 ```
 - **全自动续期**: 新季度首次自动 PiT 打分(~20s)并永久缓存 `output/bt_scores_cache/`, 二次秒跑
+- **首次运行无缓存**: 缺失季度自动逐季现打分并永久缓存(默认宇宙 `top100_history_pool.txt`, 与仓库内建缓存后缀 `_2e4ec0f5` 同源; 全区间一次性约 10-40 分钟, 之后秒级)。可用 `--pit-universe <代码文件>` 换打分宇宙, 用 `--rebuild` 强制重打
 - **三本账**: `bt_trades_<tag>.csv`(逐笔买卖: 价/分/持有天数/净收益/年化/盈亏元) + `bt_daily_<tag>.csv`(逐日净值/回撤/现金/CPPI状态) + `bt_summary_<tag>.md`(汇总报告) + `bt_equity_<tag>.png`(净值图 vs 沪深300)
 - 默认输出 tag 前缀为 `v38_`; 旧版回测为 `legacy_`。
 
@@ -392,6 +393,7 @@ python backtest_local.py \
 > 严格历史复盘请用 `--pool-mode pit-top`（无需传入静态 `--codes`，自动从 `output/bt_scores_cache/` 历史缓存面板中选出每个决策日当日的 TopN 可买池）。
 
 - **全自动续期**: 新季度首次自动 PiT 打分(~20s)并永久缓存 `output/bt_scores_cache/`, 二次秒跑
+- **首次运行无缓存**: 缺失季度自动逐季现打分并永久缓存(默认宇宙 `top100_history_pool.txt`, 与仓库内建缓存后缀 `_2e4ec0f5` 同源; 全区间一次性约 10-40 分钟, 之后秒级)。可用 `--pit-universe <代码文件>` 换打分宇宙, 用 `--rebuild` 强制重打
 - **三本账**: `bt_trades_<tag>.csv`(逐笔买卖: 价/分/持有天数/净收益/年化/盈亏元) + `bt_daily_<tag>.csv`(逐日净值/回撤/现金/CPPI状态) + `bt_summary_<tag>.md`(汇总报告) + `bt_equity_<tag>.png`(净值图 vs 沪深300)
 - 默认输出 tag 前缀为 `v38_`; 旧版回测为 `legacy_`。
 
