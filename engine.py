@@ -5,12 +5,12 @@
 import numpy as np
 import pandas as pd
 
-from config import (W_VALUE, W_ALPHA, W_MOMENTUM, RATING_BANDS,
+from config import (W_VALUE, W_ALPHA, W_MOMENTUM, W_EARN_MOMENTUM, RATING_BANDS,
                     REGIME_LOW_WATER,
-                    W_VALUE_LOW, W_ALPHA_LOW, W_MOM_LOW,
+                    W_VALUE_LOW, W_ALPHA_LOW, W_MOM_LOW, W_EARN_MOMENTUM_LOW,
                     RBSA_INDICES, OVERSEAS_SRCS,
                     TENURE_CAP_DAYS, YOUNG_MAX_DAYS)
-import provider, rbsa, factors, risk
+import provider, rbsa, factors, risk, industry_signals
 
 
 def _safe_list(v):
@@ -35,10 +35,11 @@ def market_water(as_of=None) -> float:
 
 
 def resolve_weights(water: float):
-    """V3.2 regime自适应: 水位≤20% → 左侧模式(估值↑ 动量↓)"""
+    """V4.0 regime自适应: 水位≤20% → 左侧模式(动量↑ 估值↓)
+    返回: (w_value, w_alpha, w_momentum, w_earn_momentum), mode"""
     if water is not None and water == water and water <= REGIME_LOW_WATER:
-        return (W_VALUE_LOW, W_ALPHA_LOW, W_MOM_LOW), "左侧低估区"
-    return (W_VALUE, W_ALPHA, W_MOMENTUM), "标准"
+        return (W_VALUE_LOW, W_ALPHA_LOW, W_MOM_LOW, W_EARN_MOMENTUM_LOW), "左侧低估区"
+    return (W_VALUE, W_ALPHA, W_MOMENTUM, W_EARN_MOMENTUM), "标准"
 
 
 def score_fund(code: str, as_of: str = None, bt: bool = False, indices=None,
@@ -147,10 +148,13 @@ def score_fund(code: str, as_of: str = None, bt: bool = False, indices=None,
     active = (ret - bench).dropna()
     wr = factors.rolling_ir_winrate(active)
     dc = factors.downside_capture(ret, bench)
-    s_ir, s_dc = factors.ir_score_smooth(wr), factors.dc_score_smooth(dc)
-    subs = [x for x in (s_ir, s_dc) if not np.isnan(x)]
-    f_alpha = float(np.mean(subs)) if subs else np.nan
+    # V4.0: F_alpha只用IR胜率（实验证明down_capture的IC≈0，无预测能力）
+    f_alpha = factors.ir_score_smooth(wr) if not np.isnan(wr) else np.nan
+    s_ir, s_dc = factors.ir_score_smooth(wr), factors.dc_score_smooth(dc)  # 保留s_dc用于输出
 
+    # --- F_earn_momentum (V4.0: 行业盈利动量前视性信号) ---
+    earn_mom_raw = industry_signals.fund_earn_momentum(w, as_of=as_of)
+    
     # --- 动量原始收益 (截面排名在 universe 层完成) ---
     r4, r7 = factors.lagged_momentum_returns(adj)
 
@@ -185,6 +189,7 @@ def score_fund(code: str, as_of: str = None, bt: bool = False, indices=None,
         "down_capture": None if np.isnan(dc) else round(dc, 3),
         "s_dc": None if np.isnan(s_dc) else round(s_dc, 1),
         "F_alpha": None if np.isnan(f_alpha) else round(f_alpha, 1),
+        "earn_mom_raw": None if (earn_mom_raw is None or np.isnan(earn_mom_raw)) else round(earn_mom_raw, 6),
         "mom_4m1m": None if np.isnan(r4) else round(r4, 4),
         "mom_7m1m": None if np.isnan(r7) else round(r7, 4),
         "tenure_days": tenure_max, "is_passive": is_passive,
@@ -280,6 +285,8 @@ def finalize(rows: list, as_of: str = None, use_global_ref: bool = False) -> pd.
     # 这里把 finalize 依赖的列一次性补齐并做类型归一化，让错误行保留但绝不拖垮整批。
     for col, default in [("mom_4m1m", np.nan), ("mom_7m1m", np.nan),
                          ("F_value", np.nan), ("F_alpha", np.nan),
+                         ("F_earn_momentum", np.nan),
+                         ("earn_mom_raw", np.nan),
                          ("val_pct", np.nan), ("ma20_dist", np.nan),
                          ("ir_winrate", np.nan), ("down_capture", np.nan),
                          ("penalties", None), ("penalty_detail", None)]:
@@ -289,7 +296,7 @@ def finalize(rows: list, as_of: str = None, use_global_ref: bool = False) -> pd.
     df["penalty_detail"] = df["penalty_detail"].apply(_safe_dict)
 
     water = market_water(as_of)
-    (wv, wa, wm), mode = resolve_weights(water)
+    (wv, wa, wm, we), mode = resolve_weights(water)
     ref = get_global_ref_universe(as_of) if use_global_ref else None
     global_mom_ok = ref is not None
     if global_mom_ok:
@@ -308,9 +315,17 @@ def finalize(rows: list, as_of: str = None, use_global_ref: bool = False) -> pd.
         df["ref_stamp"] = None
     df["F_momentum"] = df.apply(
         lambda r: factors.momentum_score_smooth_m1(r["rank4"], r["rank7"]), axis=1).round(1)   # V3.7 平滑M1 (t 3.20→3.33)
+    
+    # V4.0: F_earn_momentum = 截面百分位排名(盈利动量)
+    if "earn_mom_raw" in df and df["earn_mom_raw"].notna().sum() >= 30:
+        df["F_earn_momentum"] = df["earn_mom_raw"].rank(pct=True, na_option="keep") * 100
+        df["F_earn_momentum"] = df["F_earn_momentum"].round(1)
+    else:
+        df["F_earn_momentum"] = np.nan
 
     def total(r):
-        # V3.3: 缺失因子(如估值盲区) → 按剩余因子归一化, 不做惩罚性置零
+        # V4.0: 四因子加权 (F_momentum + F_alpha + F_earn_momentum + F_value)
+        # 缺失因子 → 按剩余因子归一化, 不做惩罚性置零
         num, den = 0.0, 0.0
         if not pd.isna(r["F_value"]):
             num += wv * min(r["F_value"], 100); den += wv
@@ -318,6 +333,8 @@ def finalize(rows: list, as_of: str = None, use_global_ref: bool = False) -> pd.
             num += wa * r["F_alpha"]; den += wa
         if not pd.isna(r["F_momentum"]):
             num += wm * r["F_momentum"]; den += wm
+        if not pd.isna(r.get("F_earn_momentum", np.nan)):
+            num += we * r["F_earn_momentum"]; den += we
         base = (num / den) if den > 1e-9 else 0.0
         return round(risk.apply_penalties(base, r["penalties"] or []), 1)
 
@@ -329,11 +346,11 @@ def finalize(rows: list, as_of: str = None, use_global_ref: bool = False) -> pd.
     #   高于全部 66 个 ML 配置; 端到端回测三窗口 Calmar 0.33/0.27/0.64 全胜。
     # 详见 output/model_zoo_report.md; V4 实验代码与产物已全部移除。
     df["S_total"] = df["S_v37"]
-    df["model_version"] = "V3.7"
+    df["model_version"] = "V4.0"
 
     df["water"] = None if water != water else round(water, 4)
     df["weights_mode"] = mode
-    df["w_value"], df["w_alpha"], df["w_mom"] = wv, wa, wm
+    df["w_value"], df["w_alpha"], df["w_mom"], df["w_earn"] = wv, wa, wm, we
 
     def rate(s):
         for th, lab in RATING_BANDS:

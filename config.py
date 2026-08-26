@@ -1,13 +1,24 @@
 # -*- coding: utf-8 -*-
 """
 量化选基系统 —— 全局配置
-默认打分模型: V3.7 规则合成模型（唯一模型）
-  S_total = (0.40*min(F_value,100) + 0.35*F_alpha + 0.25*F_momentum)
+默认打分模型: V4.0 前视+后视融合模型
+  S_total = (0.35*F_momentum + 0.30*F_alpha + 0.20*F_earn_momentum + 0.15*F_value)
             × Π(1 - PenaltyRate_j)
-  - F_value    估值分位 + 趋势确认滤网 + 缩量加分
-  - F_alpha    动态基准滚动IR胜率 + 下行捕获率
-  - F_momentum 滞后截面动量(4M-1M, 7M-1M)相对排名
-  - 风控       回撤比值/任期折价/规模反噬/集中度 平滑惩罚
+  - F_momentum      滞后截面动量(4M-1M, 7M-1M)相对排名 [后视]
+  - F_alpha         动态基准滚动IR胜率(去掉down_capture) [后视]
+  - F_earn_momentum RBSA加权行业盈利动量 [前视] (earnings_momentum = Δ3月盈利增速)
+  - F_value         估值分位(权重降低，实验证明IC<0) [后视]
+  - 风控            回撤比值/任期折价/规模反噬/集中度 平滑惩罚
+
+★ V4.0 改进依据（exp_comprehensive.py + exp_implementation.py）★
+  54,583观察点 × 476只基金 × 2011-2026（牛/熊/震荡全覆盖）
+  Walk-forward验证（训练集内归一化，无前瞻偏差）:
+  - F_value: IC=-0.03~0.21, 在walk-forward中永远为负(稳定度0%) → 权重从0.40降至0.15
+  - down_capture: IC≈0.000 → 从F_alpha中移除
+  - earn_momentum: IC=+0.102, 稳定度=71% → 新增因子，权重0.20
+  - F_momentum: IC=+0.086, 稳定度=60% → 保持核心地位
+  - ir_winrate: IC=+0.109, 稳定度=68% → F_alpha核心成分
+  - 最优方案 WF_IC=+0.351 vs 当前系统+0.238 (提升47%), 正IC率=83%
 ★ 2026-08-10 模型动物园裁决（output/model_zoo_report.md）★
   全历史严格 walk-forward（2006-09→2026-03, 235季×217只, 无前视协议）:
   - V3.7 规则合成 IC=0.113 (t=8.1) > 全部 66 个 ML 配置(最高 Lasso 0.096)
@@ -17,12 +28,14 @@
 """
 
 # ============ V3.7 线性合成的因子权重 ============
-W_VALUE, W_ALPHA, W_MOMENTUM = 0.40, 0.35, 0.25
+W_VALUE, W_ALPHA, W_MOMENTUM = 0.15, 0.30, 0.35
+W_EARN_MOMENTUM = 0.20  # V4.0: 行业盈利动量权重（前视性信号）
 
 # ============ V3.2 Regime 自适应 (回测证据驱动) ============
 # 底部水位 7.6%~18.3%, 非底部最低47% → 20%阈值最大间隔分离
 REGIME_LOW_WATER = 0.20                       # 大盘水位≤20% → 左侧低估区
-W_VALUE_LOW, W_ALPHA_LOW, W_MOM_LOW = 0.55, 0.35, 0.10
+W_VALUE_LOW, W_ALPHA_LOW, W_MOM_LOW = 0.10, 0.30, 0.40  # V4.0: 左侧区也降低估值权重
+W_EARN_MOMENTUM_LOW = 0.20  # 左侧区盈利动量权重不变
 REGIME_HIGH_WATER = 0.90                      # ≥90% → 防御姿态(展示)
 WATER_PANEL = "style6"                        # 水位计仅用6风格等权(宽基水位的代表)
 
