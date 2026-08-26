@@ -158,16 +158,29 @@ def build_panel(dates, codes, default_universe, rebuild=False, pool_mode="defaul
     if pool_mode == "pit-top":
         suf = resolve_score_suffix(score_suffix, CACHE_DIR)
         print(f"  [PiT] 使用评分缓存后缀: '{suf or '(无后缀)'}'")
+        missing = []
         for d in dates:
             ck = f"{CACHE_DIR}/{d}{suf}.csv"
+            g = None
             if os.path.exists(ck):
                 g = pd.read_csv(ck, dtype={"code": str})
+                if g.empty:
+                    g = None
+            if g is None and codes:
+                # 种子池模式: 缺失月份现算并永久缓存, 二次运行秒级
+                g = harvest_date(d, codes)
                 if not g.empty:
-                    g = score_from_raw(g)
-                    g["date"] = d
-                    parts.append(g[["date", "code", "S", "water", "R_MDD"]])
-            else:
-                print(f"  [warn] {d} 无评分缓存数据 ({ck}), 跳过")
+                    g.to_csv(ck, index=False, encoding="utf-8-sig")
+            if g is None or g.empty:
+                missing.append(d)
+                continue
+            g = score_from_raw(g)
+            g["date"] = d
+            parts.append(g[["date", "code", "S", "water", "R_MDD"]])
+        if missing:
+            shown = ", ".join(missing[:3]) + (" ..." if len(missing) > 3 else "")
+            hint = "" if codes else " (可用 --codes 提供种子池, 缺失月份将现算并永久缓存)"
+            print(f"  [warn] {len(missing)}/{len(dates)} 个月无评分缓存, 跳过: {shown}{hint}")
         return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
 
     uid = "" if default_universe else "_" + hashlib.md5(",".join(sorted(codes)).encode()).hexdigest()[:8]
@@ -535,8 +548,8 @@ def report(ec, tr, bench, args, dates, names, tag):
     dd = ec.drawdown.min()
     bb = bench.loc[T0:T1]; btot = bb.iloc[-1] / bb.iloc[0] - 1
     win = (tr.net_ret > 0).mean() if len(tr) else np.nan
-    aw = tr.loc[tr.net_ret > 0, "net_ret"].mean() if (tr.net_ret > 0).any() else np.nan
-    al = tr.loc[tr.net_ret <= 0, "net_ret"].mean() if (tr.net_ret <= 0).any() else np.nan
+    aw = tr.loc[tr.net_ret > 0, "net_ret"].mean() if len(tr) and (tr.net_ret > 0).any() else np.nan
+    al = tr.loc[tr.net_ret <= 0, "net_ret"].mean() if len(tr) and (tr.net_ret <= 0).any() else np.nan
     invested = (ec.n_pos > 0).mean()
 
     S = []
@@ -678,12 +691,26 @@ def main():
     args = ap.parse_args()
 
     # 读取基金池
+    score_suffix_resolved = None
     if args.pool_mode == "pit-top":
-        suf = resolve_score_suffix(args.score_suffix, CACHE_DIR)
+        seed_codes, seed_uid = [], ""
+        if args.codes:
+            seed_codes = [l.strip().zfill(6) for l in open(args.codes, encoding="utf-8")
+                          if l.strip() and l.strip()[0].isdigit()]
+            seed_uid = "_" + hashlib.md5(",".join(sorted(seed_codes)).encode()).hexdigest()[:8]
+            print(f"[PiT] 种子池 {args.codes}: {len(seed_codes)} 只 → 缓存后缀 '{seed_uid}'")
+            print("      (种子池只决定给哪些基金打分入缓存; TopN 买卖仍按当日时点排名执行)")
+            if "top100" in str(args.codes):
+                print("⚠️ 提醒：top100_history_pool.txt 是历史并集池，含幸存者偏差(收益上偏)。")
+        if args.score_suffix and args.score_suffix != "auto":
+            suf = resolve_score_suffix(args.score_suffix, CACHE_DIR)
+        else:
+            suf = seed_uid or get_best_score_suffix(CACHE_DIR)
         print(f"[PiT] 启用严格历史动态池复盘 (买入限当日 Top{args.pit_top_n})")
         print(f"[PiT] 读取缓存后缀: '{suf or '(无后缀)'}' (无需静态代码池，避免历史并集池未来函数)")
-        codes = []
+        codes = seed_codes
         default_universe = False
+        score_suffix_resolved = suf
     elif args.codes:
         if "top100" in str(args.codes):
             print("⚠️ 提醒：top100_history_pool.txt 是历史并集池，会提前暴露未来入榜基金。")
@@ -703,8 +730,27 @@ def main():
     qs = [str(d.date()) for d in pd.date_range(args.start, end, freq="ME")]
     print(f"[打分区间] {qs[0]} → {qs[-1]} 共 {len(qs)} 个月末")
 
+    suffix_for_panel = score_suffix_resolved if args.pool_mode == "pit-top" else args.score_suffix
     panel = build_panel(qs, codes, default_universe, args.rebuild,
-                        pool_mode=args.pool_mode, score_suffix=args.score_suffix)
+                        pool_mode=args.pool_mode, score_suffix=suffix_for_panel)
+
+    # 空面板守卫: 评分缓存缺失时给出可执行的补救命令, 而不是抛 AttributeError
+    if panel.empty or "S" not in panel.columns:
+        if args.pool_mode == "pit-top":
+            if args.codes:
+                print("\n❌ 已尝试现算评分但所有月份均无结果, 无法回测。")
+                print("   请检查网络/数据源 (fund.eastmoney.com 等) 是否可访问, 稍后重试;")
+                print("   已成功落盘的月份会永久缓存, 断点续跑只补缺失月份。")
+            else:
+                print("\n❌ PiT 回测没有可用评分缓存 (output/bt_scores_cache/ 为空)。")
+                print("   评分缓存是回测首次运行时逐月现算的本地数据, 不随仓库分发, 需先构建一次。")
+                print("   一条命令即可完成「建缓存 + 严格PiT复盘」(首次联网较慢, 之后永久缓存秒级复跑):")
+                print(f"     python backtest_local.py --pool-mode pit-top --codes top100_history_pool.txt "
+                      f"--start {qs[0]} --end {qs[-1]}")
+        else:
+            print("\n❌ 评分面板为空 (没有任何月份成功打分), 无法回测。")
+            print("   请检查网络/数据源是否可用, 或用 --codes 指定一个基金池。")
+        return
     print(f"[面板] 评分行 {len(panel)} | S>{args.buy:.0f} 信号 {int((panel.S > args.buy).sum())} 个")
 
     # 过滤掉没有打分数据的月份

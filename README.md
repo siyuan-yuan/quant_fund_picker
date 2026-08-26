@@ -391,6 +391,19 @@ python backtest_local.py \
 > 它是历史并集池，会提前暴露未来入榜基金。
 > 严格历史复盘请用 `--pool-mode pit-top`（无需传入静态 `--codes`，自动从 `output/bt_scores_cache/` 历史缓存面板中选出每个决策日当日的 TopN 可买池）。
 
+> **重要**：`output/bt_scores_cache/` 评分缓存是首次回测时逐月现算的本地运行数据，**不随仓库分发**。
+> 新clone/下载的仓库没有该目录时，PiT 模式会提示并退出（不会崩溃）。一条命令即可完成「建缓存 + 严格PiT复盘」：
+
+```bash
+python backtest_local.py \
+  --pool-mode pit-top \
+  --codes top100_history_pool.txt \
+  --start 2006-09-30 \
+  --end 2026-03-31
+```
+
+`--codes` 在 PiT 模式下仅作为**种子池**：决定给哪些基金逐月打分入缓存（缓存后缀取种子池md5，如 217 池的 `_2e4ec0f5`），买入仍只限当日时点 TopN。首次构建需联网（约 20s/月），成功月份永久缓存、可断点续跑，二次运行秒级。
+
 - **全自动续期**: 新季度首次自动 PiT 打分(~20s)并永久缓存 `output/bt_scores_cache/`, 二次秒跑
 - **三本账**: `bt_trades_<tag>.csv`(逐笔买卖: 价/分/持有天数/净收益/年化/盈亏元) + `bt_daily_<tag>.csv`(逐日净值/回撤/现金/CPPI状态) + `bt_summary_<tag>.md`(汇总报告) + `bt_equity_<tag>.png`(净值图 vs 沪深300)
 - 默认输出 tag 前缀为 `v38_`; 旧版回测为 `legacy_`。
