@@ -187,19 +187,26 @@ def harvest_date(d, codes):
 
 
 def build_panel(dates, codes, default_universe, rebuild=False, pool_mode="default",
-                score_suffix="auto", pit_universe=None):
+                score_suffix="auto", pit_universe=None, pit_store_codes=None):
     """返回 DataFrame: date × code 的原始量+S; 逐季点缓存"""
     os.makedirs(CACHE_DIR, exist_ok=True)
     parts = []
     if pool_mode == "pit-top":
         suf = resolve_score_suffix(score_suffix, CACHE_DIR)
         universe_path, universe = None, None
+
+        def _load_scoring_universe():
+            """打分宇宙：--pit-store 时取各日快照并集；否则兼容旧 top100 池文件。"""
+            if pit_store_codes:
+                return "<pit-store>", sorted(set(pit_store_codes))
+            return load_pit_universe(pit_universe)
+
         if not suf and score_suffix == "auto":
             # 本地完全没有评分缓存 → 首次运行: 默认采用打分宇宙同源后缀,
             # 与仓库内建缓存(如 *_2e4ec0f5.csv)保持一致, 后续 auto 可直接复用。
             try:
-                universe_path, universe = load_pit_universe(pit_universe)
-                suf = "_" + hashlib.md5(",".join(universe).encode()).hexdigest()[:8]
+                universe_path, universe = _load_scoring_universe()
+                suf = "_" + hashlib.md5(",".join(map(str, universe)).encode()).hexdigest()[:8]
             except Exception as e:
                 print(f"  [PiT] 无法加载打分宇宙: {e}")
                 suf = ""
@@ -216,7 +223,7 @@ def build_panel(dates, codes, default_universe, rebuild=False, pool_mode="defaul
             # 缓存缺失(或 --rebuild 强制重打): 现打分并永久缓存
             if universe is None:
                 try:
-                    universe_path, universe = load_pit_universe(pit_universe)
+                    universe_path, universe = _load_scoring_universe()
                     print(f"  [PiT] 缺失/需重打的季度将逐季现打分并永久缓存 "
                           f"(宇宙: {universe_path} {len(universe)}只; 全区间一次性约10-40分钟, 之后秒级)",
                           flush=True)
@@ -320,8 +327,14 @@ def simulate(panel, navs, bench, dates, args):
     eligible_by_date = {}
     if getattr(args, "pool_mode", "default") == "pit-top":
         pit_top_n = getattr(args, "pit_top_n", 100)
+        pit_store_data = getattr(args, "pit_store_data", None)
         for d, g in by_date.items():
-            eligible_by_date[d] = set(g.nlargest(pit_top_n, "S").index)
+            top_n = set(g.nlargest(pit_top_n, "S").index)
+            if pit_store_data is not None:
+                # 严格 PIT：候选 = 当日快照成分 ∩ 当日 TopN（快照已含生命周期/类型/申购过滤）
+                eligible_by_date[d] = top_n & set(pit_store_data.get(d, set()))
+            else:
+                eligible_by_date[d] = top_n
 
     T0, T1 = pd.Timestamp(dates[0]), pd.Timestamp(dates[-1])
     day_grid = bench.loc[T0:T1].index
@@ -620,6 +633,10 @@ def report(ec, tr, bench, args, dates, names, tag):
         S.append(f"候选池模式: **严格历史动态池复盘 (PiT Top{getattr(args, 'pit_top_n', 100)})**\n")
     else:
         S.append("候选池模式: **默认/自选池 (非严格PiT)**\n")
+    if getattr(args, "pit_store_data", None):
+        S.append(f"PIT 快照仓库: **{args.pit_store}**"
+                 f"（{'允许' if args.pit_allow_lite else '严格'}"
+                 f"{'且要求净值窗口达标' if args.pit_require_history else ''}）\n")
     v38_on = not getattr(args, 'legacy', False)
     S.append(f"参数: 买 S>{args.buy:.0f} / 卖 S<{args.sell:.0f} / 槽位 {args.slots} / 本金 {args.capital:,.0f} 元 / "
              f"成本 申购{args.cost_in:.2%}+赎回{args.cost_out:.2%} / "
@@ -751,6 +768,13 @@ def main():
                     help="评分缓存后缀，如 _2e4ec0f5，或者 auto 自动选择覆盖行数最多的后缀")
     ap.add_argument("--pit-universe", dest="pit_universe", default=None,
                     help="PiT 模式缺失缓存时自动打分的宇宙文件(默认 top100_history_pool.txt, 每行一个6位代码)")
+    ap.add_argument("--pit-store", dest="pit_store", default=None,
+                    help="严格 PIT 快照目录(由 `python -m pit build` 生成)。"
+                         "每个决策日候选 = 当日快照成分 ∩ 当日 S 分 TopN；默认拒绝 PIT-lite 快照。")
+    ap.add_argument("--pit-allow-lite", dest="pit_allow_lite", action="store_true",
+                    help="允许读取 PIT-lite 快照（报告会标注降级，不能算严格 PIT）")
+    ap.add_argument("--pit-require-history", dest="pit_require_history", action="store_true",
+                    help="同时要求 history_ok=True（模型可计算性过滤，不影响基金池成分）")
     args = ap.parse_args()
     # 未显式指定候选池模式时: 给了 --codes 视为普通自选池(兼容 README 用法), 否则默认严格 PiT 复盘
     if args.pool_mode is None:
@@ -787,9 +811,33 @@ def main():
     qs = [str(d.date()) for d in pd.date_range(args.start, end, freq="ME")]
     print(f"[打分区间] {qs[0]} → {qs[-1]} 共 {len(qs)} 个月末")
 
+    # ---- 严格 PIT 快照仓库：每日候选 = 快照成分（不可向未来偷看） ----
+    if args.pit_store:
+        try:
+            from pit_universe import PITUniverseStore
+            store = PITUniverseStore(args.pit_store, allow_lite=args.pit_allow_lite)
+        except Exception as e:
+            print(f"❌ [PiT-store] 加载失败: {e}")
+            return
+        pit_store_data, first_pit = {}, ""
+        for d in qs:
+            try:
+                u, audit = store.universe(d, require_history=args.pit_require_history)
+            except Exception as e:
+                print(f"❌ [PiT-store] {d}: {e}")
+                return
+            pit_store_data[d] = set(u["code"])
+            first_pit = first_pit or f"{audit['pit_level']} {audit['snapshot_file']}"
+        code_set = set().union(*pit_store_data.values()) if pit_store_data else set()
+        codes = sorted(code_set)
+        print(f"[PiT-store] {len(pit_store_data)} 个决策日 PIT 快照"
+              f"（首个 {first_pit}），打分宇宙 {len(codes)} 只；"
+              f"允许 lite={args.pit_allow_lite}")
+        args.pit_store_data = pit_store_data
+
     panel = build_panel(qs, codes, default_universe, args.rebuild,
                         pool_mode=args.pool_mode, score_suffix=args.score_suffix,
-                        pit_universe=args.pit_universe)
+                        pit_universe=args.pit_universe, pit_store_codes=codes)
 
     if panel is None or len(panel) == 0:
         print("❌ 面板为空: 没有任何可用打分月份, 程序退出。")
