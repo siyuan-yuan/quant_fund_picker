@@ -3,7 +3,8 @@
 本地自助回测 —— 你只管敲命令，它帮你出三本账
 =================================================================
 用法(在 quant_fund_picker 目录下):
-    python backtest_local.py                          # 默认: V3.8 最优执行层, 70买45卖
+    python backtest_local.py                          # 默认: V3.7评分 + V3.8执行层, 70买45卖
+    python backtest_local.py --score-model v40        # 明确启用V4.0评分(仅含S_engine缓存)
     python backtest_local.py --pool-mode pit-top --pit-top-n 100 --score-suffix auto  # 严格历史动态池复盘(PiT)
     python backtest_local.py --legacy                 # 旧版纯S阈值回测
     python backtest_local.py --sell 50                # 改动一条线对比
@@ -109,41 +110,56 @@ def mdd_factor(rm, w):
     return 1 - p
 
 
-def score_from_raw(g):
-    """原料行 → V4.0 固定权重总分。
-    
-    V4.0改进（基于exp_comprehensive.py + exp_implementation.py实验）:
-    1. F_alpha只用IR胜率（移除down_capture，IC≈0）
-    2. 新增F_earn_momentum（行业盈利动量，IC=+0.102，稳定度71%）
-    3. 固定权重：0.35×F_momentum + 0.30×F_alpha + 0.20×F_earn_momentum + 0.15×F_value
-    
-    如果存在S_engine列（engine.finalize()的V4.0分数），直接使用；
-    否则用V3.7逻辑计算（向后兼容旧数据）。
+def score_from_raw(g, score_model="v37"):
+    """把同一份 Point-in-Time 原料转换成明确版本的分数。
+
+    旧实现只要发现 ``S_engine`` 就直接使用，并且 fallback 到 V3.7 时仍可能
+    写成 V4.0，导致模型比较失真。现在模型必须显式指定：
+
+    * v37: 0.40 F_value + 0.35 F_alpha + 0.25 F_momentum；F_alpha 同时含
+      IR 胜率和下行捕获率，保持生产旧模型口径；
+    * v40: 使用缓存中由 engine.finalize() 生成的 S_engine。
+
+    缺失因子按实际可用权重重新归一化，并把真实 ``score_model`` 写入输出。
     """
+    if score_model not in {"v37", "v40"}:
+        raise ValueError(f"未知 score_model={score_model!r}，只能是 v37 或 v40")
     g = g.copy()
-    
-    # V4.1: 如果存在S_engine列，直接使用engine.finalize()的V4.1分数
-    if "S_engine" in g.columns and g["S_engine"].notna().any():
-        g["S"] = g["S_engine"]
+    if score_model == "v40":
+        if "S_engine" not in g.columns or not g["S_engine"].notna().any():
+            raise ValueError("v40 需要包含 S_engine 的评分缓存，拒绝静默降级")
+        g["S"] = pd.to_numeric(g["S_engine"], errors="coerce")
         g["model_version"] = "V4.0"
         return g
-    
-    # 向后兼容：如果没有S_engine，用V3.7逻辑
-    g["rank4"] = g["r4"].rank(pct=True)
-    g["rank7"] = g["r7"].rank(pct=True)
+
+    # V3.7 从原始因子重算，绝不复用可能已经包含 V4 earn_momentum 的 S_engine。
+    for c in ["r4", "r7", "val_pct", "wr", "dc", "water", "R_MDD", "other_pen"]:
+        if c not in g:
+            g[c] = np.nan
+    g["rank4"] = pd.to_numeric(g["r4"], errors="coerce").rank(pct=True)
+    g["rank7"] = pd.to_numeric(g["r7"], errors="coerce").rank(pct=True)
     v37 = []
     for _, r in g.iterrows():
-        fv = (np.nan if (r.val_cov < 0.5 or pd.isna(r.val_pct))
-              else factors.valuation_base_score(r.val_pct, r.trend_ok))
-        # V4.0: F_alpha只用IR胜率（移除down_capture）
-        fa = factors.ir_score_smooth(r.wr) if pd.notna(r.wr) else np.nan
+        val_cov = pd.to_numeric(pd.Series([r.get("val_cov", r.get("val_coverage", np.nan))]),
+                                errors="coerce").iloc[0]
+        val_pct = pd.to_numeric(pd.Series([r.val_pct]), errors="coerce").iloc[0]
+        fv = (np.nan if (pd.isna(val_cov) or val_cov < 0.5 or pd.isna(val_pct))
+              else factors.valuation_base_score(
+                  float(val_pct),
+                  str(r.get("trend_ok", False)).strip().lower() == "true"))
+        alpha_parts = []
+        if pd.notna(r.wr):
+            alpha_parts.append(factors.ir_score_smooth(r.wr))
+        if pd.notna(r.dc):
+            alpha_parts.append(factors.dc_score_smooth(r.dc))
+        fa = float(np.mean(alpha_parts)) if alpha_parts else np.nan
         fm = factors.momentum_score_smooth_m1(r.rank4, r.rank7)
-        pen = r.other_pen * mdd_factor(r.R_MDD, r.water)
-        num = ((r.wv * min(max(fv, 0), 100)) if pd.notna(fv) else 0) \
-            + (r.wa * fa if pd.notna(fa) else 0) + (r.wm * fm if pd.notna(fm) else 0)
-        den = (r.wv if pd.notna(fv) else 0) + (r.wa if pd.notna(fa) else 0) \
-            + (r.wm if pd.notna(fm) else 0)
-        v37.append(min(max((num / den if den else 0) * pen, 0), 100))
+        pen = (r.other_pen if pd.notna(r.other_pen) else 1.0) * mdd_factor(r.R_MDD, r.water)
+        parts = [(0.40, fv), (0.35, fa), (0.25, fm)]
+        valid = [(w, x) for w, x in parts if pd.notna(x)]
+        den = sum(w for w, _ in valid)
+        base = sum(w * min(max(float(x), 0), 100) for w, x in valid) / den if den else 0
+        v37.append(min(max(base * pen, 0), 100))
     g["S_v37"] = v37
     g["S"] = g["S_v37"]
     g["model_version"] = "V3.7"
@@ -187,7 +203,7 @@ def harvest_date(d, codes):
 
 
 def build_panel(dates, codes, default_universe, rebuild=False, pool_mode="default",
-                score_suffix="auto", pit_universe=None):
+                score_suffix="auto", pit_universe=None, score_model="v37"):
     """返回 DataFrame: date × code 的原始量+S; 逐季点缓存"""
     os.makedirs(CACHE_DIR, exist_ok=True)
     parts = []
@@ -209,7 +225,7 @@ def build_panel(dates, codes, default_universe, rebuild=False, pool_mode="defaul
             if (not rebuild) and os.path.exists(ck):
                 g = pd.read_csv(ck, dtype={"code": str})
                 if not g.empty:
-                    g = score_from_raw(g)
+                    g = score_from_raw(g, score_model=score_model)
                     g["date"] = d
                     parts.append(g[["date", "code", "S", "water", "R_MDD"]])
                 continue
@@ -230,7 +246,7 @@ def build_panel(dates, codes, default_universe, rebuild=False, pool_mode="defaul
             g = harvest_date(d, universe)
             if not g.empty:
                 g.to_csv(ck, index=False, encoding="utf-8-sig")
-                g = score_from_raw(g)
+                g = score_from_raw(g, score_model=score_model)
                 g["date"] = d
                 parts.append(g[["date", "code", "S", "water", "R_MDD"]])
             else:
@@ -253,7 +269,7 @@ def build_panel(dates, codes, default_universe, rebuild=False, pool_mode="defaul
         if g.empty:
             print(f"  [warn] {d} 无评分数据, 跳过")
             continue
-        g = score_from_raw(g)
+        g = score_from_raw(g, score_model=score_model)
         g["date"] = d
         parts.append(g[["date", "code", "S", "water", "R_MDD"]])
     return pd.concat(parts, ignore_index=True) if parts else pd.DataFrame()
@@ -316,6 +332,8 @@ def simulate(panel, navs, bench, dates, args):
     现金2.5%收益、MA200&Vol80危机禁买、组合自身CPPI(-15/-20/-25)。
     用 `--legacy` 可退回旧的 S>buy / S<sell / fixed-slot 逻辑。
     """
+    # `date` 是信号日，不是成交日。基金月末净值通常在收盘后才可得，默认
+    # 延迟 1 个交易日执行；所有模型必须共用同一个 execution_lag_days。
     by_date = {d: g.set_index("code") for d, g in panel.groupby("date")}
     eligible_by_date = {}
     if getattr(args, "pool_mode", "default") == "pit-top":
@@ -325,6 +343,17 @@ def simulate(panel, navs, bench, dates, args):
 
     T0, T1 = pd.Timestamp(dates[0]), pd.Timestamp(dates[-1])
     day_grid = bench.loc[T0:T1].index
+    lag = max(0, int(getattr(args, "execution_lag_days", 1)))
+    bench_index = bench.index
+    exec_to_signal = {}
+    for signal_day in by_date:
+        s = pd.Timestamp(signal_day)
+        pos = bench_index.searchsorted(s, side="right") - 1
+        exec_pos = pos + lag
+        if pos >= 0 and exec_pos < len(bench_index):
+            exec_day = bench_index[exec_pos]
+            if T0 <= exec_day <= T1:
+                exec_to_signal[str(exec_day.date())] = signal_day
 
     # ===== V3.8 开关 =====
     use_v38 = not getattr(args, "legacy", False)
@@ -517,11 +546,12 @@ def simulate(panel, navs, bench, dates, args):
                 trim_to_cap(day, daily_cap, last_scores, f"cppi_cap{daily_cap}")
 
         day_str = str(day.date())
-        if day_str in by_date:
-            g = by_date[day_str]
+        signal_day = exec_to_signal.get(day_str)
+        if signal_day is not None:
+            g = by_date[signal_day]
             last_scores = g
             if getattr(args, "pool_mode", "default") == "pit-top":
-                eligible = eligible_by_date.get(day_str, set())
+                eligible = eligible_by_date.get(signal_day, set())
                 candidates = g[(g.S > args.buy) & (g.index.isin(eligible))].sort_values("S", ascending=False)
             else:
                 candidates = g[g.S > args.buy].sort_values("S", ascending=False)
@@ -557,7 +587,7 @@ def simulate(panel, navs, bench, dates, args):
             elif daily_cap > 0:
                 for c, row in candidates.iterrows():
                     if getattr(args, "pool_mode", "default") == "pit-top":
-                        if c not in eligible_by_date.get(day_str, set()):
+                        if c not in eligible_by_date.get(signal_day, set()):
                             continue
                     if c in positions or len(positions) >= min(args.slots, daily_cap) or c not in navs:
                         continue
@@ -578,14 +608,21 @@ def simulate(panel, navs, bench, dates, args):
         curve.append((day, eq, len(positions), cash, cash / eq if eq else np.nan,
                       crisis_active, cppi_hwm, cppi_locked))
 
-    # 期末清仓
+    # 期末清仓。报告最终净值必须包含最后一次卖出费用；旧实现是在曲线
+    # 记录后才清仓，导致 ec.equity.iloc[-1] 对未平仓仓位漏计 cost_out。
     for c in list(positions):
         sell(c, T1, "期末清算")
 
     ec = pd.DataFrame(curve, columns=["date", "equity", "n_pos", "cash", "cash_ratio",
                                       "crisis", "cppi_hwm", "cppi_locked"]).set_index("date")
+    if len(ec):
+        ec.loc[T1, "equity"] = cash
+        ec.loc[T1, "n_pos"] = 0
+        ec.loc[T1, "cash"] = cash
+        ec.loc[T1, "cash_ratio"] = 1.0
     ec["drawdown"] = ec.equity / ec.equity.cummax() - 1
-    ec.attrs.update(dict(model=STRAT_VERSION if use_v38 else "legacy", cash_interest=cash_interest_total,
+    ec.attrs.update(dict(model=STRAT_VERSION if use_v38 else "legacy", execution_lag_days=lag,
+                         cash_interest=cash_interest_total,
                          total_cost=total_cost, rebal_turnover=rebal_turnover,
                          crisis_days=crisis_days, crisis_blocked=crisis_blocked,
                          cppi_sells=cppi_sells, cppi_hard_stops=cppi_hard_stops,
@@ -615,7 +652,8 @@ def report(ec, tr, bench, args, dates, names, tag):
     S = []
     model_name = ec.attrs.get("model", "legacy")
     S.append(f"# 本地回测报告  区间 {dates[0]} → {dates[-1]}  tag={tag}\n")
-    S.append(f"模型: **{model_name}**\n")
+    S.append(f"评分模型: **{getattr(args, 'score_model', 'unknown')}**；执行层: **{model_name}**；"
+             f"信号执行延迟: **{ec.attrs.get('execution_lag_days', 0)} 个交易日**\n")
     if getattr(args, "pool_mode", "default") == "pit-top":
         S.append(f"候选池模式: **严格历史动态池复盘 (PiT Top{getattr(args, 'pit_top_n', 100)})**\n")
     else:
@@ -726,6 +764,8 @@ def main():
     ap.add_argument("--end", default=None, help="结束日期")
     ap.add_argument("--buy", type=float, default=70.0)
     ap.add_argument("--sell", type=float, default=45.0)
+    ap.add_argument("--score-model", choices=["v37", "v40"], default="v37",
+                    help="评分模型；默认 v37，v40 仅使用含 S_engine 的缓存")
     ap.add_argument("--slots", type=int, default=10)
     ap.add_argument("--capital", type=float, default=100000)
     ap.add_argument("--cost-in", dest="cost_in", type=float, default=0.0015)
@@ -736,6 +776,8 @@ def main():
     ap.add_argument("--cash-yield", type=float, default=STRAT_CASH_YIELD, help="V3.8闲置现金年化收益")
     ap.add_argument("--trail-stop", type=float, default=STRAT_TRAIL_STOP, help="V3.8单基移动止损阈值")
     ap.add_argument("--rebalance", choices=["none", "quarterly"], default=STRAT_REBALANCE)
+    ap.add_argument("--execution-lag-days", type=int, default=1,
+                    help="信号日到成交日的交易日延迟；默认1，避免月末净值同日成交")
     ap.add_argument("--no-crisis", dest="crisis", action="store_false", help="关闭MA+Vol危机禁买过滤")
     ap.set_defaults(crisis=True)
     ap.add_argument("--no-cppi", dest="cppi", action="store_false", help="关闭组合级CPPI风险预算")
@@ -789,7 +831,7 @@ def main():
 
     panel = build_panel(qs, codes, default_universe, args.rebuild,
                         pool_mode=args.pool_mode, score_suffix=args.score_suffix,
-                        pit_universe=args.pit_universe)
+                        pit_universe=args.pit_universe, score_model=args.score_model)
 
     if panel is None or len(panel) == 0:
         print("❌ 面板为空: 没有任何可用打分月份, 程序退出。")
@@ -813,7 +855,7 @@ def main():
 
     bench = provider.get_close_by_src("sina", "sh000300").dropna().sort_index()
 
-    model_tag = "legacy" if args.legacy else "v38"
+    model_tag = ("legacy" if args.legacy else "v38") + "_" + args.score_model
     if args.pool_mode == "pit-top":
         pool_suffix = f"_pittop{args.pit_top_n}"
     else:
