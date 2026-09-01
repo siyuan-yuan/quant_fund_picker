@@ -34,6 +34,7 @@ def main():
     have_nav = sum(os.path.exists(f"cache/nav_{c}.csv") for c in codes)
     print(f"[R3.5-cache] 种子池 {len(codes)} 只；净值缓存覆盖 {have_nav}/{len(codes)}", flush=True)
 
+    os.makedirs(CACHE_DIR, exist_ok=True)
     dates = [str(d.date()) for d in pd.date_range(START, END, freq="ME")]
     todo = [d for d in dates if not os.path.exists(f"{CACHE_DIR}/{d}{SUF}.csv")]
     print(f"[R3.5-cache] 月末 {len(dates)}，待打 {len(todo)} 个月", flush=True)
