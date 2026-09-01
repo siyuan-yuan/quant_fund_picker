@@ -139,8 +139,21 @@ def stats_table(df):
 
 def main():
     harvest()
-    df = pd.concat([pd.read_csv(f"{OUT}/{f}", dtype={"code": str})
-                    for f in os.listdir(OUT) if f.endswith(".csv")])
+    # R3.4 配套修复：早期稀疏季打分 n=0 时 harvest 会留空 csv（无列），读入需过滤
+    def _read(fp):
+        try:
+            if os.path.getsize(fp) < 16:
+                return None
+            d = pd.read_csv(fp, dtype={"code": str})
+            return d if len(d.columns) and len(d) else None
+        except pd.errors.EmptyDataError:
+            return None
+    parts = [d for d in (_read(os.path.join(OUT, f)) for f in os.listdir(OUT)
+                         if f.endswith(".csv")) if d is not None]
+    empty_quarters = sorted(f[:-4] for f in os.listdir(OUT)
+                            if f.endswith(".csv") and _read(os.path.join(OUT, f)) is None)
+    print(f"[factor_study] 空季(skipped): {len(empty_quarters)} 个 {empty_quarters[:3]}...")
+    df = pd.concat(parts)
     df = df.dropna(subset=["S_eng"])
     outs, aux = build_variants(df)
     df["Sx_V0"] = outs["V0现行"]; df["Sx_V1"] = outs["V1-alpha平滑"]
