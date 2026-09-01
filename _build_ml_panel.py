@@ -67,7 +67,10 @@ for m in (3, 6, 12):
 # 净值期间覆盖过滤(评分时点必须有净值)
 last = {c: a.index[-1] for c, a in adj_map.items()}
 df["nav_last"] = [last.get(c, pd.NaT) for c in df.code]
-df = df[df.nav_last >= pd.to_datetime(df.date) + pd.Timedelta(days=60)]
+# R3.5 修复（审计 F4 / 预登记 #24）：删除后向过滤行 `df = df[df.nav_last >=
+# pd.to_datetime(df.date) + pd.Timedelta(days=60)]`。该条件用"未来 60 天仍有净值"
+# 筛除即将清盘/停披露的基金，是典型的后视过滤（清盘前样本被系统性删除）。
+# nav_last 列保留（仅作诊断字段），行不再删除。
 
 # ---------- 3) 截面 rank 特征 ----------
 for col, rk in [("r4", "r4_rk"), ("r7", "r7_rk"), ("wr", "wr_rk"), ("dc", "dc_rk"),

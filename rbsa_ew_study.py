@@ -85,8 +85,11 @@ def harvest_ew(codes):
 
 
 def main():
+    # 空 CSV（历史真实空季占位，4B BOM 残壳）必须跳过，否则 pandas 3 直接 EmptyDataError
+    _fr_files = [f for f in os.listdir("output/factor_rows")
+                 if f.endswith(".csv") and os.path.getsize(f"output/factor_rows/{f}") > 32]
     base = pd.concat([pd.read_csv(f"output/factor_rows/{f}", dtype={"code": str})
-                      for f in os.listdir("output/factor_rows") if f.endswith(".csv")])
+                      for f in sorted(_fr_files)])
     base = base[base.date.isin(DATES)].dropna(subset=["S_eng"]).copy()
     codes = sorted(base.code.unique())
     print(f"[plan] {len(DATES)} dates × {len(codes)} codes, EW半衰期={HL}d")
@@ -131,7 +134,9 @@ def main():
     print(f"EW{HL}: IC均值 {r.ic_ew.mean():+.4f} t={te:.2f}")
     print(f"配对差: 均值 {diff.mean():+.4f} t={td:.2f}  胜率(EW>base) {(diff>0).mean():.0%}")
     allb = pd.concat([pd.read_csv("output/factor_rows/" + d + ".csv", dtype={"code": str})
-                      for d in DATES])
+                      for d in DATES
+                      if os.path.exists("output/factor_rows/" + d + ".csv")
+                      and os.path.getsize("output/factor_rows/" + d + ".csv") > 32])
     print(f"EW Buy组汇总: n={r.ew_buy_n.sum()} 加权fwd6 "
           f"{np.nansum(r.ew_buy_n * r.ew_buy_fwd6) / max(r.ew_buy_n.sum(),1):+.1%}" if r.ew_buy_n.sum() else "EW Buy组为空")
     r.to_csv("output/rbsa_ew_verdict.csv", index=False, encoding="utf-8-sig")

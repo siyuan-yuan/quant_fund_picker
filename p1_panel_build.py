@@ -26,7 +26,12 @@ from engine import score_fund, resolve_weights, market_water
 from config import (CACHE_DIR, RATING_BANDS, YOUNG_MAX_DAYS)
 
 PANEL_DIR = os.path.join("output", "p1_panel")
-os.makedirs(PANEL_DIR, exist_ok=True)
+
+def _set_panel_dir(p):
+    global PANEL_DIR
+    PANEL_DIR = p
+    os.makedirs(PANEL_DIR, exist_ok=True)
+_set_panel_dir(PANEL_DIR)
 
 TARGET_TYPES = {"混合型-偏股", "股票型", "指数型-股票", "混合型-灵活", "指数型-海外股票"}
 HORIZONS = {"fwd1": 21, "fwd3": 63, "fwd6": 126}
@@ -177,10 +182,12 @@ def aggregate(raw: pd.DataFrame, d):
          else _rate(s, nd))
         for s, nd in zip(df["S_total"], df["n_days"])]
     df["date"] = str(d)
-    return df.sort_values("S_total", ascending=False, na_position="last").reset_index(drop=True)
+    # mergesort 稳定：S_total 并列时保留 code 升序（M11 修复配对）
+    return df.sort_values("S_total", ascending=False, na_position="last",
+                          kind="mergesort").reset_index(drop=True)
 
 
-def build_date(d, uni, maxn, workers=2):
+def build_date(d, uni, maxn, workers=2, seed_salt=0):
     dts = pd.Timestamp(d)
     firsts = uni["first"].values
     lasts = uni["last"].values
@@ -191,7 +198,9 @@ def build_date(d, uni, maxn, workers=2):
     if n_elig == 0:
         return None, 0, 0
     if n_elig > maxn:
-        seed = int(str(d).replace("-", ""))
+        # S6.1: seed_salt 仅影响抽样种子；salt=0 保持历史原式 seed=int(YYYYMMDD)（既有面板不变）
+        base_seed = int(str(d).replace("-", ""))
+        seed = base_seed if seed_salt == 0 else base_seed * 10 + seed_salt
         elig = list(np.random.RandomState(seed).choice(elig, maxn, replace=False))
     rows = []
     with ThreadPoolExecutor(max_workers=2) as ex:
@@ -202,7 +211,9 @@ def build_date(d, uni, maxn, workers=2):
                 rows.append(rec)
     if not rows:
         return None, n_elig, len(elig)
-    return aggregate(pd.DataFrame(rows), d), n_elig, len(elig)
+    # 【M11 确定性修复】线程完成顺序不定 → 按 code 稳定归位，消除并列分槽位裁决的轮间漂移
+    raw = pd.DataFrame(rows).sort_values("code", kind="mergesort").reset_index(drop=True)
+    return aggregate(raw, d), n_elig, len(elig)
 
 
 def main():
@@ -212,7 +223,12 @@ def main():
     ap.add_argument("--maxn", type=int, default=500)
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 个决策月(冒烟用)")
     ap.add_argument("--workers", type=int, default=2)
+    ap.add_argument("--seed-salt", type=int, default=0,
+                    help="S6.1: 抽样种子盐; 0=历史原式, >0 生成稳健性变体面板")
+    ap.add_argument("--panel-dir", default=None, help="S6.1: 变体面板输出目录(默认 output/p1_panel)")
     args = ap.parse_args()
+    if args.panel_dir:
+        _set_panel_dir(args.panel_dir)
 
     uni = build_universe()
     rbsa.index_return_matrix(pd.date_range("2010-01-01", "2010-02-01"))   # 预热共享
@@ -242,7 +258,7 @@ def main():
             man_rows.append(dict(date=d, n_ok=-1, elapsed=0.0, note="cached"))
             continue
         t1 = time.time()
-        out, n_elig, n_sampled = build_date(d, uni, args.maxn, args.workers)
+        out, n_elig, n_sampled = build_date(d, uni, args.maxn, args.workers, args.seed_salt)
         if out is None or not len(out):
             man_rows.append(dict(date=d, n_elig=n_elig, n_sampled=n_sampled,
                                  n_ok=0, elapsed=round(time.time() - t1, 1), note="empty"))

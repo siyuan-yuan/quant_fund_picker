@@ -7,10 +7,12 @@ V3.7.1 策略级回测 —— 信号驱动的真交易模拟
 成本: 申购0.15% + 赎回0.5% (往返0.65%)
 诚实边界: 池为存活至今基金(幸存者偏差上偏), 任期惩罚因非PiT在回测中豁免
 """
-import os, json
+import os, json, types
 import numpy as np
 import pandas as pd
 import factors
+
+import sim_core as SC   # M1.3 并轨：交易核已切换到 sim_core（对拍见 output/v5/m13_parity_strategy_bt.md）
 
 CACHE, OUT = "cache", "output"
 COST_IN, COST_OUT = 0.0015, 0.005
@@ -26,8 +28,11 @@ def mdd_factor(rm, w):
     return 1 - p
 
 def rebuild_scores():
+    # 跳过空季占位残壳（4B BOM；pandas3 直接 EmptyDataError）
+    _fs = [f for f in os.listdir(f"{OUT}/factor_rows")
+           if f.endswith(".csv") and os.path.getsize(f"{OUT}/factor_rows/{f}") > 32]
     df = pd.concat([pd.read_csv(f"{OUT}/factor_rows/{f}", dtype={"code": str})
-                    for f in os.listdir(f"{OUT}/factor_rows") if f.endswith(".csv")])
+                    for f in sorted(_fs)])
     df = df.dropna(subset=["S_eng"]).copy()
     df["rank4"] = df.groupby("date")["r4"].rank(pct=True)
     df["rank7"] = df.groupby("date")["r7"].rank(pct=True)
@@ -83,7 +88,59 @@ def px(s, dt):
 # ============ 3. 交易模拟 ============
 def simulate(df, navs, bench, buy_th=70.0, sell_th=45.0, water_gate=None,
              ma20_exit=False, trail_stop=None, hi_water=None, label="base"):
-    """hi_water=(门槛, 高位槽位上限): 水位≥门槛 → 决策日强制瘦身(留强去弱)并封新仓上限"""
+    """hi_water=(门槛, 高位槽位上限): 水位≥门槛 → 决策日强制瘦身(留强去弱)并封新仓上限
+
+    M1.3：本体为 sim_core 薄封装（T+0 对账档 exec_delay=0）。语义映射：
+    跌出面板→absent_position_policy='sell'；ma20_exit/water_gate/hi_water→sim_core 兼容参数；
+    CPPI/危机/再平衡/现金收益 全部关闭（本脚本历史口径原本就没有这些机制）。
+    期末清算后覆盖末点净值（历史原式）。
+    """
+    dates = sorted(df["date"].unique())
+    T0, T1 = pd.Timestamp(dates[0]), pd.Timestamp(dates[-1])
+    day_grid = bench.loc[T0:T1].index
+    # 决策日落位到最后交易日（历史原式）
+    dmap = {}
+    for d in dates:
+        elig = day_grid[day_grid <= pd.Timestamp(d)]
+        if len(elig):
+            dmap[str(elig[-1].date())] = d
+    if len(dmap) != len(dates):
+        missing = sorted(set(dates) - set(dmap.values()))
+        print(f"  [warn] 决策日映射丢弃 {missing}（其前无可用交易日；与历史原式行为一致）", flush=True)
+    df2 = df.copy()
+    inv = {v: k for k, v in dmap.items()}
+    df2["date"] = df2["date"].map(inv)
+
+    args = types.SimpleNamespace(
+        capital=1.0, cost_in=COST_IN, cost_out=COST_OUT, slots=N_SLOTS,
+        buy=buy_th, sell=sell_th, pool_mode="default", legacy=False,
+        cash_yield=0.0, trail_stop=trail_stop if trail_stop is not None else 0.0,
+        rebalance="none", crisis=False, cppi=False,
+        absent_position_policy="sell", ma20_exit=ma20_exit,
+        water_gate=water_gate, hi_water=hi_water, fixed_decision_equity=True)
+    ec, tr = SC.simulate(df2, navs, bench, [str(d.date()) for d in day_grid
+                                            if str(d.date()) in dmap], args,
+                         exec_delay_days=0, label=label)
+    # 期末清算后末点净值 = 清算现金（历史原式；精确现金由 sim_core attrs 暴露，不重算手续费）
+    if (tr.exit_reason == "期末清算").any() if len(tr) else False:
+        ec.iloc[-1, ec.columns.get_loc("equity")] = float(ec.attrs["final_cash"])
+        ec.iloc[-1, ec.columns.get_loc("n_pos")] = 0
+    tr = tr.copy()
+    tr["gross_ret"] = tr.exit_px / tr.entry_px - 1
+    tr["exit_reason"] = tr.exit_reason.str.replace(r"^trail_(\d+)%$", r"回撤\1%止损",
+                                                   regex=True)
+    extra = dict(blocked=int(ec.attrs.get("water_blocked", 0)), skipped=np.nan)
+    keep = ["code", "entry_date", "exit_date", "entry_S", "exit_S", "exit_reason",
+            "hold_days", "gross_ret", "net_ret"]
+    return ec[["equity", "n_pos"]], tr[keep], extra
+
+
+def _simulate_legacy(df, navs, bench, buy_th=70.0, sell_th=45.0, water_gate=None,
+                     ma20_exit=False, trail_stop=None, hi_water=None, label="base"):
+    """hi_water=(门槛, 高位槽位上限): 水位≥门槛 → 决策日强制瘦身(留强去弱)并封新仓上限
+
+    ⚠️ M1.3 对拍留存件：旧实现冻结于此，仅供 m13_parity_strategy_bt 对照引用，禁止产线调用。
+    """
     dates = sorted(df["date"].unique())
     T0, T1 = pd.Timestamp(dates[0]), pd.Timestamp(dates[-1])
     by_date = {d: g.set_index("code") for d, g in df.groupby("date")}

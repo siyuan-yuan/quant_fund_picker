@@ -20,3 +20,4 @@ output/*
 output/ledger.json
 output/dca_state.json
 output/fee_settings.json
+data/

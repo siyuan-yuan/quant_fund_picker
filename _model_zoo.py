@@ -101,28 +101,38 @@ MODELS = ["huber", "ridge", "lasso", "enet", "rf", "et", "gb", "hgb", "svrlin", 
 
 # ---------------- Walk-forward ----------------
 def impute_features(df, cols):
-    """PiT 安全的逐日截面中位数填充(生产引擎同口径: rank NaN=中位, val 填中位)"""
+    """R3.5 修复版：逐日截面中位数填充；再缺则用**扩展窗历史月中位数**（严格 < 当月；
+    原实现的全样本中位数兜底有前向成分，审计 F4 / 预登记 #24）。首日仍缺 → 保留 NaN。"""
     out = df.copy()
+    out["date"] = pd.to_datetime(out["date"])
     for c in cols:
         med = out.groupby("date")[c].transform(lambda s: s.median())
-        gmed = out[c].median()
-        out[c] = out[c].fillna(med).fillna(gmed)
+        month_med = out.groupby("date")[c].median().sort_index()
+        hist_med = month_med.shift(1).expanding().median()
+        hist_row = out["date"].map(hist_med)
+        out[c] = out[c].fillna(med).fillna(hist_row)
     return out
 
+# 标签成熟期（月）：训练样本必须满足 date ≤ q − hM（R3.5 修复：原统一 6M，
+# 对 fwd12 构成未来 6 个月标签前视，审计 F4 / 预登记 #24）。
+TARGET_HORIZON_MO = {"fwd3_z": 3, "fwd6_z": 6, "fwd6_rk": 6, "fwd12_z": 12}
+
+
 def oos_predictions(df, model_name, feats, target, retrain_every=1, min_q=8):
-    """返回 df 副本 + pred 列(全部 OOS)。训练样本: date <= q-6M 且 fwd6 有效。"""
+    """返回 df 副本 + pred 列(全部 OOS)。训练样本: date <= q−hM 且该目标标签有效。"""
     cols = FEATS[feats]
     ycol = TARGETS[target]
+    h_mo = TARGET_HORIZON_MO[target]
     df = impute_features(df, cols)
     df = df.copy()
     df["pred"] = np.nan
     dates = sorted(df.date.unique())
-    train_dates = [d for d in dates if (d <= dates[-1] - pd.DateOffset(months=6))]
+    train_dates = [d for d in dates if (d <= dates[-1] - pd.DateOffset(months=h_mo))]
     n_tr = len(train_dates)
     mdl = None
     last_train = None
     for i, q in enumerate(dates):
-        cutoff = q - pd.DateOffset(months=6)
+        cutoff = q - pd.DateOffset(months=h_mo)
         usable = [d for d in train_dates if d <= cutoff]
         if len(usable) >= min_q and (last_train is None or i - last_train >= retrain_every or q > train_dates[-1]):
             tr = df[df.date.isin(usable) & df[ycol].notna()]
@@ -236,7 +246,8 @@ def run_verify(df, top_n=8):
                              ("new→old", "2016-01-31", "2026-03-31")]:
             tr = df[(df.date >= lo) & (df.date <= hi) & df.fwd6.notna()]
             cutoff = pd.Timestamp(hi) if name == "new→old" else pd.Timestamp("2015-12-31")
-            tr = tr[tr.date <= cutoff - pd.DateOffset(months=6)]
+            # R3.5 修复：切分训练集截止也按目标成熟期（原统一 6M，fwd12 前视）
+            tr = tr[tr.date <= cutoff - pd.DateOffset(months=TARGET_HORIZON_MO[target])]
             te = df[(df.date > cutoff) & (df.date <= "2026-03-31")] if name == "old→new" else \
                  df[(df.date >= "2006-09-30") & (df.date <= cutoff)]
             if name == "new→old":
