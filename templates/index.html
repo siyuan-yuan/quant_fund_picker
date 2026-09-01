@@ -254,6 +254,10 @@
     <div class="terrain" id="terrain" style="margin-top:12px">
       <div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>
     </div>
+    <div class="panel" id="macro-panel" style="margin-top:12px">
+      <div class="eyebrow">指数对照 <span class="faint" style="font:11px var(--mono);margin-left:6px">跨市场 · 本地缓存</span></div>
+      <div id="macro-body" style="margin-top:10px"><div class="skeleton"></div><div class="skeleton"></div></div>
+    </div>
   </section>
 
   <section id="sec-strategy">
@@ -552,6 +556,26 @@ async function loadTerrain(){
     if(j.reversal&&!j.reversal.error){const r=j.reversal; document.getElementById('reversal').innerHTML=`MA20 ${r.above_ma20?'之上':'之下'} · 量比 ${r.vol_ratio??'—'}${r.reversal?' · 放量反转':''}`;}
   }catch(e){box.innerHTML='<div class="empty">加载失败</div>';}
 }
+function fmtPctS(v){ if(v==null||isNaN(v)) return '—'; const p=v*100; return (p>0?'+':'')+p.toFixed(1)+'%'; }
+function retStyle(v){ if(v==null||isNaN(v)) return ''; return v>0?'color:var(--success)':(v<0?'color:var(--danger)':''); }
+async function loadMacro(){
+  const box=document.getElementById('macro-body');
+  try{
+    const j=await (await jfetch('/api/macro',{timeout:15000})).json();
+    if(!j.ok) throw new Error('fail');
+    const rows=(j.indices||[]).map(x=> x.error
+      ? `<tr><td class="name">${escHtml(x.label)}</td><td colspan="4" class="mono faint">${escHtml(x.error)}</td></tr>`
+      : `<tr><td class="name">${escHtml(x.label)}</td><td class="mono" style="text-align:right">${x.close==null?'—':Number(x.close).toLocaleString('en-US',{maximumFractionDigits:2})}</td><td class="mono" style="text-align:right;${retStyle(x.ret_126d)}">${fmtPctS(x.ret_126d)}</td><td class="mono" style="text-align:right;${retStyle(x.ret_252d)}">${fmtPctS(x.ret_252d)}</td><td class="mono faint" style="text-align:right">${escHtml(x.asof||'')}</td></tr>`).join('');
+    const cx=j.cross||{};
+    const bandCls=cx.band==='overseas_strong'?'b-blue':(cx.band==='a_strong'?'b-amber':'b-mute');
+    box.innerHTML=`<div class="table-wrap"><table><thead><tr><th>指数</th><th style="text-align:right">收盘</th><th style="text-align:right">6月</th><th style="text-align:right">1年</th><th style="text-align:right">截至</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <span class="badge ${bandCls}">${escHtml(cx.band_label||'—')}</span>
+        <span class="mono" style="font:12px var(--mono);color:var(--muted)">跨市场相对强度 252d（标普500 − 沪深300）：<b style="color:var(--ink)">${fmtPctS(cx.diff_252d)}</b></span>
+      </div>
+      <div class="hint" style="margin-top:8px">${escHtml(cx.note||'')}</div>`;
+  }catch(e){ box.innerHTML='<div class="empty">指数对照加载失败</div>'; }
+}
 async function refreshScanStatus(){
   const s=await (await jfetch('/api/scan/status',{timeout:8000})).json();
   const tot=s.total||0,done=s.done||0;
@@ -640,10 +664,23 @@ function renderWaterfall(f,mount){
   const pens=(f.penalties&&f.penalties.length)? f.penalties.map(p=>`<li><span>×</span>${escHtml(p[0])} ${escHtml(p[1])}</li>`).join('') : '<li class="ok">无风控</li>';
   const pd=f.penalty_detail||{};
   const scoreBadge=f.S_total!=null? `<span class="badge ${f.S_total>=70?'b-green':(f.S_total>=50?'b-amber':'b-red')}" style="font-size:13px;padding:5px 10px">总分 ${f.S_total}</span>` : `<span class="badge b-mute">总分 —</span>`;
+  // P4-3: A/C 份额建议(纯展示; C 类服务费率是假设值, 不参与模型评分)
+  const sc=f.share_class||{}; let acHtml='';
+  if(sc.has_pair&&sc.siblings){
+    const a=sc.siblings.A||{}, c=sc.siblings.C||{};
+    const feePct=a.buy_fee!=null?(a.buy_fee*100).toFixed(2)+'%':'—';
+    const svc=sc.c_service_fee_annual!=null?(sc.c_service_fee_annual*100).toFixed(2)+'%/年':'—';
+    const be=sc.breakeven_years!=null?sc.breakeven_years+'年':'—';
+    const rec=sc.breakeven_years!=null?(sc.self_cls==='C'?`预期持有&gt;${sc.breakeven_years}年 → 换 A 更省费`:`预期持有&gt;${sc.breakeven_years}年买 A, 否则买 C`):'';
+    acHtml=`<div class="eyebrow" style="margin-top:12px">份额建议 (A/C)</div>
+      <div style="margin-top:6px;font:12px var(--mono);color:var(--muted);line-height:1.8">${a.code?`<span>${a.code} ${escHtml(a.name)}</span> 申购费 ${feePct}<br>`:''}${c.code?`<span>${c.code} ${escHtml(c.name)}</span> 服务费≈${svc}<br>`:''}盈亏平衡 <b style="color:var(--ink)">${be}</b>${rec?` · ${rec}`:''}</div>
+      <div class="hint" style="margin-top:4px">${escHtml(sc.note||'')}</div>`;
+  }
   document.getElementById(mount).innerHTML=`<div class="wf">
     <div><div class="wf-title">${safeFundCode(f.code)} ${escHtml(f.name)}</div><div style="display:flex;gap:8px;align-items:center;margin:8px 0;flex-wrap:wrap">${scoreBadge}${sigOf(f)}${ratingCell(f)}</div><div class="wf-meta">${escHtml(f.ftype)} · ${f.is_passive?'被动':'主动'} · ${f.panel_mode==='overseas'?'境外面板':'A股面板'} · 数据 ${escHtml(f.last_date)}${f.model_version?` · ${escHtml(f.model_version)}`:''}${f.ref_stamp?` · 参照 ${escHtml(f.ref_stamp)}`:''}${f.data_incomplete?' · <span style="color:var(--danger)">档案数据缺失</span>':''}</div>
       ${bar('F_value',f.F_value,'#15803d')}${bar('F_alpha',f.F_alpha,'#1d4ed8')}${bar('F_momentum',f.F_momentum,'#a16207')}
       <div class="facts">分位 ${f.val_pct!=null?(f.val_pct*100).toFixed(1)+'%':'—'} · 趋势 ${f.trend_ok?'是':'否'} · IR ${f.ir_winrate!=null?(f.ir_winrate*100).toFixed(0)+'%':'—'} · 下行捕获 ${f.down_capture??'—'}</div>
+      ${acHtml}
     </div><div><div class="eyebrow">穿透</div><div class="chips">${we||'<span style="color:var(--faint)">—</span>'}</div><div class="eyebrow" style="margin-top:12px">风控</div><ul class="plist">${pens}</ul><div class="facts">R_MDD ${pd.R_MDD??'—'}（回撤 ${pd.mdd_fund??'—'}/${pd.mdd_bench??'—'}） · 任职 ${f.tenure_days?Math.round(f.tenure_days/365)+'年':'—'} · 规模 ${f.scale??'—'}亿</div></div></div>`;
 }
 let WROWS=[], WD_OPEN=[];
@@ -1767,7 +1804,13 @@ function renderRebalance(j){
     return `<div class="order ${o.side==='SELL'?'sell':'buy'}"><span class="side">${o.side==='SELL'?'卖出':'买入'}</span><div class="meta"><b>${safeFundCode(o.code)} ${escHtml(o.name)}</b><div>${escHtml(o.reason||'')}</div></div><div class="amt">${fmtYuanFull(o.amount)}</div>${buyLed}</div>`;
   }).join('')}</div>${noteHtml}${statsHtml}<div style="margin-top:8px;display:flex;gap:8px"><button class="btn btn-ghost" style="padding:6px 12px;font-size:12px" onclick="copyOrders()">复制</button><button class="btn btn-ghost" style="padding:6px 12px;font-size:12px" onclick="downloadOrders()">导出</button></div></div>`:`<div class="empty" style="margin-top:12px">${escHtml(j.scan_msg||'无操作')}</div>`;
   const allocHtml=alloc.length? `<div style="margin-top:14px"><div class="alloc-bar">${alloc.map((a,i)=>`<i style="width:${a.pct}%;background:${['#0c0a09','#57534e','#a8a29e','#d6d3d1','#e7e5e4'][i%5]}"></i>`).join('')}<i style="width:${s.cash_pct_after||0}%;background:var(--surface-2);border:1px dashed var(--line)"></i></div><div class="legend">${alloc.map((a,i)=>`<span><em style="background:${['#0c0a09','#57534e','#a8a29e'][i%3]}"></em>${a.code} ${a.pct}%</span>`).join('')}<span><em style="background:var(--surface-2);border:1px solid var(--line)"></em>现金 ${s.cash_pct_after||0}%</span></div></div>`:'';
-  document.getElementById('rb-out').innerHTML=kpis+cppiHtml+errBanner+hTable+orderHtml+allocHtml;
+  // P4-3 持仓穿透: 按持仓市值加权的风格暴露(中性展示; 35% 上限告警已按 P3-4/P4-4 移除)
+  const pf=j.portfolio_rbsa||{};
+  const pfHtml=pf.n? `<div style="margin-top:14px;padding:12px 14px;border:1px solid var(--line);border-radius:8px">
+    <div class="eyebrow">持仓风格穿透 <span class="faint" style="font:11px var(--mono);margin-left:6px">${escHtml(pf.basis||'市值加权')} · ${pf.n} 只</span></div>
+    <div class="chips">${(pf.top||[]).map(t=>`<span>${escHtml(t.style)} <b>${t.pct}%</b></span>`).join('')||'<span>—</span>'}</div>
+    <div class="hint" style="margin-top:8px">${escHtml(pf.note||'')}</div></div>`:'';
+  document.getElementById('rb-out').innerHTML=kpis+cppiHtml+errBanner+hTable+pfHtml+orderHtml+allocHtml;
   window._lastRebalance=j;
   drawCppiChart(j.cppi||{});
 }
@@ -1782,6 +1825,7 @@ updateScanModeUI();
 updateLedger();
 loadStrategyState();
 loadTerrain();
+loadMacro();
 loadResults().catch(()=>{ const e=document.getElementById('bd-empty'); if(e) e.textContent='榜单加载超时，请点「加载最近榜单」重试'; });
 refreshScanStatus().then(s=>{ if(s && (s.phase==='universe' || s.phase==='scoring')) startPoll(); }).catch(()=>{});
 setTimeout(()=>{
