@@ -28,10 +28,11 @@ from config import (
     STRAT_CPPI, STRAT_CPPI_DD1, STRAT_CPPI_SLOTS1,
     STRAT_CPPI_DD2, STRAT_CPPI_SLOTS2,
     STRAT_CPPI_DD3, STRAT_CPPI_SLOTS3,
-    STRAT_CPPI_HYSTERESIS, STRAT_STYLE_CAP,
+    STRAT_CPPI_HYSTERESIS,
     STRAT_OVERLAP_SKIP, STRAT_OVERSEAS_SLOT_CAP,
     STRAT_INDEX_TOP1, STRAT_INDEX_PORT, STRAT_CLUSTER_MAX, STRAT_CLONE_L1,
     OVERSEAS_FUND_TYPES, BUY_FEE_RATE, BUY_FEE_BY_FUND,
+    C_CLASS_SERVICE_FEE_ANNUAL,
 )
 
 app = Flask(__name__)
@@ -939,6 +940,183 @@ def _parse_int(v, default, low=None, high=None):
     return out
 
 
+# ---------------- P4-3 交付层: 宏观对照 / A-C 份额建议 / 市值加权暴露 ----------------
+
+# fund_meta 直读(纯本地, 不走 provider 新鲜度/重抓路径——展示层不应触发网络)
+_SHARE_CLASS_INDEX = None
+
+
+def _load_share_class_index():
+    """fund_meta → {fund_code: (base, cls_char)} + {base: {cls: (code, name)}}。
+    配对规则(严格, 防误配): 拼音全称尾部 A/C/E 视为份额类别, 但仅当同一去尾 stem
+    下存在 ≥2 个不同类别后缀时才认定为份额族。
+    反例: 华夏成长混合(000001/000002后端) 全称尾 'E' 是拼音自然结尾而非份额,
+    无 A/C 兄弟 → 不配对; 中海可转债 000003A/000004C 同 stem → 配对。"""
+    global _SHARE_CLASS_INDEX
+    if _SHARE_CLASS_INDEX is not None:
+        return _SHARE_CLASS_INDEX
+    code2base, base2cls = {}, {}
+    try:
+        meta = pd.read_csv(f"{provider.CACHE_DIR}/fund_meta.csv", dtype={"基金代码": str})
+        by_stem = {}
+        for _, row in meta.iterrows():
+            code = str(row.get("基金代码", "")).zfill(6)
+            full = str(row.get("拼音全称", "") or "").strip().upper()
+            name = str(row.get("基金简称", "") or "")
+            if not re.fullmatch(r"\d{6}", code) or len(full) < 5 or full[-1] not in "ACE":
+                continue
+            stem, cls = full[:-1], full[-1]
+            by_stem.setdefault(stem, {}).setdefault(cls, (code, name))
+        for stem, clsmap in by_stem.items():
+            if len(clsmap) < 2:
+                continue  # 单一 A 或单一 C 无兄弟份额 → 不构成可比的份额族
+            base2cls[stem] = clsmap
+            for cls, (code, _n) in clsmap.items():
+                code2base[code] = (stem, cls)
+    except Exception as e:
+        print(f"[P4-3] fund_meta 读取失败, A/C 建议降级: {e}", flush=True)
+    _SHARE_CLASS_INDEX = (code2base, base2cls)
+    return _SHARE_CLASS_INDEX
+
+
+def share_class_info(code):
+    """A/C/E 份额建议(纯展示): 返回同类份额、A 申购费(用户费率设置)、C 服务费假设、
+    breakeven 年数 = A费 ÷ C年费率。非模型参数, 不参与任何评分/裁决。"""
+    code = str(code or "").zfill(6)
+    code2base, base2cls = _load_share_class_index()
+    out = {"code": code, "siblings": {}, "has_pair": False,
+           "note": "A/C 份额费差参考: C 类销售服务费为假设值(市售 C 类主流 0.20%~0.40%/年, 取 0.30%);"
+                   "盈亏平衡年数 = A 类申购费 ÷ C 类年服务费。仅费差展示, 不参与模型评分。"}
+    entry = code2base.get(code)
+    if not entry:
+        return out
+    base, cls = entry
+    siblings = base2cls.get(base, {})
+    for c in ("A", "C", "E"):
+        if c in siblings:
+            c_code, c_name = siblings[c]
+            item = {"code": c_code, "name": c_name}
+            if c == "A":
+                rate, src = _resolve_buy_fee(c_code, _load_fee_settings())
+                item["buy_fee"] = rate
+                item["fee_source"] = src
+            out["siblings"][c] = item
+    out["self_cls"] = cls
+    a, c = out["siblings"].get("A"), out["siblings"].get("C")
+    if a and c:
+        out["has_pair"] = True
+        out["c_service_fee_annual"] = C_CLASS_SERVICE_FEE_ANNUAL
+        be = a.get("buy_fee") or 0.0
+        out["breakeven_years"] = round(be / C_CLASS_SERVICE_FEE_ANNUAL, 2)
+    return out
+
+
+@app.get("/api/share_class")
+def api_share_class():
+    code = str(request.args.get("code", "")).zfill(6)
+    if not re.fullmatch(r"\d{6}", code):
+        return jsonify({"ok": False, "message": "基金代码无效"}), 400
+    return jsonify({"ok": True, "share_class": share_class_info(code)})
+
+
+# ---------------- P4-3 宏观面板: 指数对照 + 跨市场相对强度 ----------------
+
+MACRO_INDEX_SPECS = [
+    ("沪深300", "idx_sh000300.csv"),
+    ("标普500", "idx_us__INX.csv"),   # provider: .INX → idx_us__INX.csv (双下划线)
+    ("纳指100", "idx_us__NDX.csv"),
+    ("恒生指数", "idx_hk_HSI.csv"),
+    ("恒生科技", "idx_hk_HSTECH.csv"),
+]
+# P3-6 跨市场信号分档阈值(研究存档信号; 现行模型未启用, 仅展示)
+P36_BAND = 0.15
+
+
+@app.get("/api/macro")
+def api_macro():
+    """指数对照(收盘/6月/1年) + INX−沪深300 252d 相对强度(P3-6 口径, ±15% 分档)。
+    纯本地 cache 读取, 不触发网络刷新。"""
+    idx_rows, ret252 = [], {}
+    for label, fname in MACRO_INDEX_SPECS:
+        item = {"label": label}
+        try:
+            df = pd.read_csv(f"{provider.CACHE_DIR}/{fname}")
+            s = df.set_index(pd.to_datetime(df["date"]))["close"].dropna().sort_index()
+            last = float(s.iloc[-1])
+            item.update({
+                "close": round(last, 2),
+                "ret_126d": round(float(s.iloc[-1] / s.iloc[-127] - 1), 4) if len(s) >= 127 else None,
+                "ret_252d": round(float(s.iloc[-1] / s.iloc[-253] - 1), 4) if len(s) >= 253 else None,
+                "asof": str(s.index[-1].date()),
+            })
+            if item["ret_252d"] is not None:
+                ret252[label] = item["ret_252d"]
+        except Exception as e:
+            item["error"] = str(e)[:120]
+        idx_rows.append(item)
+    diff = None
+    if "标普500" in ret252 and "沪深300" in ret252:
+        diff = round(ret252["标普500"] - ret252["沪深300"], 4)
+    band, band_label = "balanced", "均衡"
+    if diff is not None:
+        if diff > P36_BAND:
+            band, band_label = "overseas_strong", "海外显著强 (P3-6 信号 > +15%)"
+        elif diff < -P36_BAND:
+            band, band_label = "a_strong", "A股显著强 (P3-6 信号 < −15%)"
+    return jsonify({
+        "ok": True,
+        "indices": idx_rows,
+        "cross": {
+            "diff_252d": diff,
+            "band": band,
+            "band_label": band_label,
+            "note": "P3-6 跨市场相对强度 = 252d(标普500) − 252d(沪深300); ±15% 为研究分档阈值。"
+                    "存档研究信号, 现行模型未启用(见 docs/P3 海外槽位实验)。",
+        },
+    })
+
+
+def aggregate_rbsa_weighted(rb_list, amounts, fallback_label="等权(金额缺失)"):
+    """RBSA 暴露聚合(P4-3 持仓穿透): 按 amounts{code: 市值} 加权;
+    金额缺失/为0 的行不计权(自然排除未持有候选); 全部缺失时回退等权。
+    展示口径, 非风控规则(P3-4/P4-4: 35% 上限为死配置, 回测从未执行)。"""
+    recs = []
+    for r in rb_list or []:
+        code, rbsa = r.get("code"), r.get("rbsa")
+        if isinstance(rbsa, dict) and code:
+            recs.append((str(code).zfill(6), rbsa))
+    if not recs:
+        return None
+    total_w = sum(float((amounts or {}).get(c, 0.0) or 0.0) for c, _ in recs)
+    basis = "市值加权"
+    if total_w <= 0:
+        basis = fallback_label
+    names = [spec[2] for spec in RBSA_INDICES]   # rbsa 字典键 = 风格名(元组第3元素)
+
+    def _fv(x):  # NaN/inf/缺失 → 0 (P4-4: 存在 16 只 NaN 风格基金; NaN 会污染 JSON)
+        try:
+            f = float(x)
+            return f if f == f and abs(f) != float("inf") else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    exposure = {}
+    for k in names:
+        if basis == "市值加权":
+            num = sum(_fv((amounts or {}).get(c, 0.0)) * _fv(v.get(k)) for c, v in recs)
+            exposure[k] = num / total_w
+        else:
+            exposure[k] = sum(_fv(v.get(k)) for _, v in recs) / len(recs)
+    exposure = {k: round(float(v), 4) for k, v in exposure.items() if v > 0.001}
+    ranked = sorted(exposure.items(), key=lambda kv: -kv[1])
+    return {
+        "n": len(recs),
+        "basis": basis,
+        "exposure": exposure,
+        "top": [{"style": k, "pct": round(v * 100, 1)} for k, v in ranked[:6] if v > 0.01],
+    }
+
+
 # ---------------- 页面 ----------------
 @app.route("/")
 def home():
@@ -1328,7 +1506,9 @@ def fund(code):
         r = score_fund(code)
         if "error" in r and r.get("error"):
             return jsonify({"ok": False, "message": r["error"]}), 400
-        return jsonify({"ok": True, "fund": clean(_final_single(r))})
+        out = clean(_final_single(r))
+        out["share_class"] = share_class_info(code)   # P4-3: A/C 份额建议(纯展示)
+        return jsonify({"ok": True, "fund": out})
     except Exception as e:
         return jsonify({"ok": False, "message": str(e)[:200]}), 400
 
@@ -1369,17 +1549,11 @@ def watchlist():
             "tenure_days", "is_passive", "penalties", "penalty_detail",
             "penalty_str", "scale", "n_days", "last_date", "error",
             "model_version", "ref_stamp", "data_incomplete"]
-    # V3.7.2 批判清单⑧: 组合级 RBSA 穿透 — 等权聚合整批隐形仓位, 单一板块≥35% 告警
-    portfolio = None
-    rb = [r["rbsa"] for r in rows if isinstance(r.get("rbsa"), dict) and r["rbsa"]]
-    if rb:
-        agg = pd.DataFrame(rb).fillna(0).mean().sort_values(ascending=False)
-        flags = [dict(style=k, pct=round(float(v), 3)) for k, v in agg.items() if v >= STRAT_STYLE_CAP]
-        portfolio = dict(n=len(rb), cap=STRAT_STYLE_CAP,
-                         exposure={k: round(float(v), 3) for k, v in agg.items() if v > 0.001},
-                         top=[dict(style=k, pct=round(float(v), 3))
-                              for k, v in agg.head(6).items() if v > 0.01],
-                         flags=flags)
+    # V3.7.2 批判清单⑧ / P4-3: 组合级 RBSA 穿透 — 候选批无金额, 等权聚合整批隐形仓位。
+    # 仅中性展示; P3-4/P4-4 裁决 35% 上限为死配置(回测从未执行), 不再产生告警。
+    portfolio = aggregate_rbsa_weighted(rows, {}, fallback_label="等权")
+    if portfolio:
+        portfolio["note"] = "候选组合风格暴露(等权, 展示口径; 现行模型无风格上限 — P3-4/P4-4)"
     # V3.8: 组合交易纪律字段 — 展示规则但不假装判断CPPI触发
     portfolio_discipline = clean(dict(
         max_slots=STRAT_SLOTS,
@@ -1669,21 +1843,15 @@ def rebalance():
         if c not in row_by_code:
             row_by_code[c] = r
 
-    # 计算组合级 RBSA
-    rb_list = [r["rbsa"] for r in rows if isinstance(r.get("rbsa"), dict) and r["rbsa"]]
-    portfolio_rbsa = None
-    if rb_list:
-        try:
-            agg = pd.DataFrame(rb_list).fillna(0).mean().sort_values(ascending=False)
-            flags = [dict(style=k, pct=round(float(v),3)) for k,v in agg.items() if v >= STRAT_STYLE_CAP]
-            portfolio_rbsa = dict(
-                n=len(rb_list), cap=STRAT_STYLE_CAP,
-                exposure={k: round(float(v),3) for k,v in agg.items() if v>0.001},
-                top=[dict(style=k, pct=round(float(v),3)) for k,v in agg.head(6).items() if v>0.01],
-                flags=flags
-            )
-        except Exception:
-            portfolio_rbsa = None
+    # 计算组合级 RBSA (P4-3 持仓穿透: 按持仓市值加权; 未持有候选无金额→自动不计权)
+    # 展示口径, 非风控规则 — P3-4/P4-4: 35% 上限从未在回测执行层生效, 不再告警
+    try:
+        portfolio_rbsa = aggregate_rbsa_weighted(rows, code_to_amount)
+        if portfolio_rbsa:
+            portfolio_rbsa["note"] = ("按持仓市值加权的风格暴露(展示口径; 非风控规则 — "
+                                      "P3-4/P4-4: 35% 上限为死配置, 回测从未执行)")
+    except Exception:
+        portfolio_rbsa = None
 
     scored_holdings = []
     fee_settings = _load_fee_settings()
@@ -2228,10 +2396,8 @@ def rebalance():
 
     warnings = []
     warnings.extend(flat_warns)
-    # 集中度
-    if portfolio_rbsa and portfolio_rbsa.get("flags"):
-        for f in portfolio_rbsa["flags"]:
-            warnings.append(f"赛道集中告警：{f['style']} 占比 {f['pct']*100:.0f}%≥35% 上限，建议分散")
+    # P4-3: 原"赛道集中告警"已移除 — P3-4 证实回测从未执行 35% 上限(死配置),
+    # P4-4 终版裁决模型无风格上限; 风格暴露改为 portfolio_rbsa 中性展示(市值加权)。
     # 持仓中个别高风险
     for h in holdings_detail:
         if h["is_error"]:

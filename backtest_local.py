@@ -211,10 +211,16 @@ def build_panel(dates, codes, default_universe, rebuild=False, pool_mode="defaul
                 print(f"  [PiT] 无法加载打分宇宙: {e}")
                 suf = ""
         print(f"  [PiT] 使用评分缓存后缀: '{suf or '(无后缀)'}'")
+        missing = []
         for d in dates:
             ck = f"{CACHE_DIR}/{d}{suf}.csv"
             if (not rebuild) and os.path.exists(ck):
                 g = pd.read_csv(ck, dtype={"code": str})
+                if g.empty:
+                    g = None
+            if g is None and codes:
+                # 种子池模式: 缺失月份现算并永久缓存, 二次运行秒级
+                g = harvest_date(d, codes)
                 if not g.empty:
                     g = score_from_raw(g)
                     g["date"] = d
@@ -781,12 +787,26 @@ def main():
         args.pool_mode = "default" if args.codes else "pit-top"
 
     # 读取基金池
+    score_suffix_resolved = None
     if args.pool_mode == "pit-top":
-        suf = resolve_score_suffix(args.score_suffix, CACHE_DIR)
+        seed_codes, seed_uid = [], ""
+        if args.codes:
+            seed_codes = [l.strip().zfill(6) for l in open(args.codes, encoding="utf-8")
+                          if l.strip() and l.strip()[0].isdigit()]
+            seed_uid = "_" + hashlib.md5(",".join(sorted(seed_codes)).encode()).hexdigest()[:8]
+            print(f"[PiT] 种子池 {args.codes}: {len(seed_codes)} 只 → 缓存后缀 '{seed_uid}'")
+            print("      (种子池只决定给哪些基金打分入缓存; TopN 买卖仍按当日时点排名执行)")
+            if "top100" in str(args.codes):
+                print("⚠️ 提醒：top100_history_pool.txt 是历史并集池，含幸存者偏差(收益上偏)。")
+        if args.score_suffix and args.score_suffix != "auto":
+            suf = resolve_score_suffix(args.score_suffix, CACHE_DIR)
+        else:
+            suf = seed_uid or get_best_score_suffix(CACHE_DIR)
         print(f"[PiT] 启用严格历史动态池复盘 (买入限当日 Top{args.pit_top_n})")
         print(f"[PiT] 读取缓存后缀: '{suf or '(无后缀)'}' (无需静态代码池，避免历史并集池未来函数)")
-        codes = []
+        codes = seed_codes
         default_universe = False
+        score_suffix_resolved = suf
     elif args.codes:
         if "top100" in str(args.codes):
             print("⚠️ 提醒：top100_history_pool.txt 是历史并集池，会提前暴露未来入榜基金。")
