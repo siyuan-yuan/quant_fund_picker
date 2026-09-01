@@ -361,6 +361,7 @@ python backtest_local.py --codes mypool.txt   # 自定义池(每行一个6位代
 python backtest_local.py --rebuild            # 换模型参数后强制重打分
 ```
 - **全自动续期**: 新季度首次自动 PiT 打分(~20s)并永久缓存 `output/bt_scores_cache/`, 二次秒跑
+- **首次运行无缓存**: 缺失季度自动逐季现打分并永久缓存(默认宇宙 `top100_history_pool.txt`, 与仓库内建缓存后缀 `_2e4ec0f5` 同源; 全区间一次性约 10-40 分钟, 之后秒级)。可用 `--pit-universe <代码文件>` 换打分宇宙, 用 `--rebuild` 强制重打
 - **三本账**: `bt_trades_<tag>.csv`(逐笔买卖: 价/分/持有天数/净收益/年化/盈亏元) + `bt_daily_<tag>.csv`(逐日净值/回撤/现金/CPPI状态) + `bt_summary_<tag>.md`(汇总报告) + `bt_equity_<tag>.png`(净值图 vs 沪深300)
 - 默认输出 tag 前缀为 `v38_`; 旧版回测为 `legacy_`。
 
@@ -396,6 +397,17 @@ python backtest_local.py \
 > 不要用 `--codes top100_history_pool.txt` 来宣称严格历史复盘；
 > 它是历史并集池，会提前暴露未来入榜基金。
 > 严格历史复盘请用 `--pool-mode pit-top`（无需传入静态 `--codes`，自动从 `output/bt_scores_cache/` 历史缓存面板中选出每个决策日当日的 TopN 可买池）。
+> 该池可重新生成：`python top100_history_pool.py [TopN]`，自动从 `output/factor_rows/` 或 `output/bt_scores_cache/` 取数（优先引擎分 S_engine）。
+
+**严格 PIT 快照仓库接入**（`python -m pit build` 生成，含已清盘基金的历史口径、类型与申购状态、来源哈希）：
+
+```bash
+python backtest_local.py --pool-mode pit-top --pit-top-n 100 \
+  --pit-store data/pit_universe --pit-require-history --score-suffix auto
+```
+
+- 候选 = 当日 PIT 快照成分 ∩ 当日 S 分 TopN；默认**拒绝 PIT-lite 快照**（没有历史类型截面/申购状态时产物即 PIT-lite），显式 `--pit-allow-lite` 才降级并在报告标注。
+- 快照目录、事件表、证监会索引清单、质量门禁与三条路线的取舍详见 [docs/PIT_UNIVERSE.md](docs/PIT_UNIVERSE.md)。
 
 > **重要**：`output/bt_scores_cache/` 评分缓存是首次回测时逐月现算的本地运行数据，**不随仓库分发**。
 > 新clone/下载的仓库没有该目录时，PiT 模式会提示并退出（不会崩溃）。一条命令即可完成「建缓存 + 严格PiT复盘」：
@@ -411,6 +423,7 @@ python backtest_local.py \
 `--codes` 在 PiT 模式下仅作为**种子池**：决定给哪些基金逐月打分入缓存（缓存后缀取种子池md5，如 217 池的 `_2e4ec0f5`），买入仍只限当日时点 TopN。首次构建需联网（约 20s/月），成功月份永久缓存、可断点续跑，二次运行秒级。
 
 - **全自动续期**: 新季度首次自动 PiT 打分(~20s)并永久缓存 `output/bt_scores_cache/`, 二次秒跑
+- **首次运行无缓存**: 缺失季度自动逐季现打分并永久缓存(默认宇宙 `top100_history_pool.txt`, 与仓库内建缓存后缀 `_2e4ec0f5` 同源; 全区间一次性约 10-40 分钟, 之后秒级)。可用 `--pit-universe <代码文件>` 换打分宇宙, 用 `--rebuild` 强制重打
 - **三本账**: `bt_trades_<tag>.csv`(逐笔买卖: 价/分/持有天数/净收益/年化/盈亏元) + `bt_daily_<tag>.csv`(逐日净值/回撤/现金/CPPI状态) + `bt_summary_<tag>.md`(汇总报告) + `bt_equity_<tag>.png`(净值图 vs 沪深300)
 - 默认输出 tag 前缀为 `v38_`; 旧版回测为 `legacy_`。
 
