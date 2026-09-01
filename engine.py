@@ -271,7 +271,12 @@ def finalize(rows: list, as_of: str = None, use_global_ref: bool = False) -> pd.
     use_global_ref: 局部/小样本测算(单基、自选池、持仓诊断)采用全市场统一参照快照 —
         V3.7 动量腿统一对参照宇宙做 ECDF 映射，
         结果与批次大小和批次构成完全无关(单基=批量=诊断)；
-        快照缺失动量分布时动量腿关闭(按剩余因子归一化)，绝不退回批内 rank。"""
+        快照缺失动量分布时动量腿关闭(按剩余因子归一化)，绝不退回批内 rank。
+
+    【M11 确定性修复 2026-09-01】入参 rows 在并发调用点按线程完成顺序到达，
+    行序不定 → 下游并列分的槽位裁决随轮漂移（实测 B2.1 交易笔数 76↔81 轮间漂移）。
+    此处统一按 code 稳定排序，使 output 行序与提交顺序无关。"""
+    rows = sorted(rows, key=lambda r: str(r.get("code", "")))
     df = pd.DataFrame(rows)
     if "error" not in df:
         df["error"] = None
