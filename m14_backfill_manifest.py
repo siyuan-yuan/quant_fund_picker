@@ -58,8 +58,27 @@ BATCHES = {
                 "outputs": ["output/v5/b22_cost_grid.csv", "output/v5/b23_delay_diff.csv",
                             "output/v5/b23_slippage.csv", "output/v5/b22_b23_summary.md"],
                 "note": "b22_b23.py 27 格 + 3 档时滞"},
-    "r27_postmortem": {"inputs": [], "outputs": ["output/v5/r27_postmortem.md"],
-                       "note": "第二轮复跑事实记录与第一轮 B2.x delay 语义错误作废声明"},
+    "r27_postmortem": {"inputs": [], "outputs": ["docs/V5_复跑事故与M11发现_2026-09-01.md"],
+                       "note": "勘正后重生版（M11 根因勘正：并发构建行序非确定，非 T+1 实现错误）；"
+                              "原 output/v5/r27_postmortem.md 已灭失，其错误归因已撤回"},
+    "s62_param_grid": {"inputs": sorted(glob.glob("output/p1_panel/*.csv")),
+                       "outputs": ["output/v5/s62_param_grid.csv", "output/v5/s62_summary.md",
+                                   "output/v5/s62_run.log"],
+                       "note": "s62_param_grid.py 243 格邻域；M11 后权威面板"},
+    "m12b_remainder": {"inputs": ["output/p4/hp4a_pit_monthly_ic.csv", "output/rbsa_ew_verdict.csv"],
+                       "outputs": ["output/v5/m12b_hac_remainder.csv", "output/v5/m12b_summary.md"],
+                       "note": "HP4A-3/rbsa_ew 段 HAC 复核；HP4A-3 OOS 中间门 naive 2.50→HAC 1.61 翻转"},
+    "m13_strategy_bt_parity": {"inputs": ["sim_core.py", "strategy_bt.py"],
+                               "outputs": ["output/v5/m13_parity_strategy_bt.md",
+                                           "output/v5/m13_semantic_diff.md"],
+                               "note": "strategy_bt 薄封装合成+真实窗对拍全绿 max|Δ|=0；p3/experiment 差异表"},
+    "c_experiments_37_38": {"inputs": sorted(glob.glob("output/p1_panel/*.csv"))[:148]
+                            + ["sim_core.py", "b21_baseline.py", "c_experiments.py",
+                               "risk.py", "factors.py"],
+                            "outputs": ["output/v5/c_experiments_pair_ic.csv",
+                                        "output/v5/c_experiments_e2e.csv",
+                                        "output/v5/c_experiments_verdict.csv"],
+                            "note": "C1(#37)维持现状(OOS tHAC 1.11<2)|C2(#38)否决M2(OOS t-0.47, MaxDD劣+4.3pp)"},
 }
 
 

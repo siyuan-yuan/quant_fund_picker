@@ -75,6 +75,7 @@ def main():
         print("[R3.5] 构建修复版 ML 面板（_build_ml_panel 修复后本体）…", flush=True)
         subprocess.run([sys.executable, "_build_ml_panel.py"], check=True)
     df = pd.read_csv(ML_PANEL, dtype={"code": str}, parse_dates=["date"])
+    df["trend_ok01"] = df["trend_ok"].astype(int)   # 与 MZ.load_panel 同式派生(该脚本直读缓存)
     print(f"[R3.5] 面板 {len(df)} 行 × {df.date.nunique()} 月末 × {df.code.nunique()} 只", flush=True)
 
     import _model_zoo as MZ

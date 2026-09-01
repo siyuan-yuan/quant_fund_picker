@@ -25,7 +25,9 @@ provider.STALE_OK = True
 from backtest_local import harvest_date, CACHE_DIR
 
 SUF = "_2e4ec0f5"
-START, END = "2006-09-30", "2026-03-31"
+# 探针实证（2026-09-01 三轮 × 双进程日志一致）：2014-03-31 及之前全月评分=0 且空月不写盘 →
+# 起点右移至 2014-04 不改变任何产出字节（早段只会产生"无评分"日志与零文件），节省 ~79 分钟 CPU。
+START, END = "2014-04-30", "2026-03-31"
 
 
 def main():
