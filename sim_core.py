@@ -83,6 +83,16 @@ def simulate(panel, navs, bench, dates, args,
     cin_rate = (lambda amt: args.cost_in) if cost_in_fn is None else cost_in_fn
     cout_rate = (lambda gross, hd: args.cost_out) if cost_out_fn is None else cost_out_fn
 
+    # ---- M1.3 兼容参数（strategy_bt 等旧模拟器语义并轨；默认关闭，不影响既有对拍） ----
+    absent_sell = getattr(args, "absent_position_policy", "hold") == "sell"
+    ma20_exit = bool(getattr(args, "ma20_exit", False))
+    water_gate = getattr(args, "water_gate", None)        # 决策日 water≥gate → 当日禁买
+    hi_water = getattr(args, "hi_water", None)            # (门槛, 高位槽位上限) → 瘦身+封新仓
+    water_by_date = (panel.groupby("date")["water"].first().to_dict()
+                     if "water" in panel.columns else {})
+    ma20 = ({c: s.rolling(20).mean() for c, s in navs.items()} if ma20_exit else {})
+    water_blocked = 0
+
     cash, positions, trades, curve = float(args.capital), {}, [], []
     last_scores = None
     total_cost, cash_interest_total, rebal_turnover = 0.0, 0.0, 0.0
@@ -210,6 +220,8 @@ def simulate(panel, navs, bench, dates, args,
     def buy_wave(day, cand_rows, daily_cap, eligible):
         """cand_rows: list[(code, S)] 按 S 降序；在成交日用当日价格撮合。"""
         nonlocal cash, total_cost
+        # M1.3 兼容: strategy_bt 原式以决策时刻权益固定作分母；默认(False)沿用 backtest_local 的逐笔重算
+        eq_fixed = equity(day) if getattr(args, "fixed_decision_equity", False) else None
         for c, s in cand_rows:
             if eligible is not None and c not in eligible:
                 continue
@@ -220,7 +232,7 @@ def simulate(panel, navs, bench, dates, args,
             price = px(navs[c], day)
             if pd.isna(price):
                 continue
-            eq_now = equity(day)
+            eq_now = eq_fixed if eq_fixed is not None else equity(day)
             alloc = min(cash, eq_now / args.slots)
             if alloc < eq_now * 0.02:
                 continue
@@ -278,6 +290,14 @@ def simulate(panel, navs, bench, dates, args,
 
         flush(day)   # 先消化早前决策、今日到期的成交
 
+        # MA20 日内纪律（M1.3 兼容 strategy_bt 变体D；决策当日，delay=0 时同日成交）
+        if ma20_exit:
+            for c in list(positions):
+                p, m = px(navs[c], day), px(ma20.get(c), day)
+                if pd.notna(p) and pd.notna(m) and p < m:
+                    q(day, ("sell", c, "ma20破位", np.nan))
+            flush(day)
+
         # 单基金 trailing stop（决策于当日，成交/exec 由 exec_delay 决定）
         if trail_stop > 0:
             for c in list(positions):
@@ -294,19 +314,22 @@ def simulate(panel, navs, bench, dates, args,
 
         daily_cap = args.slots
         if cppi_on:
+            dd1 = float(getattr(args, "cppi_dd1", STRAT_CPPI_DD1))
+            dd2 = float(getattr(args, "cppi_dd2", STRAT_CPPI_DD2))
+            dd3 = float(getattr(args, "cppi_dd3", STRAT_CPPI_DD3))
             eq_now = equity(day)
             if (not cppi_locked) and eq_now > cppi_hwm:
                 cppi_hwm = eq_now
             dd = eq_now / cppi_hwm - 1 if cppi_hwm > 0 else 0
             if cppi_locked:
                 daily_cap = 0
-            elif dd <= STRAT_CPPI_DD3:
+            elif dd <= dd3:
                 daily_cap = STRAT_CPPI_SLOTS3
                 cppi_locked = True
                 cppi_hard_stops += 1
-            elif dd <= STRAT_CPPI_DD2:
+            elif dd <= dd2:
                 daily_cap = STRAT_CPPI_SLOTS2
-            elif dd <= STRAT_CPPI_DD1:
+            elif dd <= dd1:
                 daily_cap = STRAT_CPPI_SLOTS1
             if daily_cap < len(positions):
                 q(day, ("trim", daily_cap, last_scores, f"cppi_cap{daily_cap}"))
@@ -334,11 +357,27 @@ def simulate(panel, navs, bench, dates, args,
 
             for c in list(positions):
                 if c not in g.index:
+                    if absent_sell:  # M1.3 兼容: 跌出面板当日清仓（strategy_bt 语义）
+                        q(day, ("sell", c, "跌出面板", np.nan))
                     continue
                 score = g.loc[c, "S"]
-                if pd.notna(score) and score < args.sell:
+                if pd.isna(score):
+                    if absent_sell:
+                        q(day, ("sell", c, "跌出面板", np.nan))
+                    continue
+                if score < args.sell:
                     q(day, ("sell", c, f"S<{args.sell:.0f}", score))
             flush(day)
+
+            # M1.3 兼容: 水位≥门槛 → 强制瘦身至上限槽位（留强去弱）并封新仓上限
+            max_slots = daily_cap
+            if hi_water is not None:
+                w_hw = water_by_date.get(day_str, 0.0)
+                if pd.notna(w_hw) and w_hw >= hi_water[0]:
+                    max_slots = min(daily_cap, int(hi_water[1]))
+                    if len(positions) > max_slots:
+                        q(day, ("trim", max_slots, g, f"水位≥{hi_water[0]:.0%}瘦身"))
+                        flush(day)
 
             if cppi_on and daily_cap < len(positions):
                 q(day, ("trim", daily_cap, g, f"cppi_cap{daily_cap}"))
@@ -350,9 +389,13 @@ def simulate(panel, navs, bench, dates, args,
 
             if crisis_active:
                 crisis_blocked += len(candidates)
+            elif water_gate is not None and \
+                    water_by_date.get(day_str, 1.0) >= water_gate:
+                # M1.3 兼容 strategy_bt: 缺失按 1.0 处理（历史原式 water.get(d, 1)）
+                water_blocked += len(candidates)
             elif daily_cap > 0:
                 cand_rows = [(c, r.S) for c, r in candidates.iterrows()]
-                q(day, ("buy_wave", cand_rows, daily_cap, eligible))
+                q(day, ("buy_wave", cand_rows, min(daily_cap, max_slots), eligible))
                 flush(day)
 
         eq = equity(day)
@@ -366,9 +409,11 @@ def simulate(panel, navs, bench, dates, args,
                                       "crisis", "cppi_hwm", "cppi_locked"]).set_index("date")
     ec["drawdown"] = ec.equity / ec.equity.cummax() - 1
     ec.attrs.update(dict(model=label, exec_delay_days=exec_delay_days,
+                         final_cash=float(cash),
                          qdii_delay_days=qdii_delay_days, stale_block_days=stale_block_days,
                          cash_interest=cash_interest_total,
                          total_cost=total_cost, rebal_turnover=rebal_turnover,
+                         water_blocked=water_blocked,
                          crisis_days=crisis_days, crisis_blocked=crisis_blocked,
                          cppi_sells=cppi_sells, cppi_hard_stops=cppi_hard_stops,
                          cppi_unlocks=cppi_unlocks))
