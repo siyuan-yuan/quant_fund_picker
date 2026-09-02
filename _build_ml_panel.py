@@ -85,6 +85,20 @@ df["rmdd_pen"] = rmdd
 df["trend_t"] = np.clip((df["ma20_dist"].fillna(0) + 0.02) / 0.06, 0, 1)
 
 # ---------- 4) 目标: 截面 z / rank ----------
+# 【M15 修复，2026-09-01】R3.5（预登记 #24）的对照臂 = V3.7 规则分，脚本约定列名 S_eng。
+# 原 keep 清单遗漏该列 → r35_zoo_redo.py 在 `df.rename(columns={"S_eng": "pred"})` 处
+# KeyError 崩溃，导致 #24 从未跑通（历史状态一直停在 🔄）。
+# 取数依据（实测，非假设）：bt_scores_cache 同时含 S_engine 与 S_v37，
+#   max|S_engine − S_v37| = 0.0（12,383 行全样本），且 model_version 全为 "V3.7"
+#   —— 因 engine.finalize 里 S_total := S_v37。故二者等价，取 S_v37 为 V3.7 规则分对照。
+# 本修复只补一列既有数据，不改任何特征/标签/训练协议/判定门。
+_s_eng = df["S_v37"] if "S_v37" in df.columns else df["S_engine"]
+if "S_engine" in df.columns and "S_v37" in df.columns:
+    _both = df[["S_engine", "S_v37"]].dropna()
+    _dmax = float((_both["S_engine"] - _both["S_v37"]).abs().max()) if len(_both) else 0.0
+    assert _dmax == 0.0, f"S_engine 与 S_v37 不一致 (max|Δ|={_dmax})：对照臂定义存疑，停跑待裁"
+df["S_eng"] = pd.to_numeric(_s_eng, errors="coerce")
+
 for m in (3, 6, 12):
     z = df.groupby("date")[f"fwd{m}"].transform(
         lambda s: (s - s.mean()) / (s.std() + 1e-9))
@@ -103,6 +117,7 @@ keep = ["date", "code", "val_pct", "val_cov", "trend_ok", "water", "R_MDD",
         "other_pen", "r4", "r7", "wr", "dc", "ma20_dist", "rmdd_pen", "trend_t",
         "r4_rk", "r7_rk", "wr_rk", "dc_rk", "val_rk",
         "value_z", "mom_pure", "quality", "safety", "macro_state", "val_x_mom",
+        "S_eng",
         "fwd3", "fwd6", "fwd12", "fwd3_z", "fwd6_z", "fwd12_z", "fwd3_rk", "fwd6_rk", "fwd12_rk"]
 df[keep].to_csv(OUT, index=False, encoding="utf-8-sig")
 print(f"[4] 已存 {OUT}: {len(df)} 行 | fwd6 有效 {df.fwd6.notna().sum()} | "
