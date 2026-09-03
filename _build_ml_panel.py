@@ -9,9 +9,17 @@ import numpy as np
 import pandas as pd
 import provider
 
+# 【C8 研究纪律护栏, 2026-09-02】标签契约四元组 + 前视硬断言。零数值影响：
+# 只做标签起点可成交性硬断言 + 把四元组写入产物 manifest 头, 不改任何 fwd/标签数值。
+# 口径说明: 本面板的 fwd 标签以决策日(特征快照日)当月 bar 起算 (base = adj.asof(d)),
+# 即标签口径 exec_delay_days=0；执行层 sim 的 T+1(D0.4) 属另一层口径, 分离打标不混报。
+import research_guard as RG
+
 SRC = "output/bt_scores_cache"
 SUF = "_2e4ec0f5"
 OUT = "output/ml_panel.csv"
+
+ML_CONTRACT = RG.default_contract("ml_panel", (3, 6, 12), exec_delay_days=0)
 
 # ---------- 1) 原始特征面板 ----------
 files = sorted(f for f in os.listdir(SRC) if f.endswith(SUF + ".csv"))
@@ -63,6 +71,30 @@ df["ma20_dist"] = [ma20_dist_asof(adj_map[c], d) if c in adj_map else np.nan
 for m in (3, 6, 12):
     df[f"fwd{m}"] = [fwd_ret(adj_map[c], d, m) if c in adj_map else np.nan
                      for c, d in zip(df.code, df.date)]
+
+# 【C8 标签契约硬断言】标签起点(基期 bar) ≥ 特征快照日 + 执行延迟(标签口径 0),
+# 且不得越过决策日(asof 无前视)。违规即 raise, 防 F4 类标签窗前视复发。
+_adj_index = {c: a.index for c, a in adj_map.items()}
+_guard_rows = []
+for _c, _sub in df.groupby("code", sort=False):
+    _dts = _adj_index.get(_c)
+    if _dts is None:           # 无净值缓存 → fwd 全 NaN, 无可成交基期, 跳过
+        continue
+    for _d in _sub["date"]:
+        _q = pd.Timestamp(_d)
+        _b = RG.resolve_first_tradeable_date(_dts, _q, ML_CONTRACT.exec_delay_days)
+        _pos = RG._asof_pos(_dts, _q)
+        _base = _dts[_pos] if _pos >= 0 else pd.NaT
+        _guard_rows.append(dict(snapshot_date=_d, label_start_date=_base,
+                                min_label_start=_b))
+_guard = pd.DataFrame(_guard_rows)
+n_viol = RG.validate_label_contract(_guard, ML_CONTRACT, context="ml_panel")
+assert n_viol == 0, "ml_panel 存在 C8 标签起点违规"
+_side = RG.write_contract_sidecar(OUT, ML_CONTRACT,
+                                  manifest_path=os.path.join(os.path.dirname(OUT),
+                                                             "ml_panel.manifest.jsonl"))
+print(f"[C8] 标签契约已写 {_side} | 校验 {len(_guard)} 行, {n_viol} 违规")
+print("\n".join("  " + ln for ln in ML_CONTRACT.header_lines()))
 
 # 净值期间覆盖过滤(评分时点必须有净值)
 last = {c: a.index[-1] for c, a in adj_map.items()}

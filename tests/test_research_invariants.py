@@ -34,6 +34,7 @@ import engine
 import factors
 import rbsa
 import _model_zoo as MZ
+import research_guard as RG
 from p4_analysis import holm, bh_q, dsr_metrics, cscv_pbo
 
 pytestmark = pytest.mark.filterwarnings("ignore")
@@ -368,11 +369,21 @@ class TestNavAdj:
         assert err is None and row["n_events"] == 0
         assert np.allclose(adj.values, np.array(nav), atol=1e-9)
 
-    @pytest.mark.skipif(not (os.path.exists("cache/navadj_160222.csv")
-                             and os.path.exists("cache/nav_160222.csv")),
-                        reason="160222 复权缓存不在本机")
     def test_real_fund_160222_event_day(self):
-        """真值锚点：160222 份额折算日 adj 日收益 = 官方 ret（≠ 30%+ 的伪下跌）。"""
+        """真值锚点：160222 份额折算日 adj 日收益 = 官方 ret（≠ 30%+ 的伪下跌）。
+
+        【M12 修复, 2026-09-02】原实现用 @skipif 在产物缺失时静默 skip —— 曾出现
+        "27 passed + 1 skipped 而无人察觉"的绿灯假象（执行台账 A-2 登记）。现改为
+        产物缺失即显式 FAIL 并打印缺失路径；产物就绪后才真正断言。
+        """
+        missing = [p for p in ("cache/nav_160222.csv", "cache/navadj_160222.csv")
+                   if not os.path.exists(p)]
+        if missing:
+            raise AssertionError(
+                "M12: 产物缺失 → 真值锚点测试 FAIL（禁止静默 skip）。缺失路径:\n  "
+                + "\n  ".join(missing)
+                + "\n复现: .venv_review/bin/python build_navadj.py --workers 2  "
+                  "(重建 cache/navadj_*); 然后重跑本用例确认 28 passed / 0 fail。")
         raw = pd.read_csv("cache/nav_160222.csv", parse_dates=["date"]).set_index("date")
         adj = pd.read_csv("cache/navadj_160222.csv", parse_dates=["date"]).set_index("date")
         col = "adj_nav" if "adj_nav" in adj.columns else adj.columns[0]
@@ -466,3 +477,106 @@ class TestMLPanelRules:
         # A 在 2020-01 缺失 → 用当日截面中位数 15，而非全样本中位数(8.5)
         assert out.loc[0, "x"] == pytest.approx(15.0)
         assert out["x"].notna().all()
+
+
+# =====================================================================
+# G. C8 研究纪律护栏 —— 标签契约四元组 + 标签起点/前视硬断言
+#    （预登记 C8, 2026-09-02；护栏不改任何标签数值，纯失败模式检出）
+# =====================================================================
+class TestLabelContract:
+    def _spec(self, delay=0):
+        return RG.default_contract("ut_pipeline", (3, 6, 12), exec_delay_days=delay)
+
+    def test_four_tuple_keys_and_semantics(self):
+        """manifest 头四元组 {标签窗, 特征窗, 训练截止规则, 执行延迟} 必须齐备。"""
+        s = self._spec()
+        d = s.four_tuple()
+        assert set(d) == {"标签窗", "特征窗", "训练截止规则", "执行延迟"}
+        assert d["标签窗"] == [3, 6, 12]
+        assert d["执行延迟"] == 0
+        assert "h 匹配" in d["训练截止规则"]
+
+    def test_header_lines_are_json_parseable(self):
+        s = self._spec()
+        blob = [ln for ln in s.header_lines() if ln.startswith("# label_contract: ")][0]
+        payload = blob.split("# label_contract: ", 1)[1]
+        import json as _json
+        parsed = _json.loads(payload)
+        assert parsed["pipeline"] == "ut_pipeline"
+        assert set(parsed) >= {"标签窗", "特征窗", "训练截止规则", "执行延迟", "base_rule"}
+
+    def test_resolve_first_tradeable_delay0_is_asof(self):
+        dates = pd.bdate_range("2019-01-01", "2019-03-01")
+        snap = pd.Timestamp("2019-02-01")
+        t0 = RG.resolve_first_tradeable_date(dates, snap, 0)
+        # asof(2019-02-01)：该日若是交易日则为自身，否则向前取最近 ≤
+        last_le = dates[dates <= snap][-1]
+        assert t0 == last_le
+
+    def test_resolve_first_tradeable_delay1_steps_forward(self):
+        dates = pd.bdate_range("2019-01-01", "2019-03-01")
+        snap = pd.Timestamp("2019-02-01")
+        t0 = RG.resolve_first_tradeable_date(dates, snap, 0)
+        t1 = RG.resolve_first_tradeable_date(dates, snap, 1)
+        assert t1 > snap                       # T+1：成交在决策日之后
+        assert t1 == dates[dates.get_loc(t0) + 1]
+
+    def test_delay0_earlier_base_raises(self):
+        """delay=0：标签起点 < asof(决策日)（越早基期）→ 硬断言触发。"""
+        dates = pd.bdate_range("2019-01-01", "2019-03-01")
+        snap = pd.Timestamp("2019-02-01")
+        asof_ = dates[dates <= snap][-1]
+        rows = pd.DataFrame([dict(snapshot_date=snap,
+                                  label_start_date=dates[0],     # 比 asof 更早
+                                  min_label_start=asof_)])
+        with pytest.raises(AssertionError):
+            RG.validate_label_contract(rows, self._spec(delay=0), context="t")
+
+    def test_delay0_future_base_raises(self):
+        """delay=0：标签 base 越过决策日(用未来价格做基期) → 前视硬断言触发。"""
+        dates = pd.bdate_range("2019-01-01", "2019-03-01")
+        snap = pd.Timestamp("2019-02-01")
+        asof_ = dates[dates <= snap][-1]
+        nxt = dates[dates.get_loc(asof_) + 1]
+        rows = pd.DataFrame([dict(snapshot_date=snap,
+                                  label_start_date=nxt,          # base 取到决策日之后
+                                  min_label_start=asof_)])
+        with pytest.raises(AssertionError):
+            RG.validate_label_contract(rows, self._spec(delay=0), context="t")
+
+    def test_declared_t1_but_base_uns_hifted_raises(self):
+        """C8 主场景：契约声明 exec_delay=1（T+1），但实现仍用决策日 bar 做基期 → 违规。"""
+        dates = pd.bdate_range("2019-01-01", "2019-03-01")
+        snap = pd.Timestamp("2019-02-01")
+        asof_ = dates[dates <= snap][-1]
+        t1 = dates[dates.get_loc(asof_) + 1]
+        rows = pd.DataFrame([dict(snapshot_date=snap,
+                                  label_start_date=asof_,       # 未把基期挪到 T+1
+                                  min_label_start=t1)])
+        with pytest.raises(AssertionError):
+            RG.validate_label_contract(rows, self._spec(delay=1), context="t")
+
+    def test_correct_t1_base_passes(self):
+        """T+1 契约 + 基期确实落在第一个可成交 bar → 通过。"""
+        dates = pd.bdate_range("2019-01-01", "2019-03-01")
+        snap = pd.Timestamp("2019-02-01")
+        asof_ = dates[dates <= snap][-1]
+        t1 = dates[dates.get_loc(asof_) + 1]
+        rows = pd.DataFrame([dict(snapshot_date=snap, label_start_date=t1, min_label_start=t1)])
+        assert RG.validate_label_contract(rows, self._spec(delay=1), context="t") == 0
+
+    def test_train_cutoff_h_matched_guard(self):
+        """F4 复发闸：horizon=12 的样本若在成熟前被用作训练 → raise。"""
+        with pytest.raises(AssertionError):
+            RG.assert_train_cutoff_h_matched(["2016-04-30"], "2016-10-31", 12, "fwd12")
+        # 成熟后才可用 → 通过
+        RG.assert_train_cutoff_h_matched(["2016-04-30"], "2017-05-31", 12, "fwd12")
+
+    def test_contract_sidecar_written(self, tmp_path):
+        out = str(tmp_path / "panel.csv")
+        side = RG.write_contract_sidecar(out, self._spec())
+        assert os.path.exists(side)
+        import json as _json
+        with open(side, encoding="utf-8") as fh:
+            d = _json.load(fh)
+        assert set(d) >= {"标签窗", "特征窗", "训练截止规则", "执行延迟"}

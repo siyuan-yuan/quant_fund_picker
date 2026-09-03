@@ -25,7 +25,24 @@ import risk as R
 from engine import score_fund, resolve_weights, market_water
 from config import (CACHE_DIR, RATING_BANDS, YOUNG_MAX_DAYS)
 
+# 【C8 研究纪律护栏, 2026-09-02】本面板为 canonical 全池因子面板(仅评估, 非训练样本)：
+# fwd1/3/6 标签基期 = asof(决策日)（score_one 内 idx = searchsorted(d,'right')-1，标签口径
+# exec_delay=0，base 不越过决策日 → 无 F4 类前视）。护栏把标签契约四元组写入产物 manifest 头；
+# 不改任何 fwd/评分数值。执行层 T+1(D0.4) 属另一层口径，分离打标。
+import research_guard as RG
+
 PANEL_DIR = os.path.join("output", "p1_panel")
+
+# C8 四元组：标签窗(fwd1/3/6, 交易日21/63/126) / 特征窗(决策日d截断) / 训练截止(评估标签不作训练截止)
+# 执行延迟(标签口径 0 交易日)。horizon_months 仅为审计可读近似，真实窗见 HORIZONS(trading days)。
+P1_CONTRACT = RG.LabelSpec(
+    pipeline="p1_panel_canonical",
+    horizon_months=(1, 3, 6),
+    feature_snapshot_rule="决策日 d 当月截断；资格=净值≥800行 + 最近披露≥d-7天；类型来自基金类型字段(≤d 可判定)",
+    train_cutoff_rule="评估标签(仅 IC/相关性)，不作训练；如被下游用于训练须另走 h 匹配截止",
+    exec_delay_days=0,
+    base_rule="标签以 asof(决策日) 当月 bar 为基期起算 (delay=0)；fwd1/3/6 = 21/63/126 交易日",
+)
 
 def _set_panel_dir(p):
     global PANEL_DIR
@@ -249,6 +266,15 @@ def main():
         dates.append(str(d.date()))
     if args.limit:
         dates = dates[: args.limit]
+
+    # 【C8】标签契约四元组写进产物 manifest 头（sidecar JSON + manifest.csv 记录 + stdout 日志头）
+    side = RG.write_contract_sidecar(os.path.join(PANEL_DIR, "canonical_panel.csv"),
+                                     P1_CONTRACT,
+                                     manifest_path=os.path.join(PANEL_DIR,
+                                                                "label_contract.manifest.jsonl"))
+    print(f"[C8] 标签契约已写 {side} | 决策月 {len(dates)}")
+    for _ln in P1_CONTRACT.header_lines():
+        print("  " + _ln)
 
     man_rows = []
     t0 = time.time()
