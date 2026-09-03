@@ -1,0 +1,1 @@
+{"ts": "2026-09-03T14:06:35", "commit": "046d34d2", "params": {"stage": "S6.1_evidence_snapshot", "note": "S6.1 抽样维度产物指纹回填;R3.5/b21/s62等其余产物实物不在本沙箱(多次重置+不入库),待其所在机(用户本机)重跑补全"}, "note": "", "inputs": {}, "artifacts": {"s61_robustness.csv": "c0e2e9a3a79cf19e", "s61_summary.md": "4d79147e07493d73"}}
