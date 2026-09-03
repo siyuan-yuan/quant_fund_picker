@@ -219,8 +219,12 @@ def build_date(d, uni, maxn, workers=2, seed_salt=0):
         base_seed = int(str(d).replace("-", ""))
         seed = base_seed if seed_salt == 0 else base_seed * 10 + seed_salt
         elig = list(np.random.RandomState(seed).choice(elig, maxn, replace=False))
+    # 【M13 修复，2026-09-03】原硬编码 max_workers=2，--workers 入参被静默忽略（执行台账登记 M13）。
+    # 现改用调用方传入的 workers。数值零影响：M11 修复后评分结果按 code 稳定排序，产出与线程数无关
+    # （只影响吞吐）；workers<=0 时回退 1，避免 ThreadPoolExecutor 抛 ValueError。
+    nw = max(1, int(workers)) if workers else 1
     rows = []
-    with ThreadPoolExecutor(max_workers=2) as ex:
+    with ThreadPoolExecutor(max_workers=nw) as ex:
         futs = {ex.submit(score_one, c, d): c for c in elig}
         for fut in as_completed(futs):
             rec = fut.result()
@@ -239,7 +243,8 @@ def main():
     ap.add_argument("--end", default="2026-03")
     ap.add_argument("--maxn", type=int, default=500)
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 个决策月(冒烟用)")
-    ap.add_argument("--workers", type=int, default=2)
+    ap.add_argument("--workers", type=int, default=2,
+                    help="评分并行线程数（M13 修复后真正生效；<=0 回退 1）")
     ap.add_argument("--seed-salt", type=int, default=0,
                     help="S6.1: 抽样种子盐; 0=历史原式, >0 生成稳健性变体面板")
     ap.add_argument("--panel-dir", default=None, help="S6.1: 变体面板输出目录(默认 output/p1_panel)")
