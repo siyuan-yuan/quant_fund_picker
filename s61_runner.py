@@ -19,7 +19,12 @@ import subprocess
 import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-PY = "/home/user/.venv_review/bin/python"
+# 【2026-09-02 跨平台修复 M16】原为硬编码 "/home/user/.venv_review/bin/python"（沙箱专属路径），
+# 在 Windows / macOS / 其他 Linux 机器上必然 FileNotFoundError。
+# 改用 sys.executable = "当前正在运行本脚本的解释器"，天然跨平台且保证子进程与父进程同环境
+# （即：用哪个 venv 启动 s61_runner.py，子进程 p1_panel_build.py 就用哪个）。
+# 纯执行环境修复，不改变任何计算/参数/面板内容。
+PY = sys.executable
 
 CONFIGS = [(s, m) for s in (1, 2, 3, 4, 5) for m in (500, 1000)] + [(0, 0)]  # maxn=0 ⇒ 全取（seed 维度塌缩）
 
