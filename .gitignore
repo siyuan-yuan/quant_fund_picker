@@ -111,6 +111,15 @@ output/v5/r35_zoo_redo/*
 !output/v5/r35_zoo_redo/fwd12_ab.csv
 !output/v5/r35_zoo_redo/e2e_summary.csv
 
+# V6 A 类小产物（2026-09-07 追加）
+# t0_source_probe.csv 是 T0 "数据源不得口头放弃、需留日志" 的**取证本体**，
+# 被 docs/V6_T0_数据底座验收报告.md 直接引用；不放行则每次沙箱重置即丢失
+# （本会话已丢失一次），文档将指向不存在的证据。
+!output/v6/
+output/v6/*
+!output/v6/t0_source_probe.csv
+!output/v6/*.md
+
 # B2.1 基线分解 / S6.2 参数邻域 / manifest 指纹
 !output/v5/b21_decomposition.csv
 !output/v5/b21_baseline_summary.md
