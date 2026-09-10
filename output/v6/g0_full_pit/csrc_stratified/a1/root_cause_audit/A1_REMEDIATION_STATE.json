@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-09T21:28:41+08:00",
-  "phase": "a2_implementation_task_6_gate",
-  "status": "A2_TASK_5_TIMELINE_COMPLETE",
+  "updated_at": "2026-09-10T06:28:01+00:00",
+  "phase": "a2_implementation_task_8_validation",
+  "status": "A2_TASK_7_RUNNER_COMPLETE",
   "immutable_first_adjudication": "a1/v2 G0 FAIL",
   "frozen_checkpoint_count": 1371,
   "frozen_checkpoint_sha256": "477b944f504b04bbeb2a24faa4192764fb3eba2ce0ccd5ea3e588bab33172efd",
@@ -113,7 +113,34 @@
     "a2_timeline_sha256": "86ecbe4ad36bcb00dfc19e9e3f18fd1751bdfaaea9995f9cf260f8375f9d7cdb",
     "test_sha256": "a9f2866627617a651da1f629160ca0b0202a481e73ff73503bd9691effce77b6"
   },
-  "next_action": "Execute Task 6 with TDD: create tests/test_v6_a2_gate.py first for every exact Gate boundary and artifact mode/immutability rule, then implement v6/a2_gate.py. Do not write any real A2 denominator, disposition artifact, or formal verdict during Task 6 tests.",
+  "a2_task_6": {
+    "tests": "22 passed in 10.38s; exit 0; prescribed regression 98 passed in 22.47s; exit 0",
+    "red_evidence": "tests/test_v6_a2_gate.py was created before v6/a2_gate.py; the first pytest collection failed with ModuleNotFoundError: v6.a2_gate",
+    "gate_semantics": "exact integer thresholds: event and active decision observation coverage 95/100; family coverage 90/100; each of six strata 80/100; critical lifecycle/change events 100%; causal violations, nonpositive intervals, unresolved conflicts, and future evidence violations block the Gate independently",
+    "artifact_semantics": "shadow performs no filesystem mutation; freeze_denominator writes only legal event, evidence-candidate, decision-observation identity CSVs and a manifest; repeated identical freeze is byte-identical; adjudicate requires the frozen manifest and denominator hash; formal writes use a fsync-before-directory-replace boundary and refuse existing adjudication directories",
+    "a2_gate_sha256": "1a84e2dcd46bd2e1a5553538de8c8d2d56bc713c01e3132be5e514757aa57bd4",
+    "test_sha256": "6142b58b3ba97963536780876b02ed36b83c39422374ce07d6ec084b9c781220",
+    "regression": "python -m pytest tests/test_v6_a2_gate.py tests/test_v6_g0_checkpoint_gate.py -q; 98 passed; exit 0",
+    "git": "NO_GIT"
+  },
+  "a2_task_7": {
+    "tests": "10 passed in 0.41s; exit 0",
+    "red_evidence": "tests/test_v6_a2_runner.py was created before v6/a2_runner.py; initial collection failed with ModuleNotFoundError: v6.a2_runner",
+    "runner_semantics": "six pre-adjudication modes are exposed; no --adjudicate mode exists; every phase writes only A2_IMPLEMENTATION_STATE.json; state stores input, split and code/test manifest hashes, row counts, completed phases and an exact next command; same-hash reruns are byte-identical, hash changes fail closed, development rejects untouched-validation leakage, freeze-denominators requires the ordered 243 monthly dates, and output paths containing a1/v2 are refused",
+    "task7_sha256": "ae5254719f6a6cf59d675078cd892d4018018a43b15074ed15ad7a8dfc0ebce9",
+    "test_sha256": "77ea213aa91468c6151cff15be8ec537334c78a5a094fcbe32b932cea7a59268",
+    "runner_gate_regression": "python -m pytest tests/test_v6_a2_runner.py tests/test_v6_a2_gate.py tests/test_v6_g0_checkpoint_gate.py -q; 108 passed; exit 0",
+    "planned_group_results": {
+      "eligibility_schedule": "31 passed; exit 0",
+      "events_evidence": "24 passed; exit 0",
+      "timeline_gate_runner": "39 passed; exit 0",
+      "a1_regression_available_inputs": "214 passed, 1 deselected; exit 0",
+      "a1_regression_full": "214 passed, 1 failed because ignored input PDF output/v6/g0_full_pit/csrc_stratified/pdf/400013_321232.pdf is absent; not a runner failure"
+    },
+    "real_a2_artifacts_generated": false,
+    "git": "NO_GIT"
+  },
+  "next_action": "Task 8 is the next approved recovery point. Do not run it automatically in this turn; it requires development audit, independent review, external 120-row cohort freeze/labels, family validation and reviewed denominator freeze before any A2 adjudication.",
   "prohibitions": [
     "Do not modify or rerun a1/v2",
     "Do not create document_dispositions.csv or a Gate verdict in the shadow phase",
