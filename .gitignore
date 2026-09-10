@@ -1,0 +1,199 @@
+# ============================================================
+# Python
+# ============================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+*.so
+
+# ============================================================
+# Virtual environments
+# ============================================================
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# ============================================================
+# Test, coverage and static-analysis caches
+# ============================================================
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.tox/
+.nox/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+.hypothesis/
+
+# Test outputs are reproducible and should not be versioned.
+**/*-pytest.xml
+**/junit*.xml
+**/pytest*.log
+**/test-*.xml
+
+# ============================================================
+# Build and package artifacts
+# ============================================================
+build/
+dist/
+.eggs/
+*.egg
+*.egg-info/
+pip-wheel-metadata/
+
+# ============================================================
+# Jupyter
+# ============================================================
+.ipynb_checkpoints/
+
+# ============================================================
+# Secrets and machine-local configuration
+# ============================================================
+.env
+.env.*
+!.env.example
+!.env.template
+
+*.pem
+*.key
+*.p12
+*.pfx
+
+secrets/
+credentials/
+
+# ============================================================
+# Runtime and temporary files
+# ============================================================
+*.log
+*.log.*
+*.pid
+*.seed
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*.lock
+
+logs/
+log/
+tmp/
+temp/
+.tmp/
+.cache/
+scratch/
+sandbox/
+local/
+*.local
+
+# ============================================================
+# Local databases
+# ============================================================
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# ============================================================
+# IDE, AI-agent and operating-system state
+# ============================================================
+.vscode/
+.idea/
+*.code-workspace
+
+.claude/
+.codex/
+.superpowers/
+.agents/
+
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Thumbs.db:encryptable
+Desktop.ini
+ehthumbs.db
+$RECYCLE.BIN/
+*.lnk
+
+# ============================================================
+# Data caches
+#
+# Ignore cache by default. Keep only the compact authoritative
+# inputs required to resume the current V6-G0-A2 work.
+# ============================================================
+/cache/**
+
+!/cache/tushare/
+!/cache/tushare/bulk/
+
+# Frozen SSE calendar used to reproduce all 243 decision dates.
+!/cache/tushare/bulk/trade_cal.csv
+
+# Compact official fund master needed by V6/A2 reconstruction.
+!/cache/tushare/bulk/fund_basic.csv
+
+# Large and reproducible caches remain excluded:
+# - fund_nav.csv (about 808 MiB)
+# - fund_manager.csv
+# - bulk shards
+# - ordinary NAV/index downloads
+
+# ============================================================
+# Generated outputs
+#
+# Ignore output by default, then retain only immutable A1
+# evidence and the inputs/state required to resume A2 Task 6.
+# ============================================================
+/output/**
+
+!/output/v6/
+!/output/v6/g0_full_pit/
+
+# Frozen 60-family sample and alias mapping.
+!/output/v6/g0_full_pit/csrc_stratified_sample.csv
+!/output/v6/g0_full_pit/csrc_stratified_aliases.csv
+
+!/output/v6/g0_full_pit/csrc_stratified/
+
+# Official document metadata required by the A2 event runner.
+!/output/v6/g0_full_pit/csrc_stratified/metadata.jsonl
+
+# Preserve the complete immutable first A1 adjudication.
+!/output/v6/g0_full_pit/csrc_stratified/a1/
+!/output/v6/g0_full_pit/csrc_stratified/a1/v2/
+!/output/v6/g0_full_pit/csrc_stratified/a1/v2/**
+
+# Exclude reproducible runtime logs even inside frozen directories.
+output/v6/g0_full_pit/csrc_stratified/a1/v2/*.log
+
+# Preserve remediation diagnostics, structured-section cache,
+# split definition, implementation reports and exact resume state.
+!/output/v6/g0_full_pit/csrc_stratified/a1/root_cause_audit/
+!/output/v6/g0_full_pit/csrc_stratified/a1/root_cause_audit/**
+
+# Runtime-only files remain excluded.
+output/v6/g0_full_pit/csrc_stratified/a1/root_cause_audit/**/__pycache__/
+output/v6/g0_full_pit/csrc_stratified/a1/root_cause_audit/**/*.log
+output/v6/g0_full_pit/csrc_stratified/a1/root_cause_audit/**/*-pytest.xml
+output/v6/g0_full_pit/csrc_stratified/a1/root_cause_audit/**/junit*.xml
+
+# Future A2 validation, manifests and frozen denominators must be
+# committed so another checkout can resume from the exact phase.
+!/output/v6/g0_full_pit/csrc_stratified/a2/
+!/output/v6/g0_full_pit/csrc_stratified/a2/**
+
+# Never upload the roughly 2 GiB source-PDF mirror through normal Git.
+# The compact metadata and structured section cache above are sufficient
+# for the currently planned Task 6–8 workflow.
+output/v6/g0_full_pit/csrc_stratified/pdf/
+
+# Other bulk/rebuildable V6 outputs stay ignored unless explicitly
+# promoted into one of the frozen directories above.

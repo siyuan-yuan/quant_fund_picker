@@ -1,0 +1,181 @@
+﻿checkpoint_id,family_key,stratum,population_count,source_document,known_at,report_name,report_code,cache_error,text_chars,extraction_status,parser_record,audit_bucket,pdf_page,evidence_excerpt,finding,section_observation,disposition,noop_audit
+0128b952435a914c3df3a1b9d144b4a45c77c93626b07f93ea70ef73dbb5f847,长信基金管理有限责任公司|长信医疗保健行业灵活配置混合(LOF)-,存续|2013_2019,145,163001_155371.pdf,2014-11-11,长信中证中央企业100指数型证券投资基金（LOF）更新的招募说明书（2014年【2】号）,FA010030,No explicit equity allocation constraint found,125127,success,"{""failure"": {""reason"": ""No explicit equity allocation constraint found"", ""report_code"": ""FA010030"", ""report_name"": ""长信中证中央企业100指数型证券投资基金（LOF）更新的招募说明书（2014年【2】号）"", ""share_code"": ""163001"", ""upload_info_id"": ""155371""}, ""parser_version"": 16, ""source_document"": ""163001_155371.pdf"", ""status"": ""failure""}",CLAUSE_PRESENT_IMPLEMENTATION_GAP,51,"             长信中证中央企业 100 指数证券投资基金（LOF）更新的招募说明书
+
+
+
+
+               十、基金的投资
+
+（一）投资目标
+  本基金进行被动式指数化投资，通过严格的投资纪律约束和数量化风险管理
+手段，追求基金净值增长率与业绩比较基准收益率之间跟踪偏离度和跟踪误差的
+最小化，力争日均跟踪偏离度的绝对值不超过 0.35%，年跟踪误差不超过 4%，以
+实现对标的指数的有效跟踪。
+
+
+
+（二）投资范围
+  本基金资产投资于具有良好流动性的金融工具，主要包括中证中央企业 100
+指数的成份股及其备选成份股、新股（一级市场初次发行或增发）、现金或者到
+期日在一年以内的政府债券等。
+  本基金投资于股票资产的比例占基金资产的 90%-95%，其中，中证中央企业
+100 指数的成份股及其备选成份股的投资比例不低于基金资产的 90%。本基金投
+资于现金或者到期日在一年以内的政府债券的比例不低于基金资产净值的 5%。
+  此外，本基金还可以投资于经中国证监会批准的允许本基金投资的其它金融
+工具，待指数衍生金融产品推出以后，基金管理人可以履行适当程序使本基金运
+用衍生金融产品进行风险管理。
+
+
+
+（三）投资策略
+  本基金为被动式指数基金，原则上采用完全复制法，按照成份股在中证中央",股票资产90%-95%；基金的投资、投资目标、投资范围和投资策略均可读。,投资章节或投资条款存在；正式cache失败标签不足以定位真实层级,UNRESOLVED,未作NOOP裁决；核心比例相同不足以证明同一完整章节与合法predecessor相同
+020162855201ff393ccd0877c7b5ecd7f454cf2388d4da73700aea08d1cb53cb,易方达基金管理有限公司|易方达科顺定开灵活配置混合,存续|2013_2019,145,161132_235723.pdf,2018-09-11,易方达基金管理有限公司关于增加陆基金为易方达科顺定期开放灵活配置混合型证券投资基金销售机构的公告,FC900090,No explicit equity allocation constraint found,946,success,"{""failure"": {""reason"": ""No explicit equity allocation constraint found"", ""report_code"": ""FC900090"", ""report_name"": ""易方达基金管理有限公司关于增加陆基金为易方达科顺定期开放灵活配置混合型证券投资基金销售机构的公告"", ""share_code"": ""161132"", ""upload_info_id"": ""235723""}, ""parser_version"": 5, ""source_document"": ""161132_235723.pdf"", ""status"": ""failure""}",NON_CLASSIFICATION_NOTICE,1,易方达基金管理有限公司关于增加陆基金为易方达科顺定期开放灵活配置混合型证券投资基金销售机构的公告,本件是易方达基金管理有限公司关于增加陆基金为易方达科顺定期开放灵活配置混合型证券投资基金销售机构的公告；属于事项公告，当前样本未发现投资分类条款，不能据此证明全家族官方历史无证据。,标题/正文事项非投资章节；evidence_excerpt为metadata标题，非PDF原文,UNRESOLVED,未作NOOP裁决；核心比例相同不足以证明同一完整章节与合法predecessor相同
+0458a4e6391a79820b7cf5f92cb0fd7fcf3702ab16d660ba0a02df2c3bcc6626,泓德基金管理有限公司|泓德丰泽混合(LOF)-,存续|2013_2019,145,501071_85741.pdf,2019-02-25,关于新增国金证券股份有限公司为泓德三年封闭运作丰泽混合型证券投资基金销售机构的公告,FC900090,No explicit equity allocation constraint found,829,success,"{""failure"": {""reason"": ""No explicit equity allocation constraint found"", ""report_code"": ""FC900090"", ""report_name"": ""关于新增国金证券股份有限公司为泓德三年封闭运作丰泽混合型证券投资基金销售机构的公告"", ""share_code"": ""501071"", ""upload_info_id"": ""85741""}, ""parser_version"": 5, ""source_document"": ""501071_85741.pdf"", ""status"": ""failure""}",NON_CLASSIFICATION_NOTICE,1,关于新增国金证券股份有限公司为泓德三年封闭运作丰泽混合型证券投资基金销售机构的公告,本件是关于新增国金证券股份有限公司为泓德三年封闭运作丰泽混合型证券投资基金销售机构的公告；属于事项公告，当前样本未发现投资分类条款，不能据此证明全家族官方历史无证据。,标题/正文事项非投资章节；evidence_excerpt为metadata标题，非PDF原文,UNRESOLVED,未作NOOP裁决；核心比例相同不足以证明同一完整章节与合法predecessor相同
+09c092f0e84ca6185a14d8f75fd6e392a979a70adb8fa34b2e5cc658aefc1ac1,农银汇理基金管理有限公司|农银汇理瑞云增益6个月持有期混合-,存续|2020_2026,38,017624_1385081.pdf,2025-11-05,农银汇理瑞云增益6个月持有期混合型证券投资基金-招募说明书更新-2025年第2次,FA010030,No explicit equity allocation constraint found,127992,success,"{""failure"": {""reason"": ""No explicit equity allocation constraint found"", ""report_code"": ""FA010030"", ""report_name"": ""农银汇理瑞云增益6个月持有期混合型证券投资基金-招募说明书更新-2025年第2次"", ""share_code"": ""017624"", ""upload_info_id"": ""1385081""}, ""parser_version"": 16, ""source_document"": ""017624_1385081.pdf"", ""status"": ""failure""}",JOINT_ASSET_CONSTRAINT,45,"农银汇理瑞云增益 6 个月持有期混合型证券投资基金       招募说明书
+
+
+
+第九部分     基金的投资
+一、投资目标
+  本基金主要投资于债券等固定收益类金融工具，辅助投资于精选的股票，力
+争控制基金的回撤水平，追求资产净值的长期稳健增值。
+二、投资范围
+  本基金的投资范围为具有良好流动性的金融工具，包括国内依法发行上市的
+股票（包括创业板及其他经中国证监会核准、注册发行的股票）、国债、金融债、
+地方政府债、公司债、企业债、可转换债券、可交换债券、央行票据、中期票据、
+短期融资券、超短期融资券、债券回购、资产支持证券、同业存单、银行存款（包
+括协议存款、定期存款及其他银行存款）、货币市场工具、股指期货、国债期货，
+以及法律法规或中国证监会允许基金投资的其他金融工具，但须符合中国证监会
+相关规定。
+  如法律法规或监管机构以后允许基金投资其他品种，基金管理人在履行适当
+程序后，可以将其纳入投资范围。
+  基金的投资组合比例为：本基金投资于股票、可交换债券和可转换债券（不
+含分离交易可转债的纯债部分）资产的比例合计占基金资产的 10%-30%，同业
+存单的投资占基金资产的比例合计不超过 20%。每个交易日日终在扣除股指期货
+合约和国债期货合约需缴纳的交易保证金后，现金或",股票、可交换债券、可转换债券合计10%-30%；并非股票单独10%-30%。,投资章节或投资条款存在；正式cache失败标签不足以定位真实层级,UNRESOLVED,未作NOOP裁决；核心比例相同不足以证明同一完整章节与合法predecessor相同
+1c95712ebe6eadb1611417b0129105fa38aed337107b23b1a80020a8791304b8,长江证券(上海)资产管理有限公司|长江楚财一年持有期混合-,存续|2020_2026,38,017464_1089218.pdf,2024-05-31,长江楚财一年持有期混合型发起式证券投资基金（C类份额）基金产品资料概要更新,FA010080,No explicit equity allocation constraint found,8927,success,"{""failure"": {""reason"": ""No explicit equity allocation constraint found"", ""report_code"": ""FA010080"", ""report_name"": ""长江楚财一年持有期混合型发起式证券投资基金（C类份额）基金产品资料概要更新"", ""share_code"": ""017464"", ""upload_info_id"": ""1089218""}, ""parser_version"": 16, ""source_document"": ""017464_1089218.pdf"", ""status"": ""failure""}",JOINT_ASSET_CONSTRAINT,2,"    长江楚财一年持有期混合型发起式证券投资基金（C类份额）基金产品资料概要更新
+
+
+         资产和固定收益类资产，力争实现基金资产的持续稳健增值。
+           本基金的投资范围为具有良好流动性的金融工具，包括国内依法发行上市
+         的股票（包括创业板及其他经中国证监会核准或注册上市的股票）、债券（包
+         括国债、央行票据、金融债、企业债、公司债、中期票据、短期融资券、超短
+         期融资券、公开发行的次级债、政府支持机构债、政府支持债券、地方政府债、
+         可转换债券（含可分离交易可转换债券的纯债部分）、可交换债券等）、资产
+         支持证券、债券回购、银行存款、同业存单、货币市场工具、股指期货、国债
+         期货，以及法律法规或中国证监会允许基金投资的其他金融工具（但须符合中
+         国证监会的相关规定）。
+           如法律法规或监管机构以后允许基金投资其他品种，基金管理人在履行适
+投资范围
+         当程序后，可以将其纳入投资范围。
+           本基金的投资组合比例为：本基金股票资产、可转换债券（不含可分离交
+         易可转换债券的纯债部分）及可交换债券等资产占基金资产的比例为10%～3
+         0%；",股票、可转债及可交换债券合计10%～30%；概要表格把30拆为跨行3/0，需规范化。,投资章节或投资条款存在；正式cache失败标签不足以定位真实层级,UNRESOLVED,未作NOOP裁决；核心比例相同不足以证明同一完整章节与合法predecessor相同
+216a09e601fac2afa009f17f10498c5a124739977ee0a93097dbdf6b3310df71,长江证券(上海)资产管理有限公司|长江楚财一年持有期混合-,存续|2020_2026,38,017464_893158.pdf,2023-05-09,长江楚财一年持有期混合型发起式证券投资基金基金合同,FA020010,No explicit equity allocation constraint found,93028,success,"{""failure"": {""reason"": ""No explicit equity allocation constraint found"", ""report_code"": ""FA020010"", ""report_name"": ""长江楚财一年持有期混合型发起式证券投资基金基金合同"", ""share_code"": ""017464"", ""upload_info_id"": ""893158""}, ""parser_version"": 16, ""source_document"": ""017464_893158.pdf"", ""status"": ""failure""}",JOINT_ASSET_CONSTRAINT,50,"长江楚财一年持有期混合型发起式证券投资基金                基金合同
+
+
+
+             第十二部分           基金的投资
+
+
+  一、投资目标
+  在严格控制风险和保持资产流动性的基础上，通过积极主动的配置权益类资
+产和固定收益类资产，力争实现基金资产的持续稳健增值。
+  二、投资范围
+  本基金的投资范围为具有良好流动性的金融工具，包括国内依法发行上市的
+股票（包括创业板及其他经中国证监会核准或注册上市的股票）、债券（包括国
+债、央行票据、金融债、企业债、公司债、中期票据、短期融资券、超短期融资
+券、公开发行的次级债、政府支持机构债、政府支持债券、地方政府债、可转换
+债券（含可分离交易可转换债券的纯债部分）、可交换债券等）、资产支持证券、
+债券回购、银行存款、同业存单、货币市场工具、股指期货、国债期货，以及法
+律法规或中国证监会允许基金投资的其他金融工具（但须符合中国证监会的相关
+规定）。
+  如法律法规或监管机构以后允许基金投资其他品种，基金管理人在履行适当
+程序后，可以将其纳入投资范围。
+  本基金的投资组合比例为：本基金股票资产、可转换债券（不含可分离交易
+可转换债券的纯债部分）及可交换债券等资产占基金资产的比例为 10%～30%；
+同业存单投资比例为基金资产的 0-20%；每个交易日",基金合同第十二部分投资范围存在；股票、可转债及可交换债券合计10%～30%。,投资章节或投资条款存在；正式cache失败标签不足以定位真实层级,UNRESOLVED,未作NOOP裁决；核心比例相同不足以证明同一完整章节与合法predecessor相同
+00146026bc8821c698f580808b7ec690cbb0b3218f4c957834dbb74a109387c0,兴证全球基金管理有限公司|兴全趋势投资混合(LOF),存续|pre2013,563,163402_256866.pdf,2013-07-11,关于代表兴全趋势基金诉江苏熔盛重工有限公司缔约过失责任纠纷案二审结果公告,FC900090,No explicit equity allocation constraint found,884,success,"{""failure"": {""reason"": ""No explicit equity allocation constraint found"", ""report_code"": ""FC900090"", ""report_name"": ""关于代表兴全趋势基金诉江苏熔盛重工有限公司缔约过失责任纠纷案二审结果公告"", ""share_code"": ""163402"", ""upload_info_id"": ""256866""}, ""parser_version"": 5, ""source_document"": ""163402_256866.pdf"", ""status"": ""failure""}",NON_CLASSIFICATION_NOTICE,1,关于代表兴全趋势基金诉江苏熔盛重工有限公司缔约过失责任纠纷案二审结果公告,本件是关于代表兴全趋势基金诉江苏熔盛重工有限公司缔约过失责任纠纷案二审结果公告；属于事项公告，当前样本未发现投资分类条款，不能据此证明全家族官方历史无证据。,标题/正文事项非投资章节；evidence_excerpt为metadata标题，非PDF原文,UNRESOLVED,未作NOOP裁决；核心比例相同不足以证明同一完整章节与合法predecessor相同
+00aa09edf155837e3028ed3b5d8301a580b1f9040dfaef36dae9af2095a112c2,兴证全球基金管理有限公司|兴全趋势投资混合(LOF),存续|pre2013,563,163402_62061.pdf,2018-09-14,兴全趋势投资混合型证券投资基金（LOF）分红公告（第十二次） ,FC900090,No explicit equity allocation constraint found,3172,success,"{""failure"": {""reason"": ""No explicit equity allocation constraint found"", ""report_code"": ""FC900090"", ""report_name"": ""兴全趋势投资混合型证券投资基金（LOF）分红公告（第十二次） "", ""share_code"": ""163402"", ""upload_info_id"": ""62061""}, ""parser_version"": 5, ""source_document"": ""163402_62061.pdf"", ""status"": ""failure""}",NON_CLASSIFICATION_NOTICE,1,兴全趋势投资混合型证券投资基金（LOF）分红公告（第十二次） ,本件是兴全趋势投资混合型证券投资基金（LOF）分红公告（第十二次） ；属于事项公告，当前样本未发现投资分类条款，不能据此证明全家族官方历史无证据。,标题/正文事项非投资章节；evidence_excerpt为metadata标题，非PDF原文,UNRESOLVED,未作NOOP裁决；核心比例相同不足以证明同一完整章节与合法predecessor相同
+014d8daeeaf5feb3efb192dbc6861c979054f0f987cf798027b5b12fbd10ae67,中欧基金管理有限公司|中欧新动力混合(LOF)-,存续|pre2013,563,166009_208469.pdf,2015-09-23,中欧新动力混合型证券投资基金（LOF）更新招募说明书（2015年第2号）,FA010030,No explicit equity allocation constraint found,116312,success,"{""failure"": {""reason"": ""No explicit equity allocation constraint found"", ""report_code"": ""FA010030"", ""report_name"": ""中欧新动力混合型证券投资基金（LOF）更新招募说明书（2015年第2号）"", ""share_code"": ""166009"", ""upload_info_id"": ""208469""}, ""parser_version"": 16, ""source_document"": ""166009_208469.pdf"", ""status"": ""failure""}",JOINT_ASSET_CONSTRAINT_WITH_HISTORY,2,"明书（2015 年第 2 号）
+
+
+
+
+                    重要提示
+  本基金经 2010 年 11 月 17 日中国证券监督管理委员会下发的《关于核准中
+欧新动力股票型证券投资基金（LOF）募集的批复》（证监许可[2010]1646 号文）
+核准，进行募集。本基金基金合同于 2011 年 2 月 10 日正式生效，其中股票、权
+证等权益类资产占基金资产的比例为 60%～95%。根据原《证券投资基金运作管
+理办法》规定，本基金为股票型证券投资基金。根据 2014 年 8 月 8 日修订后施
+行的《公开募集证券投资基金运作管理办法》（证监会令第 104 号）第三十条第
+一项的规定，股票基金的股票资产投资比例要求由原来的“百分之六十以上”调
+整为“百分之八十以上”。基金管理人经与基金托管人协商一致，并报中国证监
+会备案，决定自 2015 年 7 月 17 日起将本基金变更为混合型证券投资基金，《基
+金合同》中的相关条款亦做相应修订。
+  基金管理人保证本招募说明书的内容真实、准确、完整。本招募说明书经中
+国证监会核准，但中国证监会对本基金募集的核准，并不表明其对本基金的价值
+和收益做出实质性判断或保证，也不表明投资于本基金没有风险。
+  基金管理人依照恪尽职守、诚实信用、谨慎勤勉的原则管理和运用基金财产，
+但不保证投资本基金一定盈利，也不",股票、权证等权益类资产60%～95%；同页区分2011成立与2015-07-17转混合。不能将历史股票分类写回当前。,投资章节或投资条款存在；正式cache失败标签不足以定位真实层级,UNRESOLVED,未作NOOP裁决；核心比例相同不足以证明同一完整章节与合法predecessor相同
+036e01447598e5678f92be636beb58c5c8277be1383a24dfa6119c2c33b3fb3c,大成基金管理有限公司|大成景益平稳收益混合-,清盘|2013_2019,65,000695_165641.pdf,2018-07-24,大成景益平稳收益混合型证券投资基金更基金经理公告,FC900090,No explicit equity allocation constraint found,915,success,"{""failure"": {""reason"": ""No explicit equity allocation constraint found"", ""report_code"": ""FC900090"", ""report_name"": ""大成景益平稳收益混合型证券投资基金更基金经理公告"", ""share_code"": ""000695"", ""upload_info_id"": ""165641""}, ""parser_version"": 5, ""source_document"": ""000695_165641.pdf"", ""status"": ""failure""}",NON_CLASSIFICATION_NOTICE,1,大成景益平稳收益混合型证券投资基金更基金经理公告,本件是大成景益平稳收益混合型证券投资基金更基金经理公告；属于事项公告，当前样本未发现投资分类条款，不能据此证明全家族官方历史无证据。,标题/正文事项非投资章节；evidence_excerpt为metadata标题，非PDF原文,UNRESOLVED,未作NOOP裁决；核心比例相同不足以证明同一完整章节与合法predecessor相同
+08655e812f747bae184ed017788fc5726a997f31d662c4d57eb0d4566393661f,银河基金管理有限公司|银河犇利灵活配置混合-,清盘|2013_2019,65,519649_111656.pdf,2018-10-26,关于以通讯方式召开银河犇利灵活配置混合型证券投资基金基金份额持有人大会的第二次提示性公告,FC900090,No explicit equity allocation constraint found,13361,success,"{""failure"": {""reason"": ""No explicit equity allocation constraint found"", ""report_code"": ""FC900090"", ""report_name"": ""关于以通讯方式召开银河犇利灵活配置混合型证券投资基金基金份额持有人大会的第二次提示性公告"", ""share_code"": ""519649"", ""upload_info_id"": ""111656""}, ""parser_version"": 5, ""source_document"": ""519649_111656.pdf"", ""status"": ""failure""}",NON_CLASSIFICATION_NOTICE,1,关于以通讯方式召开银河犇利灵活配置混合型证券投资基金基金份额持有人大会的第二次提示性公告,本件是关于以通讯方式召开银河犇利灵活配置混合型证券投资基金基金份额持有人大会的第二次提示性公告；属于事项公告，当前样本未发现投资分类条款，不能据此证明全家族官方历史无证据。 PDF第2页审议事项为终止基金合同；第1页称第一次提示，metadata称第二次，需核对文档身份。,标题/正文事项非投资章节；evidence_excerpt为metadata标题，非PDF原文,UNRESOLVED,未作NOOP裁决；核心比例相同不足以证明同一完整章节与合法predecessor相同
+1302da139aee19fef613dba68bbb5fd03c16b64ab92cd944228450ec535a39f6,南方基金管理股份有限公司|南方荣安定开混合-,清盘|2013_2019,65,003610_239526.pdf,2017-11-17,南方荣安定期开放混合型证券投资基金开放申购、赎回及转换业务的公告,FC900090,No explicit equity allocation constraint found,14245,success,"{""failure"": {""reason"": ""No explicit equity allocation constraint found"", ""report_code"": ""FC900090"", ""report_name"": ""南方荣安定期开放混合型证券投资基金开放申购、赎回及转换业务的公告"", ""share_code"": ""003610"", ""upload_info_id"": ""239526""}, ""parser_version"": 5, ""source_document"": ""003610_239526.pdf"", ""status"": ""failure""}",NON_CLASSIFICATION_NOTICE,1,南方荣安定期开放混合型证券投资基金开放申购、赎回及转换业务的公告,本件是南方荣安定期开放混合型证券投资基金开放申购、赎回及转换业务的公告；属于事项公告，当前样本未发现投资分类条款，不能据此证明全家族官方历史无证据。,标题/正文事项非投资章节；evidence_excerpt为metadata标题，非PDF原文,UNRESOLVED,未作NOOP裁决；核心比例相同不足以证明同一完整章节与合法predecessor相同
+0ce229c12b70738986142fe9871553cef8b806b418051f40868aea4b2b0caf1d,上海海通证券资产管理有限公司|海通红利优选一年持有期混合-,清盘|2020_2026,46,850006_678107.pdf,2021-12-30,海通红利优选一年持有期混合型集合资产管理计划产品资料概要更新,FA010080,No explicit equity allocation constraint found,8164,success,"{""failure"": {""reason"": ""No explicit equity allocation constraint found"", ""report_code"": ""FA010080"", ""report_name"": ""海通红利优选一年持有期混合型集合资产管理计划产品资料概要更新"", ""share_code"": ""850006"", ""upload_info_id"": ""678107""}, ""parser_version"": 16, ""source_document"": ""850006_678107.pdf"", ""status"": ""failure""}",CLAUSE_PRESENT_IMPLEMENTATION_GAP,2,"规允许的情况下，本集合计划可以投资各类期权
+         品种。
+         如法律法规或监管机构以后允许集合计划投资其他品种，管理人在履
+         行适当程序后，可以将其纳入投资范围。
+         本集合计划的投资组合比例为：股票（含存托凭证）资产占集合计划
+         资产的 60%-95%（投资于港股通标的股票的比例合计占股票资产的
+         0%-50%），投资于本集合计划界定的红利优选相关证券的比例不低于非
+         现金集合计划资产的 80%；每个交易日日终在扣除股指期货合约、股票
+         期权合约需缴纳的保证金后，现金或到期日在一年以内的政府债券不
+         低于集合计划资产净值的 5%，其中现金不包括结算备付金、存出保证
+         金、应收申购款等。本集合计划将港股通标的股票投资的比例下限设
+         为零，本集合计划可根据投资策略需要或不同配置地市场环境的变化，
+         选择将部分集合计划资产投资于港股通标的股票或选择不将集合计划
+         资产投资于港股通标的股票，集合计划资产并非必然投资港股通标的
+         股票。
+         本集合计划的资产配置主要指“股票类资产”、“债券资产”、“衍生品
+         类资产”等之间的",股票（含存托凭证）60%-95%，港股占股票0%-50%；概要投资范围跨页。,投资章节或投资条款存在；正式cache失败标签不足以定位真实层级,UNRESOLVED,未作NOOP裁决；核心比例相同不足以证明同一完整章节与合法predecessor相同
+0ee730338fa3c692903f11450157c614415ff178a91f82a135701fe6565a2fdd,上海海通证券资产管理有限公司|海通红利优选一年持有期混合-,清盘|2020_2026,46,850006_678069.pdf,2021-12-30,海通红利优选一年持有期混合型集合资产管理计划招募说明书更新,FA010030,No explicit equity allocation constraint found,124380,success,"{""failure"": {""reason"": ""No explicit equity allocation constraint found"", ""report_code"": ""FA010030"", ""report_name"": ""海通红利优选一年持有期混合型集合资产管理计划招募说明书更新"", ""share_code"": ""850006"", ""upload_info_id"": ""678069""}, ""parser_version"": 16, ""source_document"": ""850006_678069.pdf"", ""status"": ""failure""}",CLAUSE_PRESENT_IMPLEMENTATION_GAP,50,"  海通红利优选一年持有期混合型集合资产管理计划招募说明书
+
+
+
+  四、投资限制
+  1、组合限制
+  集合计划的投资组合应遵循以下限制：
+  （1）本集合计划投资于股票（含存托凭证）的比例占集合计划资产的
+60%-95%（投资于港股通标的股票的比例合计占股票资产的 0%-50%），投资于本
+集合计划界定的红利优选相关证券的比例不低于非现金集合计划资产的 80%；
+  （2）每个交易日日终在扣除股指期货合约、股票期权合约需缴纳的交易保
+证金后，保持不低于集合计划资产净值 5%的现金或者到期日在一年以内的政府
+债券，其中现金不包括结算备付金、存出保证金和应收申购款等；
+  （3）本集合计划持有一家公司发行的证券（同一家公司在内地和香港同时
+上市的 A+H 股合计计算），其市值不超过集合计划资产净值的 10%；
+  （4）本管理人管理的全部公开募集性质的集合计划持有一家公司发行的证
+券（同一家公司在内地和香港同时上市的 A+H 股合计计算），不超过该证券的
+10%，完全按照有关指数的构成比例进行证券投资的集合计划品种可以不受此条
+款规定的比例限制；
+  （5）本集合计划投资于同一原始权益人的各类资产支持证券的比例，不得
+超过集合计划资产",投资限制明确股票（含存托凭证）60%-95%；不是法律文本缺失。,投资章节或投资条款存在；正式cache失败标签不足以定位真实层级,UNRESOLVED,未作NOOP裁决；核心比例相同不足以证明同一完整章节与合法predecessor相同
+11d98417e067d059105901b9bf8047a61fd7d357647867a30d76409b77733350,上海海通证券资产管理有限公司|海通红利优选一年持有期混合-,清盘|2020_2026,46,850006_825156.pdf,2022-12-08,海通红利优选一年持有期混合型集合资产管理计划基金产品资料概要更新,FA010080,No explicit equity allocation constraint found,8136,success,"{""failure"": {""reason"": ""No explicit equity allocation constraint found"", ""report_code"": ""FA010080"", ""report_name"": ""海通红利优选一年持有期混合型集合资产管理计划基金产品资料概要更新"", ""share_code"": ""850006"", ""upload_info_id"": ""825156""}, ""parser_version"": 16, ""source_document"": ""850006_825156.pdf"", ""status"": ""failure""}",CLAUSE_PRESENT_IMPLEMENTATION_GAP,2,"规允许的情况下，本集合计划可以投资各类期权
+         品种。
+         如法律法规或监管机构以后允许集合计划投资其他品种，管理人在履
+         行适当程序后，可以将其纳入投资范围。
+         本集合计划的投资组合比例为：股票（含存托凭证）资产占集合计划
+         资产的 60%-95%（投资于港股通标的股票的比例合计占股票资产的
+         0%-50%），投资于本集合计划界定的红利优选相关证券的比例不低于非
+         现金集合计划资产的 80%；每个交易日日终在扣除股指期货合约、股票
+         期权合约需缴纳的保证金后，现金或到期日在一年以内的政府债券不
+         低于集合计划资产净值的 5%，其中现金不包括结算备付金、存出保证
+         金、应收申购款等。本集合计划将港股通标的股票投资的比例下限设
+         为零，本集合计划可根据投资策略需要或不同配置地市场环境的变化，
+         选择将部分集合计划资产投资于港股通标的股票或选择不将集合计划
+         资产投资于港股通标的股票，集合计划资产并非必然投资港股通标的
+         股票。
+         本集合计划的资产配置主要指“股票类资产”、“债券资产”、“衍生品
+         类资产”等之间的",新版概要亦股票（含存托凭证）60%-95%；与678107核心比例相同，未证明全章节相同。,投资章节或投资条款存在；正式cache失败标签不足以定位真实层级,UNRESOLVED,未作NOOP裁决；核心比例相同不足以证明同一完整章节与合法predecessor相同
+00923a56289dfb9de9e14655db15719d276fa9391548f60d9750f96f512893cb,中海基金管理有限公司|中海保本混合,清盘|pre2013,253,393001_239081.pdf,2015-07-01,关于中海优势精选灵活配置混合型证券投资基金实行网上直销和官方淘宝店交易费率优惠的公告,FC900090,No explicit equity allocation constraint found,4591,success,"{""failure"": {""reason"": ""No explicit equity allocation constraint found"", ""report_code"": ""FC900090"", ""report_name"": ""关于中海优势精选灵活配置混合型证券投资基金实行网上直销和官方淘宝店交易费率优惠的公告"", ""share_code"": ""393001"", ""upload_info_id"": ""239081""}, ""parser_version"": 5, ""source_document"": ""393001_239081.pdf"", ""status"": ""failure""}",NON_CLASSIFICATION_NOTICE,1,关于中海优势精选灵活配置混合型证券投资基金实行网上直销和官方淘宝店交易费率优惠的公告,本件是关于中海优势精选灵活配置混合型证券投资基金实行网上直销和官方淘宝店交易费率优惠的公告；属于事项公告，当前样本未发现投资分类条款，不能据此证明全家族官方历史无证据。,标题/正文事项非投资章节；evidence_excerpt为metadata标题，非PDF原文,UNRESOLVED,未作NOOP裁决；核心比例相同不足以证明同一完整章节与合法predecessor相同
+00a667331681b86734b5a2d4685c54cddc6dfcc86b780244e214b9f633380160,建信基金管理有限责任公司|建信保本混合,清盘|pre2013,253,530012_392398.pdf,2011-01-21,关于建信保本混合型证券投资基金基金资产净值及基金份额净值的公告,FC900090,No explicit equity allocation constraint found,265,success,"{""failure"": {""reason"": ""No explicit equity allocation constraint found"", ""report_code"": ""FC900090"", ""report_name"": ""关于建信保本混合型证券投资基金基金资产净值及基金份额净值的公告"", ""share_code"": ""530012"", ""upload_info_id"": ""392398""}, ""parser_version"": 5, ""source_document"": ""530012_392398.pdf"", ""status"": ""failure""}",NON_CLASSIFICATION_NOTICE,1,关于建信保本混合型证券投资基金基金资产净值及基金份额净值的公告,本件是关于建信保本混合型证券投资基金基金资产净值及基金份额净值的公告；属于事项公告，当前样本未发现投资分类条款，不能据此证明全家族官方历史无证据。,标题/正文事项非投资章节；evidence_excerpt为metadata标题，非PDF原文,UNRESOLVED,未作NOOP裁决；核心比例相同不足以证明同一完整章节与合法predecessor相同
+00f76c41f1a70d3a5e4ef5815bbe78434f81b86816ae576d248432505afeb212,中海基金管理有限公司|中海保本混合,清盘|pre2013,253,393001_239082.pdf,2015-07-01,中海基金管理有限公司关于中海优势精选灵活配置混合型证券投资基金转换补差费率优惠的公告,FC900090,No explicit equity allocation constraint found,1049,success,"{""failure"": {""reason"": ""No explicit equity allocation constraint found"", ""report_code"": ""FC900090"", ""report_name"": ""中海基金管理有限公司关于中海优势精选灵活配置混合型证券投资基金转换补差费率优惠的公告"", ""share_code"": ""393001"", ""upload_info_id"": ""239082""}, ""parser_version"": 5, ""source_document"": ""393001_239082.pdf"", ""status"": ""failure""}",NON_CLASSIFICATION_NOTICE,1,中海基金管理有限公司关于中海优势精选灵活配置混合型证券投资基金转换补差费率优惠的公告,本件是中海基金管理有限公司关于中海优势精选灵活配置混合型证券投资基金转换补差费率优惠的公告；属于事项公告，当前样本未发现投资分类条款，不能据此证明全家族官方历史无证据。,标题/正文事项非投资章节；evidence_excerpt为metadata标题，非PDF原文,UNRESOLVED,未作NOOP裁决；核心比例相同不足以证明同一完整章节与合法predecessor相同

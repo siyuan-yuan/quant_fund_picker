@@ -1,0 +1,54 @@
+{
+  "total_checkpoints": 1371,
+  "unresolved": 1251,
+  "primary_root_causes": {
+    "LIFECYCLE_EVIDENCE_JOIN_NOT_IMPLEMENTED": 90,
+    "UNDETERMINED_SECTION_VS_SEMANTICS": 1158,
+    "ADJUDICATION_PREDECESSOR_MISSING": 1,
+    "LOCAL_PDF_MISSING": 1,
+    "DATE_OR_STAGE_UNDETERMINED": 1
+  },
+  "inception_with_prior_prospectus": 15,
+  "inception_with_prior_parsed_clause": 11,
+  "transformation_buckets": {
+    "UNDETERMINED_SECTION_VS_SEMANTICS": 47,
+    "RESOLVED_BASELINE": 2
+  },
+  "unresolved_trigger_counts": {
+    "TERMINAL_STATE": 30,
+    "SECTION_UNCOMPARABLE": 1110,
+    "INCEPTION": 60,
+    "TRANSFORMATION": 47,
+    "TYPE_CHANGE": 1,
+    "MATERIAL_SECTION_CHANGE": 3
+  },
+  "section_uncomparable_report_codes": {
+    "FA010080": 105,
+    "FA020010": 12,
+    "FA010010": 11,
+    "FA010030": 153,
+    "FA020020": 31,
+    "FC900090": 772,
+    "FC220010": 16,
+    "FC050010": 3,
+    "FA010070": 6,
+    "FC050020": 1
+  },
+  "methodology": "Primary earliest observed blocker, secondary flags; local caches only. No official absence inference. No new adjudication.",
+  "frozen_artifact_hashes_before": {
+    "required_classification_checkpoints.csv": "477b944f504b04bbeb2a24faa4192764fb3eba2ce0ccd5ea3e588bab33172efd",
+    "document_dispositions.csv": "61c01da72082769382562071e2e19de636a25f5b6aeb662c5d6b6a806ecd5991",
+    "classification_clause_clusters.csv": "d6a43c1a95c3c189ca106a3e42d80b9f51df7bd6be7ed62af13105bf2c8f362a",
+    "classification_state_timeline.csv": "fc2c1ea87565e1424d6bde608c5e5842f8c1d8086ce87e3086738ada316aa7f4",
+    "g0_amendment_a1_gate_metrics.csv": "f2e71aea7ec74db1893f34275f18f425e68ef56c624c36b07d79c3252adf7074",
+    "g0_amendment_a1_gate_review.md": "a026b99d58d44a52a5ba774977f0f81bd9301626f0018744fef26f31082fa5b4"
+  },
+  "frozen_artifact_hashes_after": {
+    "required_classification_checkpoints.csv": "477b944f504b04bbeb2a24faa4192764fb3eba2ce0ccd5ea3e588bab33172efd",
+    "document_dispositions.csv": "61c01da72082769382562071e2e19de636a25f5b6aeb662c5d6b6a806ecd5991",
+    "classification_clause_clusters.csv": "d6a43c1a95c3c189ca106a3e42d80b9f51df7bd6be7ed62af13105bf2c8f362a",
+    "classification_state_timeline.csv": "fc2c1ea87565e1424d6bde608c5e5842f8c1d8086ce87e3086738ada316aa7f4",
+    "g0_amendment_a1_gate_metrics.csv": "f2e71aea7ec74db1893f34275f18f425e68ef56c624c36b07d79c3252adf7074",
+    "g0_amendment_a1_gate_review.md": "a026b99d58d44a52a5ba774977f0f81bd9301626f0018744fef26f31082fa5b4"
+  }
+}

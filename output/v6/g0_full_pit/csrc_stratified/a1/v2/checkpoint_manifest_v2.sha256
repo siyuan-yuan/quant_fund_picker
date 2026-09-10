@@ -1,0 +1,16 @@
+csv=required_classification_checkpoints.csv
+sha256=477b944f504b04bbeb2a24faa4192764fb3eba2ce0ccd5ea3e588bab33172efd
+rows=1371
+generation_rule_version=2
+normalization_version=1
+trigger_type_counts=INCEPTION:60,MATERIAL_SECTION_CHANGE:121,SECTION_UNCOMPARABLE:1110,TERMINAL_STATE:30,TRANSFORMATION:49,TYPE_CHANGE:1
+section_cache_records=2808
+section_cache_success=1698
+section_cache_failure=1110
+csv_last_write_local=2026-09-07T19:54:13+08:00
+v1_sha256=4b21ea71dcf70c388cddf7bf775c89a65cd19c40f86d9867c06cfde25edae0cb
+freeze_mode=freeze-checkpoints-only
+section_cache=section_cache.jsonl
+pdf_timeout_seconds=45
+review=task-7-v2-final-audit.md
+git=NO_GIT

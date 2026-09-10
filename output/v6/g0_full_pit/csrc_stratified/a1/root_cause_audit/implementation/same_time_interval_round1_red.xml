@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="2" skipped="0" tests="2" time="21.533" timestamp="2026-09-08T22:35:38.849836+08:00" hostname="袁思远"><testcase classname="tests.test_v6_classification_checkpoints" name="test_interval_boundary_uses_effective_from_order_not_known_at_order" time="0.437"><failure message="AssertionError: assert NaT == Timestamp('2020-03-01 00:00:00')&#10; +  where NaT = checkpoint_id                 earlier-effective-later-known\nfamily_key                                         family-a\nknown_at                                         2020-02-01\neffective_date                                   2020-02-01\ndisposition                                    PARSED_STATE\nfund_type                                            \u6df7\u5408\u578b-\u504f\u80a1\nequity_min_pct                                         60.0\nequity_max_pct                                         95.0\nfailure_reason                                             \npredecessor_checkpoint_id                                  \nstate_source_checkpoint_id    earlier-effective-later-known\neffective_from                          2020-02-01 00:00:00\neffective_to                                            NaT\ncausal_violation                                      False\nName: 1, dtype: object.effective_to&#10; +  and   Timestamp('2020-03-01 00:00:00') = &lt;class 'pandas.Timestamp'&gt;('2020-03-01')&#10; +    where &lt;class 'pandas.Timestamp'&gt; = pd.Timestamp">def test_interval_boundary_uses_effective_from_order_not_known_at_order() -&gt; None:
+        first = _timeline_dispositions().iloc[[0]].copy()
+        rows = []
+        for checkpoint_id, known_at, effective_date in [
+            ("later-effective-first-known", "2020-01-01", "2020-03-01"),
+            ("earlier-effective-later-known", "2020-02-01", "2020-02-01"),
+        ]:
+            row = first.copy()
+            row.loc[:, "checkpoint_id"] = checkpoint_id
+            row.loc[:, "known_at"] = known_at
+            row.loc[:, "effective_date"] = effective_date
+            rows.append(row)
+    
+        timeline = build_checkpoint_timeline(pd.concat(rows, ignore_index=True))
+    
+        earlier = timeline.loc[
+            timeline.checkpoint_id.eq("earlier-effective-later-known")
+        ].iloc[0]
+        later = timeline.loc[
+            timeline.checkpoint_id.eq("later-effective-first-known")
+        ].iloc[0]
+        assert earlier.effective_from == pd.Timestamp("2020-02-01")
+&gt;       assert earlier.effective_to == pd.Timestamp("2020-03-01")
+E       AssertionError: assert NaT == Timestamp('2020-03-01 00:00:00')
+E        +  where NaT = checkpoint_id                 earlier-effective-later-known\nfamily_key                                         family-a\nknown_at                                         2020-02-01\neffective_date                                   2020-02-01\ndisposition                                    PARSED_STATE\nfund_type                                            \u6df7\u5408\u578b-\u504f\u80a1\nequity_min_pct                                         60.0\nequity_max_pct                                         95.0\nfailure_reason                                             \npredecessor_checkpoint_id                                  \nstate_source_checkpoint_id    earlier-effective-later-known\neffective_from                          2020-02-01 00:00:00\neffective_to                                            NaT\ncausal_violation                                      False\nName: 1, dtype: object.effective_to
+E        +  and   Timestamp('2020-03-01 00:00:00') = &lt;class 'pandas.Timestamp'&gt;('2020-03-01')
+E        +    where &lt;class 'pandas.Timestamp'&gt; = pd.Timestamp
+
+tests\test_v6_classification_checkpoints.py:1452: AssertionError</failure></testcase><testcase classname="tests.test_v6_classification_checkpoints" name="test_reversed_effective_from_sequence_maps_every_row_to_next_strict_time" time="0.087"><failure message="AssertionError: assert Timestamp('2020-06-01 00:00:00') == Timestamp('2020-05-01 00:00:00')&#10; +  where Timestamp('2020-05-01 00:00:00') = &lt;class 'pandas.Timestamp'&gt;('2020-05-01')&#10; +    where &lt;class 'pandas.Timestamp'&gt; = pd.Timestamp">def test_reversed_effective_from_sequence_maps_every_row_to_next_strict_time() -&gt; None:
+        first = _timeline_dispositions().iloc[[0]].copy()
+        rows = []
+        for checkpoint_id, known_at, effective_date in [
+            ("at-may", "2020-01-01", "2020-05-01"),
+            ("at-april", "2020-02-01", "2020-04-01"),
+            ("at-june", "2020-06-01", "2020-06-01"),
+        ]:
+            row = first.copy()
+            row.loc[:, "checkpoint_id"] = checkpoint_id
+            row.loc[:, "known_at"] = known_at
+            row.loc[:, "effective_date"] = effective_date
+            rows.append(row)
+    
+        timeline = build_checkpoint_timeline(pd.concat(rows, ignore_index=True))
+        by_id = timeline.set_index("checkpoint_id")
+    
+&gt;       assert by_id.loc["at-april", "effective_to"] == pd.Timestamp("2020-05-01")
+E       AssertionError: assert Timestamp('2020-06-01 00:00:00') == Timestamp('2020-05-01 00:00:00')
+E        +  where Timestamp('2020-05-01 00:00:00') = &lt;class 'pandas.Timestamp'&gt;('2020-05-01')
+E        +    where &lt;class 'pandas.Timestamp'&gt; = pd.Timestamp
+
+tests\test_v6_classification_checkpoints.py:1473: AssertionError</failure></testcase></testsuite></testsuites>

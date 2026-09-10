@@ -1,0 +1,2531 @@
+# -*- coding: utf-8 -*-
+"""
+量化选基系统 V3.1 — Web 控制台
+手动触发爬取→计算→出榜, 本地运行
+启动: python webapp.py  (默认仅监听 127.0.0.1:8000；QFP_HOST 可覆盖)
+"""
+import v8_guard
+v8_guard.install()
+
+import os, glob, json, time, re, random, threading, datetime as dt
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from math import sqrt
+from urllib.parse import urlsplit
+
+import numpy as np
+import pandas as pd
+from flask import Flask, jsonify, request, render_template
+
+import provider, rbsa
+from engine import score_fund, finalize, market_water
+from scan_market import build_universe
+import holding_diag
+from config import (
+    RBSA_INDICES, OUTPUT_DIR,
+    STRAT_VERSION, STRAT_BUY_TH, STRAT_SELL_TH, STRAT_SLOTS,
+    STRAT_CASH_YIELD, STRAT_REBALANCE, STRAT_TRAIL_STOP,
+    STRAT_CRISIS_MA, STRAT_CRISIS_VOL_WINDOW, STRAT_CRISIS_VOL_Q,
+    STRAT_CPPI, STRAT_CPPI_DD1, STRAT_CPPI_SLOTS1,
+    STRAT_CPPI_DD2, STRAT_CPPI_SLOTS2,
+    STRAT_CPPI_DD3, STRAT_CPPI_SLOTS3,
+    STRAT_CPPI_HYSTERESIS,
+    STRAT_OVERLAP_SKIP, STRAT_OVERSEAS_SLOT_CAP,
+    STRAT_INDEX_TOP1, STRAT_INDEX_PORT, STRAT_CLUSTER_MAX, STRAT_CLONE_L1,
+    OVERSEAS_FUND_TYPES, BUY_FEE_RATE, BUY_FEE_BY_FUND,
+    C_CLASS_SERVICE_FEE_ANNUAL,
+)
+
+app = Flask(__name__)
+app.config.update(
+    TEMPLATES_AUTO_RELOAD=True,
+    # 台账/调仓接口只接收小型 JSON；限制请求体可避免误传大文件耗尽内存。
+    MAX_CONTENT_LENGTH=2 * 1024 * 1024,
+)
+app.jinja_env.auto_reload = True
+
+
+@app.before_request
+def _reject_cross_origin_write():
+    """阻止其它网站借浏览器修改本地台账或触发高成本扫描。
+
+    curl/脚本通常不带 Origin，继续允许；浏览器的写请求必须与当前 Host 同源。
+    Arena 预览虽嵌在外层页面中，但 fetch 仍从预览站点自身发起，因此不受影响。
+    """
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return None
+    origin = request.headers.get("Origin")
+    if not origin:
+        return None
+    origin_host = (urlsplit(origin).netloc or "").lower()
+    forwarded_host = request.headers.get("X-Forwarded-Host", "").split(",", 1)[0].strip().lower()
+    allowed_hosts = {request.host.lower()}
+    if forwarded_host:
+        allowed_hosts.add(forwarded_host)
+    if origin_host not in allowed_hosts:
+        return jsonify({"ok": False, "message": "拒绝跨站写入请求"}), 403
+    return None
+
+
+@app.after_request
+def _security_headers(resp):
+    """兼容 iframe 预览，同时为本地金融台账补齐基础浏览器安全头。"""
+    # 不设置 X-Frame-Options/CSP frame-ancestors，保留 Arena iframe 预览能力。
+    resp.headers["Cache-Control"] = "no-store"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Referrer-Policy"] = "same-origin"
+    resp.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    return resp
+
+
+@app.get("/api/health")
+def health():
+    return jsonify({"ok": True, "service": "quant-fund-picker", "ts": int(time.time())})
+
+# ---------------- 操作台账（买卖记录持久化，output/ledger.json） ----------------
+LEDGER_FILE = os.path.join(OUTPUT_DIR, "ledger.json")
+# 定投状态（终止/忽略标记）单独持久化，避免与台账记录格式耦合。
+# 标记按「基金代码 + 该轮定投最后扣款日(lastDate)」唯一识别：同一轮已结束 → 不再反复询问；
+# 若之后重新开始新一轮定投（出现更晚的扣款记录），lastDate 变化 → 自动重新提醒，互不冲突。
+DCA_STATE_FILE = os.path.join(OUTPUT_DIR, "dca_state.json")
+# 用户可在页面修改：默认费率用于自动查询失败时兜底；单基金费率始终优先。
+FEE_SETTINGS_FILE = os.path.join(OUTPUT_DIR, "fee_settings.json")
+
+
+def _base_fee_settings() -> dict:
+    overrides = {}
+    for code, rate in (BUY_FEE_BY_FUND or {}).items():
+        try:
+            code, rate = str(code).zfill(6), float(rate)
+            if re.fullmatch(r"\d{6}", code) and 0 <= rate <= 0.1:
+                overrides[code] = rate
+        except (TypeError, ValueError):
+            pass
+    return {"default_rate": float(BUY_FEE_RATE), "overrides": overrides}
+
+
+def _load_fee_settings() -> dict:
+    """读取用户费率设置；首次使用以 config 默认值初始化，文件损坏时安全回退。"""
+    base = _base_fee_settings()
+    try:
+        with open(FEE_SETTINGS_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        default = float(data.get("default_rate", base["default_rate"]))
+        if not 0 <= default <= 0.1:
+            default = base["default_rate"]
+        overrides = {}
+        for code, rate in (data.get("overrides", {}) or {}).items():
+            code, rate = str(code).zfill(6), float(rate)
+            if re.fullmatch(r"\d{6}", code) and 0 <= rate <= 0.1:
+                overrides[code] = rate
+        return {"default_rate": default, "overrides": overrides}
+    except Exception:
+        return base
+
+
+def _save_fee_settings(settings: dict) -> bool:
+    try:
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        tmp = FEE_SETTINGS_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, **settings}, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, FEE_SETTINGS_FILE)
+        return True
+    except Exception:
+        return False
+
+
+def _fmt_exported_fee_pct(rate) -> str:
+    """Decimal rate → percent text used in 导出台账 CSV (0.0012 → '0.12')."""
+    try:
+        n = float(rate)
+    except (TypeError, ValueError):
+        return ""
+    if not np.isfinite(n):
+        return ""
+    s = f"{n * 100:.4f}".rstrip("0").rstrip(".")
+    return s
+
+
+def _parse_exported_fee_pct(s):
+    """CSV 费率% → decimal. 0.12 / 0.12% → 0.0012; reject >10%."""
+    t = str(s or "").strip().replace("%", "").replace("％", "")
+    if not t:
+        return None
+    try:
+        v = float(t)
+    except (TypeError, ValueError):
+        return None
+    if not np.isfinite(v) or v < 0 or v > 10:
+        return None
+    return v / 100.0
+
+
+def parse_exported_fee_settings(text: str) -> dict:
+    """Parse the `#买入费率` block from an exported ledger CSV.
+
+    Rates in the file are percent. Returns decimal rates compatible with
+    /api/fee_settings: {default_rate or None, overrides:{code:rate}}.
+    """
+    out = {"default_rate": None, "overrides": {}}
+    mode = False
+    for raw in str(text or "").splitlines():
+        line = raw.strip()
+        if re.match(r"^#\s*买入费率", line) or re.match(r"^类型[,，\s]+代码", line):
+            mode = True
+            if re.match(r"^类型", line):
+                continue
+            continue
+        if line.startswith("#"):
+            mode = False
+            continue
+        if not mode or not line:
+            continue
+        parts = [p.strip() for p in re.split(r"[,，]", line)]
+        kind = parts[0] if parts else ""
+        raw_code = parts[1] if len(parts) > 1 else ""
+        rate = _parse_exported_fee_pct(parts[2] if len(parts) > 2 else "")
+        if rate is None:
+            continue
+        if re.search(r"默认|default", kind, re.I):
+            out["default_rate"] = rate
+            continue
+        digits = re.sub(r"\D", "", raw_code)
+        code = digits.zfill(6) if digits else ""
+        if re.fullmatch(r"\d{6}", code) and code != "000000":
+            out["overrides"][code] = rate
+    return out
+
+
+def format_exported_fee_settings(settings: dict) -> str:
+    """Serialize fee settings as the `#买入费率` CSV block (percent column)."""
+    settings = settings or {}
+    rows = ["类型,代码,费率%"]
+    if settings.get("default_rate") is not None:
+        rows.append(f"默认,,{_fmt_exported_fee_pct(settings['default_rate'])}")
+    ov = settings.get("overrides") or {}
+    for code in sorted(ov, key=lambda c: str(c).zfill(6)):
+        rows.append(f"覆盖,{str(code).zfill(6)},{_fmt_exported_fee_pct(ov[code])}")
+    return "#买入费率（导入时自动恢复，不必重新填写）\n" + "\n".join(rows)
+
+
+def merge_fee_settings(current, imported) -> dict:
+    """Merge imported fee settings into current; imported values win."""
+    base = current or _base_fee_settings()
+    out = {
+        "default_rate": float(base.get("default_rate", BUY_FEE_RATE)),
+        "overrides": dict(base.get("overrides") or {}),
+    }
+    if not imported:
+        return out
+    if imported.get("default_rate") is not None:
+        try:
+            r = float(imported["default_rate"])
+        except (TypeError, ValueError):
+            r = None
+        if r is not None and np.isfinite(r) and 0 <= r <= 0.1:
+            out["default_rate"] = r
+    for code, rate in (imported.get("overrides") or {}).items():
+        code = re.sub(r"\D", "", str(code or ""))
+        code = code.zfill(6) if code else ""
+        try:
+            rate = float(rate)
+        except (TypeError, ValueError):
+            continue
+        if re.fullmatch(r"\d{6}", code) and code != "000000" and np.isfinite(rate) and 0 <= rate <= 0.1:
+            out["overrides"][code] = rate
+    return out
+
+
+def _resolve_buy_fee(code, settings=None):
+    """解析实扣申购费率 → (rate, source)。优先级：单基金覆盖 > 自动查费 > 用户默认。"""
+    code = str(code or "").zfill(6)
+    settings = settings or _load_fee_settings()
+    if code in settings["overrides"]:
+        return float(settings["overrides"][code]), "override"
+    try:
+        info = provider.get_fund_buy_fee(code)
+        if isinstance(info, dict) and info.get("source") != "default":
+            rate = float(info.get("rate"))
+            if 0 <= rate <= 0.1:
+                return rate, "auto"
+    except (TypeError, ValueError):
+        pass
+    return float(settings["default_rate"]), "default"
+
+
+def _load_dca_state() -> dict:
+    """读取定投终止/忽略/止盈标记；文件缺失/损坏返回空结构
+    返回: {"terminated": {code: {lastDate, terminatedDate, ts}},
+          "ignored": {code: {lastDate, ts}},
+          "take_profit": {code: {"plan": {threshold, mode}, "lots": {lotKey: {...}}}}}
+    """
+    empty = {"terminated": {}, "ignored": {}, "take_profit": {}}
+    try:
+        with open(DCA_STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            return empty
+        return {"terminated": data.get("terminated", {}) if isinstance(data.get("terminated"), dict) else {},
+                "ignored": data.get("ignored", {}) if isinstance(data.get("ignored"), dict) else {},
+                "take_profit": data.get("take_profit", {}) if isinstance(data.get("take_profit"), dict) else {}}
+    except Exception:
+        return empty
+
+
+def _save_dca_state(state: dict) -> bool:
+    """原子写定投状态（tmp+rename 防半写损坏）"""
+    try:
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        tmp = DCA_STATE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"version": 1,
+                       "terminated": state.get("terminated", {}),
+                       "ignored": state.get("ignored", {}),
+                       "take_profit": state.get("take_profit", {})},
+                      f, ensure_ascii=False, indent=1)
+        os.replace(tmp, DCA_STATE_FILE)
+        return True
+    except Exception:
+        return False
+
+
+def _norm_dca_marker(code, m) -> dict:
+    """规范化定投终止/忽略标记 → 合法标记或 None（lastDate 必填，终止日可选）"""
+    if not isinstance(m, dict):
+        return None
+    if not re.fullmatch(r"\d{6}", str(code)):
+        return None
+    last = _parse_date(m.get("lastDate"))
+    if not last:
+        return None
+    out = {"lastDate": last, "ts": int(time.time() * 1000)}
+    term = _parse_date(m.get("terminatedDate"))
+    if term:
+        out["terminatedDate"] = term
+    return out
+
+
+def _norm_tp_plan(p) -> dict:
+    """规范化定投止盈计划参数 → 合法计划或 None"""
+    if not isinstance(p, dict):
+        return None
+    try:
+        thr = float(p.get("threshold", 20))
+    except (TypeError, ValueError):
+        thr = 20.0
+    thr = min(100.0, max(1.0, thr))
+    mode = str(p.get("mode") or "keep_cost")
+    if mode not in ("keep_cost", "keep_profit"):
+        mode = "keep_cost"
+    return {"threshold": thr, "mode": mode}
+
+
+def _norm_tp_lot(m) -> dict:
+    """规范化单批次止盈记录 → 合法记录或 None。
+    action=skip：用户明确选择不卖，不再提示；否则为已卖出（金额/日期必填）。"""
+    if not isinstance(m, dict):
+        return None
+    action = str(m.get("action") or "").strip().lower()
+    if action in ("skip", "hold", "nosell", "不卖", "不卖出") or m.get("skipped"):
+        out = {"action": "skip"}
+        sd = _parse_date(m.get("skipDate") or m.get("soldDate") or m.get("date"))
+        if sd:
+            out["skipDate"] = sd
+        if m.get("threshold") is not None:
+            try:
+                out["threshold"] = float(m["threshold"])
+            except (TypeError, ValueError):
+                pass
+        if m.get("gain") is not None:
+            try:
+                out["gain"] = float(m["gain"])
+            except (TypeError, ValueError):
+                pass
+        return out
+    amt = _parse_yuan(m.get("soldAmount"))
+    if not amt or amt <= 0:
+        return None
+    sd = _parse_date(m.get("soldDate"))
+    if not sd:
+        return None
+    out = {"action": "sold", "mode": str(m.get("mode") or "keep_cost"),
+           "soldAmount": round(float(amt), 2), "soldDate": sd}
+    if m.get("costNav") is not None:
+        try:
+            out["costNav"] = round(float(m["costNav"]), 4)
+        except (TypeError, ValueError):
+            pass
+    if m.get("nav") is not None:
+        try:
+            out["nav"] = round(float(m["nav"]), 4)
+        except (TypeError, ValueError):
+            pass
+    return out
+
+
+def _norm_tp_plan_entry(code, entry) -> dict:
+    """规范化一只基金的止盈计划条目 {"plan": ..., "lots": {lotKey: {...}}} → 合法条目或 None"""
+    if not isinstance(entry, dict):
+        return None
+    if not re.fullmatch(r"\d{6}", str(code)):
+        return None
+    plan = _norm_tp_plan(entry.get("plan"))
+    lots = {}
+    raw_lots = entry.get("lots")
+    if isinstance(raw_lots, dict):
+        for key, m in raw_lots.items():
+            if not isinstance(key, str) or not isinstance(m, dict):
+                continue
+            nm = _norm_tp_lot(m)
+            if nm:
+                lots[key] = nm
+    if plan is None and not lots:
+        return None
+    return {"plan": plan or {"threshold": 20.0, "mode": "keep_cost"}, "lots": lots}
+
+
+def _load_ledger() -> list:
+    """读取台账记录；文件缺失/损坏返回 []"""
+    try:
+        with open(LEDGER_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            data = data.get("txns", [])
+        if not isinstance(data, list):
+            return []
+        # 旧版文件或手工导入内容也必须走同一规范化路径，避免脏 id/note 直达前端。
+        return [norm for norm in (_norm_txn(t) for t in data) if norm]
+    except Exception:
+        return []
+
+
+def _save_ledger(txns: list) -> bool:
+    """原子写台账（tmp+rename 防半写损坏）"""
+    try:
+        os.makedirs(OUTPUT_DIR, exist_ok=True)
+        tmp = LEDGER_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"version": 1, "txns": txns}, f, ensure_ascii=False, indent=1)
+        os.replace(tmp, LEDGER_FILE)
+        return True
+    except Exception:
+        return False
+
+
+def _norm_txn(t) -> dict:
+    """规范化单条台账记录 → 合法记录或 None"""
+    if not isinstance(t, dict):
+        return None
+    code = str(t.get("code", "")).strip()
+    if not re.fullmatch(r"\d{6}", code):
+        return None
+    d = _parse_date(t.get("date"))
+    if not d:
+        return None
+    side_raw = str(t.get("side", "")).strip().lower()
+    isDca = bool(t.get("isDca", False))
+    if side_raw in ("买", "买入", "b", "buy"):
+        side = "buy"
+    elif side_raw in ("定投", "定投买入", "dca"):
+        side = "buy"
+        isDca = True
+    elif side_raw in ("卖", "卖出", "s", "sell"):
+        side = "sell"
+    else:
+        return None
+    amt = _parse_yuan(t.get("amount"))
+    if not amt or amt <= 0:
+        return None
+    tid = str(t.get("id") or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", tid):
+        tid = f"l{int(time.time()*1000)}{random.randint(0,9999)}"
+    return {"id": tid, "code": code, "date": d, "side": side,
+            "amount": round(float(amt), 2), "note": str(t.get("note", "") or "")[:120], "isDca": isDca}
+
+
+def _ledger_by_code(txns: list) -> dict:
+    """code -> [(date, side, amount), ...]（按日期排序，供持仓诊断）"""
+    by = {}
+    for t in txns:
+        by.setdefault(t["code"], []).append((t["date"], t["side"], t["amount"]))
+    return by
+
+
+@app.get("/api/ledger")
+def ledger_get():
+    """返回台账全部记录 + 每只基金实时状态（份额/成本/市值/回撤/止损），+组合CPPI(cash可选)"""
+    txns = _load_ledger()
+    cash = _parse_yuan(request.args.get("cash")) if request.args.get("cash") else None
+    today_s = request.args.get("today")
+    try:
+        today_d = dt.date.fromisoformat(str(today_s)[:10]) if today_s else dt.date.today()
+    except ValueError:
+        today_d = dt.date.today()
+    by = _ledger_by_code(txns)
+    states = []
+    names = {}
+    try:
+        meta = provider.get_fund_meta()
+        names = dict(zip(meta.index.astype(str), meta["基金简称"])) if len(meta) else {}
+    except Exception:
+        pass
+    curves = {}
+    fee_settings = _load_fee_settings()
+    for code in sorted(by.keys()):
+        lots = by[code]
+        st = None
+        try:
+            nav_df = provider.get_fund_nav(code)
+            fee, fee_source = _resolve_buy_fee(code, fee_settings)
+            st = holding_diag.fund_lots_diag(lots, nav_df, code=code, buy_fee=fee)
+            st["buy_fee_source"] = fee_source
+            if st.get("curve") is not None:
+                curves[code] = st["curve"]
+        except Exception as e:
+            st = {"computable": False, "status": "no_data", "reason": str(e)[:100]}
+        states.append({
+            "code": code,
+            "name": names.get(code, code),
+            "lots": [{"date": d, "side": s, "amount": a} for d, s, a in lots],
+            "state": {k: v for k, v in st.items() if k != "curve"},
+        })
+    # 组合级 CPPI（可选现金；无现金时仅基金侧状态）
+    cppi = None
+    if cash is not None and curves:
+        cppi = holding_diag.portfolio_cppi([(c,) for c in curves.values()], cash=cash,
+                                           rules=[(STRAT_CPPI_DD1, STRAT_CPPI_SLOTS1),
+                                                  (STRAT_CPPI_DD2, STRAT_CPPI_SLOTS2),
+                                                  (STRAT_CPPI_DD3, STRAT_CPPI_SLOTS3)],
+                                           full_slots=STRAT_SLOTS, hysteresis=STRAT_CPPI_HYSTERESIS)
+    return jsonify(clean(dict(ok=True, txns=txns, funds=states, cppi=cppi,
+                              dca_due=holding_diag.overdue_dca_plans(txns, today=today_d),
+                              dca_state=_load_dca_state(), fee_settings=fee_settings,
+                              nav_expected=provider.expected_last_td())))
+
+
+@app.post("/api/nav/refresh")
+def nav_refresh():
+    """同步刷新台账里各基金净值（不阻塞首屏；前端点按钮或自动补刷）。"""
+    body = request.get_json(silent=True) or {}
+    codes = body.get("codes")
+    if not isinstance(codes, list) or not codes:
+        codes = sorted(_ledger_by_code(_load_ledger()).keys())
+    out = []
+    for raw in codes[:30]:
+        code = str(raw).zfill(6)
+        if not re.fullmatch(r"\d{6}", code):
+            continue
+        out.append(provider.refresh_fund_nav(code, timeout=12))
+    n_ok = sum(1 for r in out if r.get("ok"))
+    return jsonify(clean(dict(ok=True, refreshed=n_ok, total=len(out), results=out)))
+
+
+@app.post("/api/ledger")
+def ledger_post():
+    """整体替换台账记录（前端持有全量，新增/删除后整存）；返回规范化后的记录"""
+    body = request.get_json(silent=True) or {}
+    raw = body.get("txns")
+    if not isinstance(raw, list):
+        return jsonify({"ok": False, "message": "txns 需要是数组"}), 400
+    txns = [t for t in (_norm_txn(t) for t in raw) if t]
+    if not _save_ledger(txns):
+        return jsonify({"ok": False, "message": "台账写入失败（output 目录不可写？）"}), 500
+    return jsonify(clean(dict(ok=True, txns=txns, message=f"已保存 {len(txns)} 条记录")))
+
+
+@app.get("/api/fee_settings")
+def fee_settings_get():
+    return jsonify(clean(dict(ok=True, **_load_fee_settings())))
+
+
+@app.post("/api/fee_settings")
+def fee_settings_post():
+    """保存默认申购费率和单基金覆盖。API 使用小数费率：0.0012 = 0.12%。"""
+    body = request.get_json(silent=True) or {}
+    try:
+        default = float(body.get("default_rate"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "message": "默认费率无效"}), 400
+    if not np.isfinite(default) or not 0 <= default <= 0.1:
+        return jsonify({"ok": False, "message": "默认费率须在 0%～10% 之间"}), 400
+    raw = body.get("overrides", {})
+    if not isinstance(raw, dict):
+        return jsonify({"ok": False, "message": "单基金费率格式无效"}), 400
+    overrides = {}
+    try:
+        for code, rate in raw.items():
+            code, rate = str(code).zfill(6), float(rate)
+            if code == "000000" or not re.fullmatch(r"\d{6}", code) or not np.isfinite(rate) or not 0 <= rate <= 0.1:
+                raise ValueError
+            overrides[code] = rate
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "message": "基金代码需为6位，费率须在0%～10%之间"}), 400
+    settings = {"default_rate": default, "overrides": overrides}
+    if not _save_fee_settings(settings):
+        return jsonify({"ok": False, "message": "费率设置保存失败（output 目录不可写？）"}), 500
+    return jsonify(clean(dict(ok=True, **settings)))
+
+
+@app.post("/api/dca_state")
+def dca_state_post():
+    """整体替换定投终止/忽略/止盈标记（前端持有全量，与台账整存模式一致）；返回规范化后的状态"""
+    body = request.get_json(silent=True) or {}
+    state = {"terminated": {}, "ignored": {}, "take_profit": {}}
+    for key, norm in (("terminated", _norm_dca_marker), ("ignored", _norm_dca_marker),
+                      ("take_profit", _norm_tp_plan_entry)):
+        raw = body.get(key)
+        if not isinstance(raw, dict):
+            continue
+        for code, m in raw.items():
+            nm = norm(code, m)
+            if nm:
+                state[key][str(code).zfill(6)] = nm
+    if not _save_dca_state(state):
+        return jsonify({"ok": False, "message": "定投状态写入失败（output 目录不可写？）"}), 500
+    return jsonify(clean(dict(ok=True, **state)))
+
+
+# ---------------- 定投止盈（分批止盈线） ----------------
+TP_MODES = {"keep_cost": "卖利润·留成本（推荐）", "keep_profit": "卖成本·留利润"}
+TP_MODE_LABELS = {
+    "keep_cost": "卖利润留成本",
+    "keep_profit": "卖成本留利润",
+}
+
+
+def _tp_lot_key(date, amount):
+    return f"{date}|{amount:.2f}"
+
+
+def _tp_dca_lots(code):
+    """从台账提取某基金的去重定投买入批次（按 (日期,金额) 合并，日期升序）"""
+    txns = [t for t in _load_ledger()
+            if t.get("code") == code and t.get("side") == "buy" and t.get("isDca")]
+    seen, lots = set(), []
+    for t in txns:
+        amt = round(float(t["amount"]), 2)
+        key = (t["date"], amt)
+        if key in seen:
+            continue
+        seen.add(key)
+        lots.append({"date": t["date"], "amount": amt})
+    lots.sort(key=lambda x: x["date"])
+    return lots
+
+
+def _tp_compute(lots, adj, threshold, mode, harvested, delay=0):
+    """定投各批次止盈计算（纯函数，可单测）。
+
+    lots:      [{"date": "YYYY-MM-DD", "amount": float}] 去重后的定投买入批次
+    adj:       复权净值 Series（DatetimeIndex 升序，值=复权单位净值）
+    threshold: 止盈线百分比（20 表示涨幅≥20% 触发）
+    mode:      "keep_cost"=卖利润·留成本（卖出 涨幅×成本） / "keep_profit"=卖成本·留利润（卖出=成本）
+    harvested: {lotKey: 已止盈记录}（该批次不再参与计算）
+
+    返回: (rows, summary)；row 字段: key/date/amount/costNav/navNow/navDate/gain/status/sellAmount/soldInfo
+    """
+    n = len(adj)
+    nav_now = float(adj.iloc[-1])
+    nav_date = str(adj.index[-1].date())
+    rows, hit_total = [], 0.0
+    for lot in lots:
+        d = pd.Timestamp(lot["date"])
+        pos = int(adj.index.searchsorted(d))
+        pos = min(max(pos, 0), n - 1)
+        cost_nav = float(adj.iloc[pos])
+        gain = nav_now / cost_nav - 1.0
+        key = _tp_lot_key(lot["date"], lot["amount"])
+        rec = harvested.get(key) if harvested else None
+        row = {"key": key, "date": lot["date"], "amount": lot["amount"],
+               "costNav": round(cost_nav, 4), "navNow": round(nav_now, 4),
+               "navDate": nav_date, "gain": round(gain * 100, 2), "status": "pending",
+               "sellAmount": 0.0}
+        rec_action = str((rec or {}).get("action") or "").lower()
+        if rec and (rec_action == "skip" or rec.get("skipped")):
+            row["status"] = "skipped"
+            row["soldInfo"] = rec
+        elif rec:
+            row["status"] = "sold"
+            row["soldInfo"] = rec
+        elif gain * 100 + 1e-9 >= threshold:
+            row["status"] = "hit"
+            if mode == "keep_cost":
+                sell = lot["amount"] * gain          # 卖利润：卖出 涨幅×成本，剩余=成本
+            else:
+                sell = float(lot["amount"])          # 卖成本：卖出=成本，剩余=利润
+            row["sellAmount"] = round(sell, 2)
+            hit_total += row["sellAmount"]
+        rows.append(row)
+    summary = {"n": len(rows),
+               "nHit": sum(1 for r in rows if r["status"] == "hit"),
+               "nSold": sum(1 for r in rows if r["status"] == "sold"),
+               "nSkipped": sum(1 for r in rows if r["status"] == "skipped"),
+               "hitTotal": round(hit_total, 2),
+               "navNow": round(nav_now, 4), "navDate": nav_date}
+    return rows, summary
+
+
+def _tp_load_nav(code):
+    """取净值复权序列；失败抛异常（由调用方转为错误消息）"""
+    nav_df = provider.get_fund_nav(code)
+    adj = holding_diag.adj_series(nav_df)
+    if adj is None or len(adj) == 0:
+        raise ValueError("净值数据为空")
+    return adj
+
+
+@app.get("/api/dca_tp/preview")
+def dca_tp_preview():
+    """定投止盈检测：按当前净值逐批次计算是否达到止盈线，返回建议卖出金额（不落库）。
+    query: code / threshold(默认20) / mode(keep_cost|keep_profit)"""
+    code = str(request.args.get("code", "")).zfill(6)
+    if not re.fullmatch(r"\d{6}", code):
+        return jsonify({"ok": False, "message": "基金代码无效"}), 400
+    try:
+        threshold = float(request.args.get("threshold", 20))
+    except (TypeError, ValueError):
+        threshold = 20.0
+    threshold = min(100.0, max(1.0, threshold))
+    mode = str(request.args.get("mode") or "keep_cost")
+    if mode not in TP_MODES:
+        mode = "keep_cost"
+    lots = _tp_dca_lots(code)
+    if not lots:
+        return jsonify({"ok": False, "message": "台账中无该基金的定投买入记录（请在定投面板录入）"}), 400
+    try:
+        adj = _tp_load_nav(code)
+    except Exception as e:
+        return jsonify({"ok": False, "message": f"净值获取失败: {str(e)[:120]}"}), 400
+    tp = {}
+    state_tp = _load_dca_state().get("take_profit")
+    if isinstance(state_tp, dict):
+        tp = state_tp.get(code)
+        if not isinstance(tp, dict):
+            tp = {}
+    harvested = tp.get("lots", {}) if isinstance(tp.get("lots"), dict) else {}
+    rows, summary = _tp_compute(lots, adj, threshold, mode, harvested, delay=0)
+    name = code
+    try:
+        meta = provider.get_fund_meta()
+        if len(meta):
+            name = dict(zip(meta.index.astype(str), meta["基金简称"])).get(code, code)
+    except Exception:
+        pass
+    return jsonify(clean(dict(ok=True, code=code, name=name,
+                              threshold=threshold, mode=mode, mode_label=TP_MODE_LABELS.get(mode, mode),
+                              lots=rows, **summary)))
+
+
+@app.post("/api/dca_tp/execute")
+def dca_tp_execute():
+    """确认卖出达到止盈线的所选批次：写入卖出台账记录 + 标记该批次已止盈（不再参与后续检测）。
+    body: {code, threshold?, mode?, lotKeys: [lotKey...]}  —— 服务端重算，不接受客户端金额。"""
+    body = request.get_json(silent=True) or {}
+    code = str(body.get("code", "")).zfill(6)
+    if not re.fullmatch(r"\d{6}", code):
+        return jsonify({"ok": False, "message": "基金代码无效"}), 400
+    try:
+        threshold = float(body.get("threshold", 20))
+    except (TypeError, ValueError):
+        threshold = 20.0
+    threshold = min(100.0, max(1.0, threshold))
+    mode = str(body.get("mode") or "keep_cost")
+    if mode not in TP_MODES:
+        mode = "keep_cost"
+    wanted = body.get("lotKeys")
+    if not isinstance(wanted, list) or not wanted:
+        return jsonify({"ok": False, "message": "请选择要止盈卖出的批次"}), 400
+    wanted = {str(k) for k in wanted}
+    lots = _tp_dca_lots(code)
+    if not lots:
+        return jsonify({"ok": False, "message": "台账中无该基金的定投买入记录"}), 400
+    try:
+        adj = _tp_load_nav(code)
+    except Exception as e:
+        return jsonify({"ok": False, "message": f"净值获取失败: {str(e)[:120]}"}), 400
+    state = _load_dca_state()
+    tp_entry = state.setdefault("take_profit", {}).setdefault(code, {})
+    tp_entry["plan"] = {"threshold": threshold, "mode": mode}
+    harvested = tp_entry.setdefault("lots", {})
+    rows, _ = _tp_compute(lots, adj, threshold, mode, harvested, delay=0)
+    today = dt.date.today().isoformat()
+    txns = _load_ledger()
+    added, total_sell = 0, 0.0
+    for r in rows:
+        if r["status"] != "hit" or r["key"] not in wanted or r["key"] in harvested:
+            continue
+        nt = _norm_txn({"code": code, "date": today, "side": "sell",
+                        "amount": r["sellAmount"],
+                        "note": "定投止盈·" + TP_MODE_LABELS.get(mode, mode)})
+        if not nt:
+            continue
+        txns.append(nt)
+        harvested[r["key"]] = {"action": "sold", "mode": mode, "soldAmount": r["sellAmount"],
+                               "soldDate": today, "costNav": r["costNav"], "nav": r["navNow"]}
+        added += 1
+        total_sell += r["sellAmount"]
+    if not added:
+        return jsonify({"ok": False, "message": "所选批次均未达到止盈线或已止盈，未写入任何记录"}), 400
+    if not _save_ledger(txns) or not _save_dca_state(state):
+        return jsonify({"ok": False, "message": "保存失败（output 目录不可写？）"}), 500
+    return jsonify(clean(dict(ok=True, added=added, totalSell=round(total_sell, 2),
+                              message=f"已记录卖出 {added} 笔，合计 {round(total_sell, 2):,.2f} 元",
+                              txns=txns, dca_state=state)))
+
+
+
+@app.post("/api/dca_tp/skip")
+def dca_tp_skip():
+    """把已达线的所选批次标记为「不卖出」：不写卖出台账，之后不再提示该批次。
+    body: {code, threshold?, mode?, lotKeys: [lotKey...]}"""
+    body = request.get_json(silent=True) or {}
+    code = str(body.get("code", "")).zfill(6)
+    if not re.fullmatch(r"\d{6}", code):
+        return jsonify({"ok": False, "message": "基金代码无效"}), 400
+    try:
+        threshold = float(body.get("threshold", 20))
+    except (TypeError, ValueError):
+        threshold = 20.0
+    threshold = min(100.0, max(1.0, threshold))
+    mode = str(body.get("mode") or "keep_cost")
+    if mode not in TP_MODES:
+        mode = "keep_cost"
+    wanted = body.get("lotKeys")
+    if not isinstance(wanted, list) or not wanted:
+        return jsonify({"ok": False, "message": "请选择要标记为不卖出的批次"}), 400
+    wanted = {str(k) for k in wanted}
+    lots = _tp_dca_lots(code)
+    if not lots:
+        return jsonify({"ok": False, "message": "台账中无该基金的定投买入记录"}), 400
+    try:
+        adj = _tp_load_nav(code)
+    except Exception as e:
+        return jsonify({"ok": False, "message": f"净值获取失败: {str(e)[:120]}"}), 400
+    state = _load_dca_state()
+    tp_entry = state.setdefault("take_profit", {}).setdefault(code, {})
+    tp_entry["plan"] = {"threshold": threshold, "mode": mode}
+    harvested = tp_entry.setdefault("lots", {})
+    rows, _ = _tp_compute(lots, adj, threshold, mode, harvested, delay=0)
+    today = dt.date.today().isoformat()
+    added = 0
+    for r in rows:
+        if r["status"] != "hit" or r["key"] not in wanted or r["key"] in harvested:
+            continue
+        harvested[r["key"]] = {"action": "skip", "skipDate": today,
+                               "threshold": threshold, "gain": r["gain"]}
+        added += 1
+    if not added:
+        return jsonify({"ok": False, "message": "所选批次均未达线或已处理，未写入任何标记"}), 400
+    if not _save_dca_state(state):
+        return jsonify({"ok": False, "message": "保存失败（output 目录不可写？）"}), 500
+    return jsonify(clean(dict(ok=True, added=added,
+                              message=f"已标记 {added} 笔不卖出，之后不再提示",
+                              dca_state=state)))
+
+
+@app.post("/api/ledger/import")
+def ledger_import():
+    """把持仓输入（代码 市值 [买入日期|成本|收益率]）转换为买入记录并入台账。
+    只导入含买入日期或成本的持仓；仅市值+日期时成本按净值折算（锚定市值口径）。"""
+    body = request.get_json(silent=True) or {}
+    holdings_in = body.get("holdings")
+    if not isinstance(holdings_in, list):
+        return jsonify({"ok": False, "message": "holdings 需要是数组"}), 400
+    txns = _load_ledger()
+    existing_ids = {t["id"] for t in txns}
+    existing_keys = {(t["code"], t["date"], t["side"], round(float(t["amount"]), 2)) for t in txns}
+    added = 0
+    for h in holdings_in:
+        if not isinstance(h, dict):
+            continue
+        code = str(h.get("code", "")).zfill(6)
+        if not re.fullmatch(r"\d{6}", code):
+            continue
+        amt = _parse_yuan(h.get("amount"))
+        buy_date = _parse_date(h.get("buy_date"))
+        cost = _parse_yuan(h.get("cost"))
+        ret_pct = _parse_pct(h.get("ret_pct"))
+        if not amt or amt <= 0:
+            continue
+        if buy_date is None and cost is None and ret_pct is None:
+            continue          # 无入场信息，无法转成买入记录
+        if buy_date is None:
+            # 用净值反推入场日（收益率或 成本→收益率）
+            try:
+                adj = holding_diag.adj_series(provider.get_fund_nav(code))
+                r_infer = ret_pct
+                if r_infer is None and cost and cost > 0:
+                    r_infer = (amt / cost - 1.0) * 100.0
+                if r_infer is None:
+                    continue
+                d0, _ = holding_diag.infer_entry_date(adj, r_infer)
+                if d0 is None:
+                    continue
+                buy_date = str(d0.date())
+            except Exception:
+                continue
+        if cost is None or cost <= 0:
+            # 只有市值+日期：成本 = 市值 × adj(买入日)/adj(now)（锚定口径）
+            try:
+                adj = holding_diag.adj_series(provider.get_fund_nav(code))
+                d = pd.Timestamp(buy_date)
+                pos = int(adj.index.searchsorted(d))
+                pos = min(max(pos, 0), len(adj) - 1)
+                cost = amt * float(adj.iloc[pos]) / float(adj.iloc[-1])
+            except Exception:
+                cost = amt
+        # 导入得到的 cost 为"净成本（确认金额）"；台账金额按"含费总金额"存，
+        # 因此转回 gross = cost×(1+费率)，fund_lots_diag 计算净申购= gross/(1+费率)，
+        # 恰好还原 cost，避免二次扣费。
+        fee, _ = _resolve_buy_fee(code)
+        gross = cost * (1.0 + fee)
+        t = _norm_txn({"code": code, "date": buy_date, "side": "buy", "amount": gross, "note": "导入"})
+        key = (t["code"], t["date"], t["side"], round(t["amount"], 2)) if t else None
+        if t and t["id"] not in existing_ids and key not in existing_keys:
+            txns.append(t)
+            existing_ids.add(t["id"])
+            existing_keys.add(key)
+            added += 1
+    _save_ledger(txns)
+    return jsonify(clean(dict(ok=True, txns=txns, added=added)))
+
+
+@app.delete("/api/ledger")
+def ledger_delete():
+    _save_ledger([])
+    # 台账清空 = 从零开始：定投终止/忽略标记一并清掉，避免旧标记压制新轮次提醒
+    _save_dca_state({"terminated": {}, "ignored": {}})
+    return jsonify({"ok": True, "txns": []})
+
+
+STATE = {"phase": "idle", "done": 0, "total": 0, "started": None,
+         "elapsed": 0, "message": "空闲", "stamp": None, "scan_mode": "default"}
+LOCK = threading.Lock()
+
+
+def clean(o):
+    """NaN/NaT/np类型 → JSON可序列化"""
+    if isinstance(o, dict):
+        return {k: clean(v) for k, v in o.items()}
+    if isinstance(o, (list, tuple)):
+        return [clean(v) for v in o]
+    if isinstance(o, (np.integer,)):
+        return int(o)
+    if isinstance(o, (np.floating, float)):
+        # V3.7.1: NaN 和 ±Inf 一并拦截(Inf曾致整批JSON非法)
+        return float(o) if np.isfinite(o) else None
+    if isinstance(o, (np.bool_,)):
+        return bool(o)
+    return o
+
+
+
+def _safe_list(v):
+    return v if isinstance(v, list) else []
+
+
+def _safe_dict(v):
+    return v if isinstance(v, dict) else {}
+
+
+def _parse_int(v, default, low=None, high=None):
+    try:
+        out = int(float(v))
+    except (TypeError, ValueError):
+        out = default
+    if low is not None:
+        out = max(low, out)
+    if high is not None:
+        out = min(high, out)
+    return out
+
+
+# ---------------- P4-3 交付层: 宏观对照 / A-C 份额建议 / 市值加权暴露 ----------------
+
+# fund_meta 直读(纯本地, 不走 provider 新鲜度/重抓路径——展示层不应触发网络)
+_SHARE_CLASS_INDEX = None
+
+
+def _load_share_class_index():
+    """fund_meta → {fund_code: (base, cls_char)} + {base: {cls: (code, name)}}。
+    配对规则(严格, 防误配): 拼音全称尾部 A/C/E 视为份额类别, 但仅当同一去尾 stem
+    下存在 ≥2 个不同类别后缀时才认定为份额族。
+    反例: 华夏成长混合(000001/000002后端) 全称尾 'E' 是拼音自然结尾而非份额,
+    无 A/C 兄弟 → 不配对; 中海可转债 000003A/000004C 同 stem → 配对。"""
+    global _SHARE_CLASS_INDEX
+    if _SHARE_CLASS_INDEX is not None:
+        return _SHARE_CLASS_INDEX
+    code2base, base2cls = {}, {}
+    try:
+        meta = pd.read_csv(f"{provider.CACHE_DIR}/fund_meta.csv", dtype={"基金代码": str})
+        by_stem = {}
+        for _, row in meta.iterrows():
+            code = str(row.get("基金代码", "")).zfill(6)
+            full = str(row.get("拼音全称", "") or "").strip().upper()
+            name = str(row.get("基金简称", "") or "")
+            if not re.fullmatch(r"\d{6}", code) or len(full) < 5 or full[-1] not in "ACE":
+                continue
+            stem, cls = full[:-1], full[-1]
+            by_stem.setdefault(stem, {}).setdefault(cls, (code, name))
+        for stem, clsmap in by_stem.items():
+            if len(clsmap) < 2:
+                continue  # 单一 A 或单一 C 无兄弟份额 → 不构成可比的份额族
+            base2cls[stem] = clsmap
+            for cls, (code, _n) in clsmap.items():
+                code2base[code] = (stem, cls)
+    except Exception as e:
+        print(f"[P4-3] fund_meta 读取失败, A/C 建议降级: {e}", flush=True)
+    _SHARE_CLASS_INDEX = (code2base, base2cls)
+    return _SHARE_CLASS_INDEX
+
+
+def share_class_info(code):
+    """A/C/E 份额建议(纯展示): 返回同类份额、A 申购费(用户费率设置)、C 服务费假设、
+    breakeven 年数 = A费 ÷ C年费率。非模型参数, 不参与任何评分/裁决。"""
+    code = str(code or "").zfill(6)
+    code2base, base2cls = _load_share_class_index()
+    out = {"code": code, "siblings": {}, "has_pair": False,
+           "note": "A/C 份额费差参考: C 类销售服务费为假设值(市售 C 类主流 0.20%~0.40%/年, 取 0.30%);"
+                   "盈亏平衡年数 = A 类申购费 ÷ C 类年服务费。仅费差展示, 不参与模型评分。"}
+    entry = code2base.get(code)
+    if not entry:
+        return out
+    base, cls = entry
+    siblings = base2cls.get(base, {})
+    for c in ("A", "C", "E"):
+        if c in siblings:
+            c_code, c_name = siblings[c]
+            item = {"code": c_code, "name": c_name}
+            if c == "A":
+                rate, src = _resolve_buy_fee(c_code, _load_fee_settings())
+                item["buy_fee"] = rate
+                item["fee_source"] = src
+            out["siblings"][c] = item
+    out["self_cls"] = cls
+    a, c = out["siblings"].get("A"), out["siblings"].get("C")
+    if a and c:
+        out["has_pair"] = True
+        out["c_service_fee_annual"] = C_CLASS_SERVICE_FEE_ANNUAL
+        be = a.get("buy_fee") or 0.0
+        out["breakeven_years"] = round(be / C_CLASS_SERVICE_FEE_ANNUAL, 2)
+    return out
+
+
+@app.get("/api/share_class")
+def api_share_class():
+    code = str(request.args.get("code", "")).zfill(6)
+    if not re.fullmatch(r"\d{6}", code):
+        return jsonify({"ok": False, "message": "基金代码无效"}), 400
+    return jsonify({"ok": True, "share_class": share_class_info(code)})
+
+
+# ---------------- P4-3 宏观面板: 指数对照 + 跨市场相对强度 ----------------
+
+MACRO_INDEX_SPECS = [
+    ("沪深300", "idx_sh000300.csv"),
+    ("标普500", "idx_us__INX.csv"),   # provider: .INX → idx_us__INX.csv (双下划线)
+    ("纳指100", "idx_us__NDX.csv"),
+    ("恒生指数", "idx_hk_HSI.csv"),
+    ("恒生科技", "idx_hk_HSTECH.csv"),
+]
+# P3-6 跨市场信号分档阈值(研究存档信号; 现行模型未启用, 仅展示)
+P36_BAND = 0.15
+
+
+@app.get("/api/macro")
+def api_macro():
+    """指数对照(收盘/6月/1年) + INX−沪深300 252d 相对强度(P3-6 口径, ±15% 分档)。
+    纯本地 cache 读取, 不触发网络刷新。"""
+    idx_rows, ret252 = [], {}
+    for label, fname in MACRO_INDEX_SPECS:
+        item = {"label": label}
+        try:
+            df = pd.read_csv(f"{provider.CACHE_DIR}/{fname}")
+            s = df.set_index(pd.to_datetime(df["date"]))["close"].dropna().sort_index()
+            last = float(s.iloc[-1])
+            item.update({
+                "close": round(last, 2),
+                "ret_126d": round(float(s.iloc[-1] / s.iloc[-127] - 1), 4) if len(s) >= 127 else None,
+                "ret_252d": round(float(s.iloc[-1] / s.iloc[-253] - 1), 4) if len(s) >= 253 else None,
+                "asof": str(s.index[-1].date()),
+            })
+            if item["ret_252d"] is not None:
+                ret252[label] = item["ret_252d"]
+        except Exception as e:
+            item["error"] = str(e)[:120]
+        idx_rows.append(item)
+    diff = None
+    if "标普500" in ret252 and "沪深300" in ret252:
+        diff = round(ret252["标普500"] - ret252["沪深300"], 4)
+    band, band_label = "balanced", "均衡"
+    if diff is not None:
+        if diff > P36_BAND:
+            band, band_label = "overseas_strong", "海外显著强 (P3-6 信号 > +15%)"
+        elif diff < -P36_BAND:
+            band, band_label = "a_strong", "A股显著强 (P3-6 信号 < −15%)"
+    return jsonify({
+        "ok": True,
+        "indices": idx_rows,
+        "cross": {
+            "diff_252d": diff,
+            "band": band,
+            "band_label": band_label,
+            "note": "P3-6 跨市场相对强度 = 252d(标普500) − 252d(沪深300); ±15% 为研究分档阈值。"
+                    "存档研究信号, 现行模型未启用(见 docs/P3 海外槽位实验)。",
+        },
+    })
+
+
+def aggregate_rbsa_weighted(rb_list, amounts, fallback_label="等权(金额缺失)"):
+    """RBSA 暴露聚合(P4-3 持仓穿透): 按 amounts{code: 市值} 加权;
+    金额缺失/为0 的行不计权(自然排除未持有候选); 全部缺失时回退等权。
+    展示口径, 非风控规则(P3-4/P4-4: 35% 上限为死配置, 回测从未执行)。"""
+    recs = []
+    for r in rb_list or []:
+        code, rbsa = r.get("code"), r.get("rbsa")
+        if isinstance(rbsa, dict) and code:
+            recs.append((str(code).zfill(6), rbsa))
+    if not recs:
+        return None
+    total_w = sum(float((amounts or {}).get(c, 0.0) or 0.0) for c, _ in recs)
+    basis = "市值加权"
+    if total_w <= 0:
+        basis = fallback_label
+    names = [spec[2] for spec in RBSA_INDICES]   # rbsa 字典键 = 风格名(元组第3元素)
+
+    def _fv(x):  # NaN/inf/缺失 → 0 (P4-4: 存在 16 只 NaN 风格基金; NaN 会污染 JSON)
+        try:
+            f = float(x)
+            return f if f == f and abs(f) != float("inf") else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    exposure = {}
+    for k in names:
+        if basis == "市值加权":
+            num = sum(_fv((amounts or {}).get(c, 0.0)) * _fv(v.get(k)) for c, v in recs)
+            exposure[k] = num / total_w
+        else:
+            exposure[k] = sum(_fv(v.get(k)) for _, v in recs) / len(recs)
+    exposure = {k: round(float(v), 4) for k, v in exposure.items() if v > 0.001}
+    ranked = sorted(exposure.items(), key=lambda kv: -kv[1])
+    return {
+        "n": len(recs),
+        "basis": basis,
+        "exposure": exposure,
+        "top": [{"style": k, "pct": round(v * 100, 1)} for k, v in ranked[:6] if v > 0.01],
+    }
+
+
+# ---------------- 页面 ----------------
+@app.route("/")
+def home():
+    # 首屏数据直接嵌进 HTML：预览 iframe 里即便后续 fetch 失败，水位/地形也不会一直转圈
+    boot = {}
+    try:
+        with app.test_request_context():
+            for key, fn in (("strategy", strategy_state), ("terrain", terrain),
+                            ("ledger", ledger_get)):
+                try:
+                    boot[key] = fn().get_json()
+                except Exception as e:
+                    boot.setdefault("_errors", {})[key] = str(e)[:120]
+    except Exception as e:
+        boot["_errors"] = {"boot": str(e)[:120]}
+    payload = json.dumps(boot, ensure_ascii=False).replace("<", "\\u003c")
+    return render_template("index.html", boot_json=payload)
+
+
+# ---------------- 估值地形图 + 大盘水位计(V3.2) ----------------
+def regime_label(w):
+    if w is None or w != w:
+        return "—"
+    if w <= 0.20:
+        return "🟢 极度低估 · 左侧权重已激活 (估值0.55/动量0.10)"
+    if w >= 0.90:
+        return "🔴 极度高估 · 全面防守"
+    return "🟡 中性区 · 标准权重"
+
+
+@app.get("/api/terrain")
+def terrain():
+    pct = rbsa.index_pe_percentile()
+    kind_map = {"sina": "风格", "csindex": "行业", "us_sina": "境外", "hk_sina": "境外"}
+    out = []
+    for src, code, name, pe_key, tag in RBSA_INDICES:
+        if pe_key == "none":
+            out.append({"name": name, "error": "估值盲区(无PE源)"})
+            continue
+        try:
+            pe = provider.get_pe_by_key(pe_key).dropna()
+            v = pct.get(name)
+            out.append({"name": name, "kind": kind_map.get(src, src),
+                        "pe": round(float(pe.iloc[-1]), 2),
+                        "pct": None if v is None else round(v * 100, 1),
+                        "date": str(pe.index[-1].date())})
+        except Exception as e:
+            out.append({"name": name, "error": str(e)[:60]})
+    try:
+        w = market_water(None)
+    except Exception:
+        w = float("nan")
+    try:
+        rev = provider.market_reversal_signal("sh000300")
+    except Exception as e:
+        rev = {"error": str(e)[:80]}
+    _dates = [o["date"] for o in out if o.get("date")]
+    return jsonify({"items": out, "water": None if w != w else round(w * 100, 1),
+                    "water_style": "6风格等权PE分位", "regime": regime_label(w),
+                    "asof": max(_dates) if _dates else None,
+                    "asof_expected": provider.expected_last_td(),
+                    "stale": provider.stale_warnings(),
+                    "reversal": rev})
+
+
+# ---------------- V3.8 执行层策略状态 —— 抽出危机计算供复用 ----------------
+def _compute_crisis():
+    crisis = dict(
+        enabled=True,
+        index="沪深300",
+        ma_window=STRAT_CRISIS_MA,
+        vol_window=STRAT_CRISIS_VOL_WINDOW,
+        vol_quantile=STRAT_CRISIS_VOL_Q,
+        hs300_close=None,
+        ma=None,
+        vol20=None,
+        vol_threshold=None,
+        active=False,
+        reason="",
+        data_insufficient=False,
+    )
+    try:
+        bench = provider.get_close_by_src("sina", "sh000300").dropna().sort_index()
+        if len(bench) < STRAT_CRISIS_MA + STRAT_CRISIS_VOL_WINDOW + 1:
+            crisis["data_insufficient"] = True
+            crisis["reason"] = f"沪深300数据不足({len(bench)}行)，无法计算MA{STRAT_CRISIS_MA}或Vol{STRAT_CRISIS_VOL_WINDOW}"
+        else:
+            ma_series = bench.rolling(STRAT_CRISIS_MA).mean()
+            ret = bench.pct_change()
+            vol20_series = ret.rolling(STRAT_CRISIS_VOL_WINDOW).std() * sqrt(252)
+            vol_threshold_series = vol20_series.expanding().quantile(STRAT_CRISIS_VOL_Q)
+            last_close = float(bench.iloc[-1])
+            last_ma = float(ma_series.iloc[-1])
+            last_vol20 = float(vol20_series.iloc[-1])
+            last_vol_th = float(vol_threshold_series.iloc[-1])
+            crisis["hs300_close"] = round(last_close, 2)
+            crisis["ma"] = round(last_ma, 2)
+            crisis["vol20"] = round(last_vol20, 4)
+            crisis["vol_threshold"] = round(last_vol_th, 4)
+            below_ma = last_close < last_ma
+            vol_extreme = last_vol20 > last_vol_th
+            crisis_active = below_ma and vol_extreme
+            crisis["active"] = crisis_active
+            parts = []
+            if below_ma:
+                parts.append(f"沪深300({last_close:.0f}) < MA{STRAT_CRISIS_MA}({last_ma:.0f})")
+            if vol_extreme:
+                parts.append(f"Vol20({last_vol20:.2%}) > 历史{int(STRAT_CRISIS_VOL_Q*100)}%分位({last_vol_th:.2%})")
+            crisis["reason"] = " 且 ".join(parts) if crisis_active else "不满足危机条件"
+    except Exception as e:
+        crisis["data_insufficient"] = True
+        crisis["reason"] = f"沪深300数据获取失败: {str(e)[:80]}"
+    return crisis
+
+
+@app.get("/api/strategy_state")
+def strategy_state():
+    """返回 V3.8 组合执行层实时状态: 信号阈值 / 危机过滤 / CPPI / 买入决策"""
+    signal = dict(
+        buy_th=STRAT_BUY_TH,
+        sell_th=STRAT_SELL_TH,
+        hold_band=[STRAT_SELL_TH, STRAT_BUY_TH],
+        slots=STRAT_SLOTS,
+    )
+    cash = dict(annual_yield=STRAT_CASH_YIELD)
+    micro_risk = dict(trail_stop=STRAT_TRAIL_STOP)
+    cppi_rules = [
+        dict(drawdown_lte=STRAT_CPPI_DD1, max_slots=STRAT_CPPI_SLOTS1),
+        dict(drawdown_lte=STRAT_CPPI_DD2, max_slots=STRAT_CPPI_SLOTS2),
+        dict(drawdown_lte=STRAT_CPPI_DD3, max_slots=STRAT_CPPI_SLOTS3),
+    ]
+    cppi = dict(
+        enabled=STRAT_CPPI,
+        rules=cppi_rules,
+        requires_portfolio_equity=True,
+        note="网页版如果没有用户组合净值曲线，则只能展示规则，不能自动判断用户是否触发CPPI。",
+    )
+    crisis = _compute_crisis()
+    crisis_active = crisis["active"] or crisis["data_insufficient"]
+    new_buy_allowed = not crisis_active
+    max_slots_by_macro = 0 if crisis_active else STRAT_SLOTS
+    if crisis_active:
+        msg = "危机模式：禁止新开权益仓，仅允许持仓按S卖出或止损退出"
+    else:
+        msg = "当前非危机，可按S信号买入"
+    decision = dict(
+        new_buy_allowed=new_buy_allowed,
+        max_slots_by_macro=max_slots_by_macro,
+        message=msg,
+    )
+    return jsonify(clean(dict(
+        version=STRAT_VERSION,
+        signal=signal,
+        cash=cash,
+        micro_risk=micro_risk,
+        crisis=crisis,
+        cppi=cppi,
+        decision=decision,
+    )))
+
+
+# ---------------- 榜单读取 ----------------
+def _latest_scan():
+    files = sorted(glob.glob(f"{OUTPUT_DIR}/scan_*.csv"))
+    return files[-1] if files else None
+
+
+@app.get("/api/results")
+def results():
+    f = _latest_scan()
+    if not f:
+        return jsonify({"rows": [], "stamp": None})
+    df = pd.read_csv(f, dtype={"code": str})
+    df = df[df["error"].isna()] if "error" in df else df
+    stamp = os.path.basename(f).split("_")[-1].split(".")[0]
+    # V3.7.3: 榜单墙钟 vs 数据内容截至 — 两个时钟必须同框展示
+    asof = str(df["last_date"].max())[:10] if "last_date" in df else None
+    exp = provider.expected_last_td()
+    # V3.9: 分市场榜单计数（A股/海外）
+    n_a = n_ov = None
+    if "region" in df:
+        n_a = int((df["region"] == "A股").sum())
+        n_ov = int((df["region"] == "海外").sum())
+    # 榜单首屏只要表格列。rbsa JSON 会把 4500 行撑到数 MB，浏览器一直转圈。
+    keep = ["code", "name", "ftype", "region", "channel", "S_total", "rating",
+            "F_value", "F_alpha", "F_momentum", "val_pct", "penalty_str", "last_date"]
+    cols = [c for c in keep if c in df.columns]
+    view = df[cols] if cols else df
+    return jsonify({"rows": clean(view.where(pd.notna(view), None).to_dict("records")),
+                    "stamp": stamp, "n": len(df), "n_a": n_a, "n_ov": n_ov,
+                    "asof": asof, "asof_expected": exp,
+                    "asof_stale": bool(asof and asof < exp),
+                    "stale": provider.stale_warnings()})
+
+
+# ---------------- 定投导入 (DCA) ----------------
+@app.post("/api/dca/preview")
+def dca_preview():
+    """生成定投买入序列（预览，不落库）。
+    body: {code, start_date, amount, freq, end_date?}
+    返回: lots + 序列当前市值估算（按真实复权净值折算）。"""
+    body = request.get_json(silent=True) or {}
+    code = str(body.get("code", "")).zfill(6)
+    start = _parse_date(body.get("start_date"))
+    amt = _parse_yuan(body.get("amount"))
+    freq = str(body.get("freq") or "monthly").lower()
+    if freq not in ("daily", "monthly", "biweekly", "weekly"):
+        return jsonify({"ok": False, "message": "频率仅支持 daily / monthly / biweekly / weekly"}), 400
+    if not re.fullmatch(r"\d{6}", code) or not start or not amt or amt <= 0:
+        return jsonify({"ok": False, "message": "需要 基金代码 + 开始日期 + 每期金额"}), 400
+    try:
+        nav_df = provider.get_fund_nav(code)
+    except Exception as e:
+        return jsonify({"ok": False, "message": f"净值获取失败: {str(e)[:120]}"}), 400
+    adj = holding_diag.adj_series(nav_df)
+    end = _parse_date(body.get("end_date"))
+    # 台账记录的是实际下单/扣款日，不应受净值披露时滞限制。尤其 QDII 的今日净值
+    # 往往要 T+1/T+2 才发布；历史日期仍严格按真实净值日过滤，最新净值之后的工作日
+    # 则作为“待确认扣款”保留，避免“补齐至今日”永远只能补到昨天。
+    lots = holding_diag.dca_lots(start, amt, freq, end, adj=adj, include_pending=True)
+    if not lots:
+        return jsonify({"ok": False, "message": "区间内没有应扣款的工作日（周末或休市）"}), 400
+    # 序列当前市值估算（每期按当日净值折份额 × 最新净值；已自动扣申购费；
+    # 尚未披露净值的在途记录暂按最新净值估算）。
+    fee, _ = _resolve_buy_fee(code)
+    now = float(adj.iloc[-1])
+    n = len(adj)
+    mv = 0.0
+    for d, _, a in lots:
+        pos = int(min(max(int(adj.index.searchsorted(pd.Timestamp(d))), 0), n - 1))
+        mv += a / (1.0 + fee) * now / float(adj.iloc[pos])
+    total = sum(a for _, _, a in lots)
+    return jsonify(clean(dict(
+        ok=True, code=code, freq=freq, freq_label=holding_diag.DCA_FREQ_LABELS.get(freq, freq),
+        lots=[{"date": d, "amount": a,
+               "nav_pending": pd.Timestamp(d).date() > adj.index[-1].date()}
+              for d, _, a in lots],
+        n=len(lots), first=lots[0][0], last=lots[-1][0],
+        pending=sum(pd.Timestamp(d).date() > adj.index[-1].date() for d, _, _ in lots),
+        nav_asof=adj.index[-1].date().isoformat(),
+        total=round(total, 2), implied_mv=round(mv, 2))))
+
+
+@app.post("/api/dca/infer")
+def dca_infer():
+    """混合持仓反推定投参数。
+    body: {code, total_mv, manual_lots?: [{date, amount, side?}], freqs?}
+    manual_lots 缺省 → 自动读取台账中该基金的非定投记录（note 以"定投"开头的除外）。"""
+    body = request.get_json(silent=True) or {}
+    code = str(body.get("code", "")).zfill(6)
+    total_mv = _parse_yuan(body.get("total_mv"))
+    if not re.fullmatch(r"\d{6}", code):
+        return jsonify({"ok": False, "message": "基金代码无效"}), 400
+    if not total_mv or total_mv <= 0:
+        return jsonify({"ok": False, "message": "需要当前总市值"}), 400
+    freqs = body.get("freqs") or ("monthly", "biweekly", "weekly")
+    manual = body.get("manual_lots")
+    source = "用户输入"
+    if isinstance(manual, list) and manual:
+        lots = []
+        for m in manual:
+            if not isinstance(m, dict):
+                continue
+            d = _parse_date(m.get("date"))
+            a = _parse_yuan(m.get("amount"))
+            side = str(m.get("side", "buy")).lower()
+            side = "sell" if side in ("sell", "卖", "s") else "buy"
+            if d and a and a > 0:
+                lots.append((d, side, a))
+        if not lots:
+            return jsonify({"ok": False, "message": "主动买入记录格式无效（每行: 日期 金额）"}), 400
+    else:
+        txns = [t for t in _load_ledger()
+                if t.get("code") == code and not str(t.get("note", "")).startswith("定投")]
+        lots = [(t["date"], t["side"], t["amount"]) for t in txns]
+        source = f"台账（{len(lots)} 条主动记录）" if lots else "台账（无记录）"
+    try:
+        nav_df = provider.get_fund_nav(code)
+    except Exception as e:
+        return jsonify({"ok": False, "message": f"净值获取失败: {str(e)[:120]}"}), 400
+    adj = holding_diag.adj_series(nav_df)
+    r = holding_diag.infer_dca(lots, total_mv, adj, freqs=freqs)
+    r.update(code=code, source=source)
+    if r.get("candidates"):
+        c = r["candidates"][0]
+        r["message"] = (f"推荐：{holding_diag.DCA_FREQ_LABELS.get(c['freq'], c['freq'])}定投 "
+                        f"{c['amount']:,.0f} 元/期 · 自 {c['start_date']} 起 · 共 {c['periods']} 期"
+                        f"（点击候选填入上方生成序列）")
+    return jsonify(clean(r))
+
+
+# ---------------- 手动触发: 全市场扫描 ----------------
+def _run_scan(right_n, left_n, workers=6, scan_mode="default"):
+    t0 = time.time()
+    try:
+        mode_text = {"all_target": "全部目标类型", "all_main": "全部主池", "default": "全市场漏斗"}.get(scan_mode, "全市场漏斗")
+        with LOCK:
+            STATE.update(phase="universe", message=f"正在构建{mode_text}(拉取排行总库)...",
+                         scan_mode=scan_mode)
+        pool = build_universe(right_n, left_n, mode=scan_mode)
+        chan = dict(zip(pool["基金代码"], pool["channel"]))
+        codes = pool["基金代码"].tolist()
+        with LOCK:
+            STATE.update(phase="scoring", total=len(codes), done=0,
+                         message="爬取净值/档案 → RBSA穿透 → 风控乘数 ...")
+        rows = []
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futs = {ex.submit(score_fund, c): c for c in codes}
+            for fut in as_completed(futs):
+                c = futs[fut]
+                try:
+                    r = fut.result()
+                except Exception as e:
+                    r = {"code": c, "name": c, "error": str(e)[:100]}
+                r["channel"] = chan.get(c)
+                rows.append(r)
+                with LOCK:
+                    STATE["done"] += 1
+                    STATE["elapsed"] = round(time.time() - t0)
+        df = finalize(rows)
+        stamp = dt.date.today().strftime("%Y%m%d")
+        # 动量腿参照列(mom_4m1m/mom_7m1m)落盘：单基透视/批量评分/持仓诊断的
+        # 全市场参照快照(engine.get_global_ref_universe 读取)以它为 ECDF 标尺
+        keep = ["code", "name", "ftype", "channel", "S_total", "rating", "F_value",
+                "val_pct", "trend_ok", "trend_ma20", "bonus", "F_alpha", "ir_winrate",
+                "down_capture", "F_momentum", "mom_4m1m", "mom_7m1m", "rank4", "rank7",
+                "scale", "tenure_days", "is_passive", "penalty_str", "water",
+                "weights_mode", "last_date", "error"]
+        df[[k for k in keep if k in df]].to_csv(
+            f"{OUTPUT_DIR}/scan_{stamp}.csv", index=False, encoding="utf-8-sig")
+        with LOCK:
+            STATE.update(phase="done", message=f"完成: 深算 {len(df)} 只", stamp=stamp,
+                         elapsed=round(time.time() - t0))
+    except Exception as e:
+        with LOCK:
+            STATE.update(phase="error", message=f"扫描失败: {str(e)[:200]}")
+
+
+@app.post("/api/scan")
+def scan():
+    if STATE["phase"] in ("universe", "scoring"):
+        return jsonify({"ok": False, "message": "扫描进行中"}), 409
+    body = request.get_json(silent=True) or {}
+    req_mode = str(body.get("scan_mode") or "").strip().lower()
+    scan_all_main = bool(body.get("all_main") or body.get("scan_all_main"))
+    scan_all_target = bool(body.get("all_target") or body.get("scan_all_target"))
+    right = _parse_int(body.get("right", 400), 400, low=1, high=2000)
+    left = _parse_int(body.get("left", 150), 150, low=0, high=1000)
+    if req_mode in ("all_main", "all_target", "default"):
+        scan_mode = req_mode
+    elif scan_all_target:
+        scan_mode = "all_target"
+    elif scan_all_main:
+        scan_mode = "all_main"
+    else:
+        scan_mode = "default"
+    workers = 4 if scan_mode in ("all_target", "all_main") else 6
+    boot_msg = {
+        "all_main": "启动中（全部主池，耗时较长）...",
+        "all_target": "启动中（全部目标类型，耗时较长）...",
+        "default": "启动中...",
+    }.get(scan_mode, "启动中...")
+    STATE.update(phase="universe", done=0, total=0, started=time.time(), elapsed=0,
+                 message=boot_msg, scan_mode=scan_mode)
+    threading.Thread(target=_run_scan, args=(right, left, workers, scan_mode), daemon=True).start()
+    return jsonify({"ok": True, "scan_mode": scan_mode})
+
+
+@app.get("/api/scan/status")
+def status():
+    return jsonify(STATE)
+
+
+# ---------------- 手动触发: 单基透视(以全市场动量作为参照系) ----------------
+def _final_single(r: dict) -> dict:
+    """给单基金补上截面动量排名 → F_momentum → S_total → 评级 (统一采用 engine.finalize 全域标尺)"""
+    df = finalize([r], use_global_ref=True)
+    return df.iloc[0].to_dict()
+
+
+@app.post("/api/fund/<code>")
+def fund(code):
+    code = str(code).zfill(6)
+    if not re.fullmatch(r"\d{6}", code):
+        return jsonify({"ok": False, "message": "基金代码无效"}), 400
+    try:
+        r = score_fund(code)
+        if "error" in r and r.get("error"):
+            return jsonify({"ok": False, "message": r["error"]}), 400
+        out = clean(_final_single(r))
+        out["share_class"] = share_class_info(code)   # P4-3: A/C 份额建议(纯展示)
+        return jsonify({"ok": True, "fund": out})
+    except Exception as e:
+        return jsonify({"ok": False, "message": str(e)[:200]}), 400
+
+
+# ---------------- 批量自选(支付宝持仓) ----------------
+@app.post("/api/watchlist")
+def watchlist():
+    body = request.get_json(silent=True) or {}
+    raw_codes = body.get("codes", [])
+    if not isinstance(raw_codes, list):
+        return jsonify({"ok": False, "message": "codes 需要是数组"}), 400
+    codes = list(dict.fromkeys(
+        code for code in (str(c).zfill(6) for c in raw_codes)
+        if re.fullmatch(r"\d{6}", code)
+    ))[:50]
+    if not codes:
+        return jsonify({"ok": False, "message": "请提供至少一个有效的6位基金代码"}), 400
+    rows = []
+    # V3.7: 并行打分(4线程), 单只异常不拖垮整批
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _one(c):
+        try:
+            return score_fund(c)
+        except Exception as e:
+            return {"code": c, "name": c, "error": str(e)[:100]}
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        futs = [ex.submit(_one, c) for c in codes]
+        for fut in as_completed(futs):
+            rows.append(fut.result())
+    df = finalize(rows, use_global_ref=True)
+    # V3.6+: 与单基金透视同源的全量字段(摘要表+展开透视复用)
+    cols = ["code", "name", "ftype", "S_total", "rating", "F_value", "val_pct",
+            "val_coverage", "valuation_blind", "trend_ok", "bonus",
+            "F_alpha", "ir_winrate", "s_ir", "down_capture", "s_dc",
+            "F_momentum", "mom_4m1m", "mom_7m1m", "rbsa", "panel_mode",
+            "tenure_days", "is_passive", "penalties", "penalty_detail",
+            "penalty_str", "scale", "n_days", "last_date", "error",
+            "model_version", "ref_stamp", "data_incomplete"]
+    # V3.7.2 批判清单⑧ / P4-3: 组合级 RBSA 穿透 — 候选批无金额, 等权聚合整批隐形仓位。
+    # 仅中性展示; P3-4/P4-4 裁决 35% 上限为死配置(回测从未执行), 不再产生告警。
+    portfolio = aggregate_rbsa_weighted(rows, {}, fallback_label="等权")
+    if portfolio:
+        portfolio["note"] = "候选组合风格暴露(等权, 展示口径; 现行模型无风格上限 — P3-4/P4-4)"
+    # V3.8: 组合交易纪律字段 — 展示规则但不假装判断CPPI触发
+    portfolio_discipline = clean(dict(
+        max_slots=STRAT_SLOTS,
+        buy_threshold=STRAT_BUY_TH,
+        sell_threshold=STRAT_SELL_TH,
+        crisis_active=None,       # 需要实时计算，前端自行从 /api/strategy_state 获取
+        new_buy_allowed=None,
+        cppi_rules=[
+            dict(drawdown_lte=STRAT_CPPI_DD1, max_slots=STRAT_CPPI_SLOTS1),
+            dict(drawdown_lte=STRAT_CPPI_DD2, max_slots=STRAT_CPPI_SLOTS2),
+            dict(drawdown_lte=STRAT_CPPI_DD3, max_slots=STRAT_CPPI_SLOTS3),
+        ],
+        note="CPPI需要用户组合净值/HWM，当前网页仅展示规则，不自动判断个人账户是否触发。",
+    ))
+
+    # 参照戳与模型版本：三入口一致性自检与前端披露用
+    ref_stamp = str(df["ref_stamp"].iloc[0]) if "ref_stamp" in df and len(df) else None
+    model_ver = str(df["model_version"].iloc[0]) if "model_version" in df and len(df) else None
+    return jsonify(dict(ok=True, ref_stamp=ref_stamp, model_version=model_ver,
+                        portfolio=clean(portfolio),
+                        portfolio_discipline=portfolio_discipline,
+                        rows=clean(df[[c for c in cols if c in df]].where(pd.notna(df), None).to_dict("records"))))
+
+
+# ============================================================
+# 新增：智能调仓引擎 /api/rebalance
+#  用户输入：总可支配金额、可用现金、持仓列表(代码+金额)
+#  策略自动：V3.8 信号阈值 + 危机过滤 + CPPI + 等权槽位 + RBSA集中度
+# ============================================================
+def _parse_yuan(v):
+    """解析金额：支持 10000 / '1.5万' / '15,000' / '2w' 等；失败返回 None"""
+    if v is None or v == "":
+        return None
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        try:
+            f = float(v)
+            return f if np.isfinite(f) else None
+        except:
+            return None
+    s = str(v).strip().replace(",", "").replace("，", "").replace(" ", "")
+    if not s:
+        return None
+    s_low = s.lower()
+    mult = 1
+    # 中文/英文万
+    if s_low.endswith("万元") or s_low.endswith("万"):
+        # 去掉后缀
+        if s_low.endswith("万元"):
+            s = s[:-2]
+        else:
+            s = s[:-1]
+        mult = 10000
+    elif s_low.endswith("w") or s_low.endswith("k"):
+        # w=万, k=千
+        suffix = s_low[-1]
+        s = s[:-1]
+        mult = 10000 if suffix == "w" else 1000
+    elif s.endswith("元"):
+        s = s[:-1]
+    # 去掉可能的 '¥' '￥'
+    s = s.replace("¥", "").replace("￥", "")
+    try:
+        amount = float(s) * mult
+        return amount if np.isfinite(amount) else None
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _parse_pct(v):
+    """解析收益率：支持 12.3 / '12.3%' / '+8.5%' / '-8.5%'；失败返回 None"""
+    if v is None or v == "":
+        return None
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        try:
+            f = float(v)
+            return f if np.isfinite(f) else None
+        except:
+            return None
+    s = str(v).strip().replace("%", "").replace("％", "").replace(",", "").replace(" ", "")
+    if not s:
+        return None
+    try:
+        return float(s)
+    except:
+        return None
+
+
+def _parse_date(v):
+    """解析日期：YYYY-MM-DD / YYYY/MM/DD / YYYYMMDD / YYYY.MM.DD；失败返回 None"""
+    if v is None:
+        return None
+    s = str(v).strip()
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y%m%d", "%Y.%m.%d"):
+        try:
+            return dt.datetime.strptime(s, fmt).date().isoformat()
+        except:
+            continue
+    return None
+
+
+def _is_veto_row(row):
+    """判断是否否决池：penalties含 -100% 或 S_total==0且有回撤惩罚"""
+    ps = str(row.get("penalty_str") or "")
+    if "-100%" in ps:
+        return True
+    pens = _safe_list(row.get("penalties"))
+    for _, p in pens:
+        try:
+            if float(p) >= 0.999:
+                return True
+        except:
+            pass
+    return False
+
+
+@app.post("/api/rebalance")
+def rebalance():
+    """
+    请求 JSON:
+    {
+      "total_capital": 100000,  // 总可支配金额（可选，0则自动=持仓+现金）
+      "cash": 20000,             // 可用现金
+      "holdings": [ {"code":"110011","amount":25000}, ... ]  // amount 支持数字/字符串含万
+      // 兼容：也支持 holdings_text: "110011 2.5万\n161725 30000"
+    }
+    返回：持仓诊断 + 买卖指令 + 目标配置
+    """
+    body = request.get_json(silent=True) or {}
+    # ---- 解析总资本 & 现金 ----
+    total_capital_raw = body.get("total_capital", body.get("totalCapital", 0))
+    cash_raw = body.get("cash", body.get("available_cash", 0))
+    total_capital = _parse_yuan(total_capital_raw)
+    cash = _parse_yuan(cash_raw)
+    if cash is None:
+        cash = 0.0
+    if total_capital is None:
+        total_capital = 0.0
+    # ---- 解析持仓 ----
+    holdings_in = body.get("holdings", None)
+    # 兼容 holdings_text：每行 "代码 市值 [买入日期|成本|收益率%]"
+    if (not holdings_in) and body.get("holdings_text"):
+        txt = str(body.get("holdings_text"))
+        holdings_in = []
+        for line in re.split(r"[\n;]+", txt):
+            line=line.strip()
+            if not line:
+                continue
+            # 按空白/逗号/冒号切
+            parts = re.split(r"[\s,，、:：]+", line)
+            if not parts or not parts[0].strip().isdigit():
+                continue
+            code = parts[0].strip().zfill(6)
+            amt = _parse_yuan(parts[1]) if len(parts)>1 else None
+            h = {"code": code, "amount": amt}
+            if len(parts) > 2:
+                p3 = parts[2].strip()
+                d = _parse_date(p3)
+                if d:
+                    h["buy_date"] = d
+                elif p3.endswith("%") or p3.endswith("％"):
+                    h["ret_pct"] = _parse_pct(p3)
+                else:
+                    c = _parse_yuan(p3)
+                    if c is not None:
+                        h["cost"] = c
+            holdings_in.append(h)
+    if not isinstance(holdings_in, list):
+        holdings_in = []
+    # 标准化
+    norm_holdings = []
+    for h in holdings_in:
+        buy_date = cost = ret_pct = None
+        if isinstance(h, (list, tuple)) and len(h)>=1:
+            code = str(h[0]).zfill(6)
+            amt = _parse_yuan(h[1]) if len(h)>1 else None
+            if len(h) > 2:
+                p3 = str(h[2]).strip()
+                d = _parse_date(p3)
+                if d:
+                    buy_date = d
+                elif p3.endswith("%") or p3.endswith("％"):
+                    ret_pct = _parse_pct(p3)
+                else:
+                    cost = _parse_yuan(p3)
+        elif isinstance(h, dict):
+            code = str(h.get("code", h.get("symbol",""))).zfill(6)
+            # amount 字段多种别名（市值）
+            amt_raw = h.get("amount", h.get("value", h.get("market_value", h.get("amt", h.get("holding", None)))))
+            amt = _parse_yuan(amt_raw)
+            buy_date = _parse_date(h.get("buy_date", h.get("date", h.get("entry_date", None))))
+            cost = _parse_yuan(h.get("cost", None))
+            ret_pct = _parse_pct(h.get("ret_pct", h.get("return_pct", None)))
+        else:
+            code = str(h).zfill(6)
+            amt = None
+        if not re.fullmatch(r"\d{6}", code):
+            continue
+        norm_holdings.append({"code": code, "amount": amt, "buy_date": buy_date, "cost": cost, "ret_pct": ret_pct})
+        if len(norm_holdings) >= 50:
+            break
+    # ---- 操作台账并入：台账基金自动加入诊断（无需每次重输持仓，新增操作只记台账）----
+    use_ledger = bool(body.get("use_ledger", True))
+    ledger_by = _ledger_by_code(_load_ledger()) if use_ledger else {}
+    if ledger_by:
+        seen = {h["code"] for h in norm_holdings}
+        for code in ledger_by:
+            if code not in seen:
+                norm_holdings.append({"code": code, "amount": None, "buy_date": None,
+                                      "cost": None, "ret_pct": None, "_ledger": True})
+                seen.add(code)
+    # V3.9: 允许空组合（无持仓但有可用现金）生成纯买入方案；
+    # 只有"既无持仓也无现金/总资金"才拒绝
+    if not norm_holdings and not cash and not total_capital:
+        return jsonify({"ok": False, "message": "请至少输入 1 只持仓基金代码，或在操作台账中添加买入记录，或填写可用现金"}), 400
+
+    # ---- 危机 & 策略快照 ----
+    crisis = _compute_crisis()
+    crisis_active = bool(crisis.get("active") or crisis.get("data_insufficient"))
+    # 注: max_slots_by_macro 在 CPPI 计算后定义（crisis → 0, 否则 10）；slots_eff 为最终生效槽位
+    # ---- 评分持仓 ----
+    codes = [h["code"] for h in norm_holdings]
+    code_to_amount = {h["code"]: (h["amount"] if h["amount"] is not None else 0.0) for h in norm_holdings}
+    # 去重 codes
+    uniq_codes = list(dict.fromkeys(codes))
+    rows = []
+
+    def _friendly_err(e: str) -> str:
+        s = str(e)
+        if "RemoteDisconnected" in s or "Connection aborted" in s or "ConnectionAborted" in s:
+            return "数据源繁忙（天天基金限流/远端断开），请稍后重试或分批重试（建议≤5只/次）"
+        if "净值历史不足" in s:
+            return s
+        if "timeout" in s.lower() or "timed out" in s.lower():
+            return "数据源超时，请稍后重试"
+        return s[:120]
+
+    def _one(c):
+        # 轻量重试：首次并发易触发限流，失败后退避 1.5s 再试一次；仍失败则返回友好错误
+        last_e = None
+        for attempt in range(2):
+            try:
+                r = score_fund(c)
+                # score_fund 内已返回 error 字段的视为业务错误，不重试
+                if r.get("error"):
+                    # 净值不足等直接返回，但把限流类错误转友好
+                    if "RemoteDisconnected" in str(r.get("error")) or "Connection aborted" in str(r.get("error")):
+                        r["error"] = _friendly_err(r.get("error"))
+                    return r
+                return r
+            except Exception as e:
+                last_e = e
+                msg = str(e)
+                is_retryable = ("RemoteDisconnected" in msg or "Connection aborted" in msg or "timeout" in msg.lower())
+                if is_retryable and attempt == 0:
+                    time.sleep(1.8)
+                    continue
+                return {"code": c, "name": c, "error": _friendly_err(msg)}
+        return {"code": c, "name": c, "error": _friendly_err(last_e) if last_e else "未知错误"}
+
+    # 降低并发以避开东财限流：2 线程最稳，5只以内几乎不触发限流
+    workers = 2 if len(uniq_codes) > 4 else 3
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(_one, c): c for c in uniq_codes}
+        for fut in as_completed(futs):
+            rows.append(fut.result())
+    # 统一全局评分口径：采用 use_global_ref=True 确保与单基透视、自选池完全统一
+    # 保留 error 行也进入 finalize，但单独处理
+    try:
+        df = finalize(rows, use_global_ref=True)
+    except Exception as e:
+        # finalize 异常时回退为原 rows
+        df = pd.DataFrame(rows)
+        if "S_total" not in df:
+            df["S_total"] = np.nan
+    # 参照戳与模型版本（finalize 回退路径可能没有这些列 → 防御读取）
+    ref_stamp = str(df["ref_stamp"].iloc[0]) if "ref_stamp" in df and len(df) else None
+    model_ver = str(df["model_version"].iloc[0]) if "model_version" in df and len(df) else None
+    # 映射回金额
+    holdings_detail = []
+    # 为便于查找，建立 code->row 映射（df 已按 S_total 排序，但映射不依赖顺序）
+    row_by_code = {}
+    for _, r in df.iterrows():
+        row_by_code[str(r.get("code")).zfill(6)] = r.to_dict()
+    # 也包含完全失败的 rows（可能不在 df）
+    for r in rows:
+        c = str(r.get("code")).zfill(6)
+        if c not in row_by_code:
+            row_by_code[c] = r
+
+    # 计算组合级 RBSA (P4-3 持仓穿透: 按持仓市值加权; 未持有候选无金额→自动不计权)
+    # 展示口径, 非风控规则 — P3-4/P4-4: 35% 上限从未在回测执行层生效, 不再告警
+    try:
+        portfolio_rbsa = aggregate_rbsa_weighted(rows, code_to_amount)
+        if portfolio_rbsa:
+            portfolio_rbsa["note"] = ("按持仓市值加权的风格暴露(展示口径; 非风控规则 — "
+                                      "P3-4/P4-4: 35% 上限为死配置, 回测从未执行)")
+    except Exception:
+        portfolio_rbsa = None
+
+    scored_holdings = []
+    fee_settings = _load_fee_settings()
+    for h in norm_holdings:
+        code = h["code"]
+        amt = code_to_amount.get(code, 0.0) or 0.0
+        rec = row_by_code.get(code, {"code": code, "name": code})
+        # ---- 入场高点回撤止损：用真实净值历史自动计算 ----
+        # 路径A（操作台账）：多笔买入/卖出 → FIFO 份额与成本 → 持仓曲线 → 回撤
+        # 路径B（输入行）：代码+市值+买入日期/成本/收益率 → 单笔（内部同样走多笔引擎）
+        stop = None
+        stop_curve = None
+        try:
+            nav_df = provider.get_fund_nav(code)
+            if ledger_by.get(code):
+                stop = holding_diag.fund_lots_diag(
+                    ledger_by[code], nav_df,
+                    anchor_amount=amt if amt and amt > 0 else None,
+                    stop=STRAT_TRAIL_STOP, code=code,
+                    buy_fee=_resolve_buy_fee(code, fee_settings)[0])
+            else:
+                # 用户输入(买入日期/成本/收益率)合并进评分行，供净值曲线反推入场
+                rec_in = dict(rec) if isinstance(rec, dict) else {"code": code, "name": code}
+                for _k in ("amount", "buy_date", "cost", "ret_pct"):
+                    if h.get(_k) is not None:
+                        rec_in[_k] = h[_k]
+                stop = holding_diag.fund_stop_diag(rec_in, nav_df, stop=STRAT_TRAIL_STOP)
+            if isinstance(stop, dict):
+                stop_curve = stop.pop("curve", None)
+        except Exception:
+            stop = None
+        # ---- 关键修复：pandas 的 NaN 误判为真错误 ----
+        raw_err = rec.get("error")
+        # pandas 的 NaN、None、空串、字符串 "nan" 均视为无错
+        if raw_err is None or (isinstance(raw_err, float) and pd.isna(raw_err)) or str(raw_err).strip().lower() in ("", "nan", "none"):
+            is_err = False
+            err_msg = None
+            is_retryable = False
+        else:
+            is_err = True
+            err_msg = str(raw_err)[:180]
+            # 二次友好化（兜底）
+            if "RemoteDisconnected" in err_msg or "Connection aborted" in err_msg:
+                err_msg = "数据源繁忙（天天基金限流/远端断开），请稍后重试或分批重试（建议≤5只/次）"
+            # 新基历史不足不提供重试（重试也不会成功）
+            is_retryable = not any(k in err_msg for k in ["成立仅", "历史不足", "200天", "观察仓"])
+        # 统一全局字段：直接采用 use_global_ref 统一打分的 finalize 结果，无需冗余重算
+        s_total = rec.get("S_total")
+        try:
+            if s_total is None or (isinstance(s_total, float) and pd.isna(s_total)):
+                s_val = None
+            else:
+                fv = float(s_total)
+                s_val = None if not np.isfinite(fv) else fv
+        except:
+            s_val = None
+        veto = _is_veto_row(rec) if not is_err else False
+        rating = rec.get("rating") or ""
+        ftype = rec.get("ftype") or ""
+        penalties = _safe_list(rec.get("penalties"))
+        penalty_detail = _safe_dict(rec.get("penalty_detail"))
+        rbsa_detail = _safe_dict(rec.get("rbsa"))
+        # 台账路径下当前市值由份额×净值自动算出（锚定用户填写值）；用户没填市值时直接用计算值。
+        # 展示/调仓金额优先用持有金额（已确认市值+在途申购），对齐支付宝「持有金额」。
+        if isinstance(stop, dict) and stop.get("holding_amount"):
+            amt = float(stop["holding_amount"])
+        elif isinstance(stop, dict) and stop.get("mv_now"):
+            amt = float(stop["mv_now"])
+        holdings_detail.append({
+            "code": code,
+            "name": rec.get("name") or code,
+            "ftype": ftype,
+            "amount": round(float(amt),2),
+            "from_ledger": bool(ledger_by.get(code)),
+            "mv_computed": round(float(stop["mv_now"]), 2) if isinstance(stop, dict) and stop.get("mv_now") else None,
+            "basis": round(float(stop["basis"]), 2) if isinstance(stop, dict) and stop.get("basis") else None,
+            "lots_n": int(stop["lots_n"]) if isinstance(stop, dict) and stop.get("lots_n") else None,
+            "over_sell": bool(stop.get("over_sell")) if isinstance(stop, dict) else False,
+            "stop_curve": stop_curve,
+            "S_total": None if s_val is None or not np.isfinite(s_val) else round(float(s_val),1),
+            "rating": rating,
+            "F_value": rec.get("F_value"),
+            "F_alpha": rec.get("F_alpha"),
+            "F_momentum": rec.get("F_momentum"),
+            "val_pct": rec.get("val_pct"),
+            "ir_winrate": rec.get("ir_winrate"),
+            "penalty_str": rec.get("penalty_str") or "",
+            "penalties": penalties,
+            "penalty_detail": penalty_detail,
+            "rbsa": rbsa_detail,
+            "is_passive": rec.get("is_passive"),
+            "scale": rec.get("scale"),
+            "tenure_days": rec.get("tenure_days"),
+            "last_date": rec.get("last_date"),
+            "error": err_msg,
+            "is_veto": veto,
+            "is_error": is_err,
+            "retryable": is_retryable if is_err else False,
+            "data_incomplete": bool(rec.get("data_incomplete")),
+            "stop": stop,
+        })
+        scored_holdings.append({
+            "code": code, "s": s_val, "veto": veto, "err": is_err, "amt": amt, "rec": rec
+        })
+
+    # ---- 台账中已全部卖出的基金剔除出组合（flat），提示但不参与诊断 ----
+    flat_warns = []
+    flat_codes = [h["code"] for h in holdings_detail
+                  if isinstance(h.get("stop"), dict) and h["stop"].get("flat")]
+    if flat_codes:
+        holdings_detail = [h for h in holdings_detail if h["code"] not in flat_codes]
+        for fc in flat_codes:
+            flat_warns.append(f"{fc} 在操作台账中已全部卖出，已从本次诊断中剔除")
+
+    # ---- 组合级 CPPI：真实净值重建组合曲线 → HWM → 动态槽位 ----
+    # 仅需"买入日期(或收益率) + 成本(或市值)"即可自动计算，无需用户维护净值曲线
+    cppi_rules = [
+        (STRAT_CPPI_DD1, STRAT_CPPI_SLOTS1),
+        (STRAT_CPPI_DD2, STRAT_CPPI_SLOTS2),
+        (STRAT_CPPI_DD3, STRAT_CPPI_SLOTS3),
+    ]
+    fund_series = []
+    for h in holdings_detail:
+        st = h.get("stop") or {}
+        # 优先用台账/单笔引擎算出的现金流中性曲线（已锚定当前市值；申赎不制造回撤）
+        if st.get("computable") and h.get("stop_curve") is not None and len(h["stop_curve"]) >= 5:
+            fund_series.append((h["stop_curve"],))
+            continue
+        # 兜底：单笔输入重建 市值×复权净值比 曲线
+        scale = (st.get("amount") or 0) if (st.get("amount") or 0) > 0 else (st.get("cost") or 0)
+        if st.get("computable") and st.get("entry_date") and scale > 0:
+            try:
+                nav_df = provider.get_fund_nav(h["code"])
+                fund_series.append((st["entry_date"], scale, holding_diag.adj_series(nav_df)))
+            except Exception:
+                continue
+    # Series 曲线仅用于计算，不进入 JSON 响应
+    for h in holdings_detail:
+        h.pop("stop_curve", None)
+    cppi = holding_diag.portfolio_cppi(
+        fund_series, cash=cash if cash and cash > 0 else 0.0,
+        rules=cppi_rules, full_slots=STRAT_SLOTS, hysteresis=STRAT_CPPI_HYSTERESIS,
+    )
+    cppi_ok = bool(cppi.get("computable"))
+    cppi_slots = int(cppi.get("slots", STRAT_SLOTS)) if cppi_ok else STRAT_SLOTS
+    # 生效槽位 = min(宏观槽位(危机=0), CPPI档位槽位)
+    max_slots_by_macro = 0 if crisis_active else STRAT_SLOTS
+    slots_eff = min(cppi_slots, max_slots_by_macro)
+
+    # ---- 资产汇总 ----
+    holdings_value = round(float(sum(h["amount"] for h in holdings_detail)),2)
+    # 若 total_capital 未给或为0，则自动 = 持仓 + 现金
+    if total_capital <= 0:
+        total_capital = holdings_value + cash
+    # 防止 total_capital 小于已有资产：仍以输入为准，但标记警告
+    per_slot = round(total_capital / slots_eff, 2) if total_capital>0 and slots_eff>0 else 0.0
+    # ---- 持仓诊断 & 操作分类 ----
+    # V3.8 规则：S<45 卖出；S>=70 候选买入/持有；45-70持有
+    sells = []
+    holds = []
+    keeps = []  # 最终保留的持仓（holds中的 非卖出）
+    for h in holdings_detail:
+        if h["is_error"]:
+            # 无法评分的，建议人工复核，默认持有不动
+            h["action"] = "hold"
+            h["action_label"] = "待复核"
+            h["action_reason"] = f"评分失败：{h['error']}"
+            h["target_amount"] = h["amount"]
+            holds.append(h)
+            keeps.append(h)
+            continue
+        # V3.8 移动止损（自动计算）：自入场日起高点回撤 > 20% → 清仓
+        st = h.get("stop") or {}
+        if st.get("status") == "triggered":
+            h["action"] = "sell"
+            h["action_label"] = "纪律卖出·入场高点回撤20%"
+            dd_txt = f"{st['dd']*100:.1f}%" if st.get("dd") is not None else "—"
+            h["action_reason"] = (f"自入场日({st.get('entry_date')})高点 {st.get('peak')} 回撤 {dd_txt}，"
+                                  f"已击穿20%移动止损线（触发价 {st.get('trigger_nav')}）→ 清仓"
+                                  + ("（买入日由收益率推断）" if st.get("inferred") else "")
+                                  + ("；反推疑似多笔/定投买入，回撤为近似值，建议先在操作台账核对每笔买卖再执行"
+                                     if st.get("infer_ambiguous") else ""))
+            h["target_amount"] = 0.0
+            h["sell_amount"] = h["amount"]
+            sells.append(h)
+            continue
+        # CPPI 清仓档（回撤≤-25%）：组合整体清仓，等待右侧信号重启（HWM重置纪律）
+        if cppi_ok and cppi_slots == 0:
+            rs = cppi.get("restore") or {}
+            h["action"] = "sell"
+            h["action_label"] = "纪律卖出·CPPI清仓档"
+            h["action_reason"] = (f"组合自高点 {cppi['hwm']:,.0f} 元回撤 {cppi['dd']*100:.1f}%，跌破-25%清仓线，"
+                                  + (f"待回升至 {rs.get('value',0):,.0f} 元（-{abs(rs.get('dd',0))*100:.0f}%）恢复 {rs.get('slots',3)} 槽或出现右侧信号后再重启" if rs else "待右侧信号重启"))
+            h["target_amount"] = 0.0
+            h["sell_amount"] = h["amount"]
+            sells.append(h)
+            continue
+        s = h["S_total"]
+        veto = h["is_veto"]
+        if veto or (s is not None and s < STRAT_SELL_TH):
+            h["action"] = "sell"
+            if veto:
+                h["action_label"] = "纪律卖出·否决池"
+                h["action_reason"] = h["penalty_str"] or "否决池"
+            else:
+                h["action_label"] = f"纪律卖出·S<{STRAT_SELL_TH:.0f}"
+                h["action_reason"] = f"S={s} 低于卖出线 {STRAT_SELL_TH:.0f}"
+            h["target_amount"] = 0.0
+            h["sell_amount"] = h["amount"]
+            sells.append(h)
+        else:
+            # 持有
+            h["action"] = "hold"
+            if s is not None and s >= STRAT_BUY_TH:
+                h["action_label"] = "持有·强"
+                h["action_reason"] = f"S={s}≥{STRAT_BUY_TH:.0f}，符合买入线，保留至目标权重"
+            elif s is not None and s >= 50:
+                h["action_label"] = "持有·观望"
+                h["action_reason"] = f"S={s} 在持有带 [{STRAT_SELL_TH:.0f},{STRAT_BUY_TH:.0f}]，保留"
+            else:
+                h["action_label"] = "持有"
+                h["action_reason"] = f"S={s} 未触发卖出，保留"
+            # 目标金额：持有仓位建议向每槽目标对齐（不做强制再平衡，仅提示）
+            # 若已持有且为强信号且金额显著低于目标，提示可补至目标；否则维持现额但不超过目标1.2倍提示可减
+            if h["amount"] < per_slot * 0.9 and s is not None and s >= 70:
+                h["target_amount"] = per_slot
+                h["rebalance_hint"] = f"可补仓至 {per_slot:,.0f} 元/槽"
+            elif h["amount"] > per_slot * 1.25:
+                h["target_amount"] = per_slot
+                h["rebalance_hint"] = f"仓位偏重，可考虑减至 {per_slot:,.0f} 元/槽（季度再平衡）"
+            else:
+                h["target_amount"] = h["amount"]
+                h["rebalance_hint"] = "权重适中，持有不动"
+            holds.append(h)
+            keeps.append(h)
+
+    # 处理超槽位：若保留持仓数 > 允许槽位（常见于从未调仓的老组合持有20只），则把最弱的持仓加入卖出
+    # 仅在非危机且未触发 CPPI 极端时生效；危机时 max_slots=0 不做强制清退（按纪律仅禁新买）
+    # 槽位上限 = 生效槽位 slots_eff（宏观×CPPI 动态档位）
+    num_keep = len(keeps)
+    extra_sells = []
+    if not crisis_active and slots_eff > 0 and num_keep > slots_eff:
+        # 按 S 升序把多余的转为卖出
+        keeps_sorted = sorted(keeps, key=lambda x: (x["S_total"] if x["S_total"] is not None else -1))
+        overflow = num_keep - slots_eff
+        for h in keeps_sorted[:overflow]:
+            # 已是卖出的不重复
+            if h["action"] == "sell":
+                continue
+            h["action"] = "sell"
+            h["action_label"] = "纪律卖出·超槽位"
+            h["action_reason"] = f"持仓数{num_keep}超过生效槽位上限{slots_eff}（CPPI档位），按 S 最弱优先退出（S={h['S_total']}）"
+            h["target_amount"] = 0.0
+            h["sell_amount"] = h["amount"]
+            extra_sells.append(h)
+        # 重算 keeps/sells
+        sells = [h for h in holdings_detail if h["action"]=="sell"]
+        keeps = [h for h in holdings_detail if h["action"]=="hold"]
+
+    sell_proceeds = round(float(sum(h.get("sell_amount", h["amount"]) for h in sells)),2)
+    cash_after_sells = round(cash + sell_proceeds,2)
+    num_keep_after = len(keeps)
+    free_slots = max(0, slots_eff - num_keep_after) if not crisis_active else 0
+    # 危机时即使有 free_slots 也不允许新买，故强制 0
+    if crisis_active:
+        free_slots = 0
+
+    # ---- 候选买入池（V3.9）：分市场配额 + 组合重复度过滤 + 顺位推荐 ----
+    # 原则：① 不跨市场混比——A股/海外各自按 S 降序；② 海外(美股QDII)最多占
+    #       STRAT_OVERSEAS_SLOT_CAP 槽（防单边堆满）；③ 重复度三档规则（详见 config）：
+    #         Tier0 复制盘：候选与任一持仓/已选候选的 RBSA 暴露 L1 ≤ STRAT_CLONE_L1
+    #               → 同策略孪生产品（如 001801 达欣 vs 001417 医疗服务），必排除；
+    #         Tier1 指数级：候选 top1≥0.40 且该风格组合已实质持有 → 必排除（同指数）；
+    #         Tier2 簇上限：同 top1 风格最多 STRAT_CLUSTER_MAX 只 → 第2只起顺位换风格；
+    #       ④ 全部满足后仍按 S 高者优先（市场内）。
+    candidates = []
+    dup_skips = []
+    scan_msg = ""
+    buy_note = None
+    cand_stats = None     # 建议买入统计: gt70=榜单S>70总数, total=未持有候选数, dup=已排除重复数
+    scan_file = _latest_scan()
+    if scan_file and free_slots>0:
+        try:
+            df_scan = pd.read_csv(scan_file, dtype={"code": str})
+            # 过滤错误行
+            if "error" in df_scan:
+                df_scan = df_scan[df_scan["error"].isna()]
+            # 旧榜单无 region → 按基金类型归类；无 rbsa → 重复度过滤自动降级
+            if "region" not in df_scan:
+                df_scan["region"] = np.where(df_scan["ftype"].isin(OVERSEAS_FUND_TYPES), "海外", "A股")
+            has_rbsa = "rbsa" in df_scan.columns
+
+            def _parse_rbsa(v):
+                if isinstance(v, dict):
+                    return v
+                if isinstance(v, str):
+                    v = v.strip()
+                    if v.startswith("{"):
+                        try:
+                            return json.loads(v)
+                        except Exception:
+                            return {}
+                return {}
+
+            held_codes = set(h["code"] for h in holdings_detail)
+            filt = df_scan[(pd.to_numeric(df_scan["S_total"], errors="coerce") > STRAT_BUY_TH)
+                           & (~df_scan["code"].isin(list(held_codes)))].copy()
+            cand_stats = dict(
+                gt70=int((pd.to_numeric(df_scan["S_total"], errors="coerce") > STRAT_BUY_TH).sum()),
+                total=int(len(filt)),
+                dup=0,
+            )
+            if has_rbsa:
+                filt["rbsa"] = filt["rbsa"].map(_parse_rbsa)
+            else:
+                filt["rbsa"] = {}
+            rows_cand = []
+            for _, r in filt.iterrows():
+                rows_cand.append({
+                    "code": str(r["code"]).zfill(6),
+                    "name": r.get("name",""),
+                    "S_total": float(r["S_total"]) if pd.notna(r["S_total"]) else None,
+                    "rating": r.get("rating",""),
+                    "F_value": r.get("F_value") if pd.notna(r.get("F_value")) else None,
+                    "F_alpha": r.get("F_alpha") if pd.notna(r.get("F_alpha")) else None,
+                    "F_momentum": r.get("F_momentum") if pd.notna(r.get("F_momentum")) else None,
+                    "val_pct": float(r["val_pct"]) if pd.notna(r.get("val_pct")) else None,
+                    "ir_winrate": float(r["ir_winrate"]) if "ir_winrate" in r and pd.notna(r["ir_winrate"]) else None,
+                    "channel": r.get("channel",""),
+                    "penalty_str": r.get("penalty_str","") or "",
+                    "last_date": r.get("last_date",""),
+                    "region": r.get("region", "A股"),
+                    "rbsa": _parse_rbsa(r.get("rbsa")) if has_rbsa else {},
+                })
+            rows_cand.sort(key=lambda c: -(c["S_total"] or 0))
+            a_rows = [c for c in rows_cand if c["region"] == "A股"]
+            ov_rows = [c for c in rows_cand if c["region"] == "海外"]
+            # 组合已有暴露 = 保留持仓 RBSA 暴露加总（被卖出的不占）
+            port_expo = {}
+            for h in keeps:
+                for k, v in (_safe_dict(h.get("rbsa")) or {}).items():
+                    try:
+                        fv = float(v)
+                    except (TypeError, ValueError):
+                        continue
+                    if fv > 0:
+                        port_expo[k] = port_expo.get(k, 0.0) + fv
+            # 持仓的 top1 风格簇：凡实质暴露（top1≥STRAT_INDEX_PORT=0.15）即占用
+            # 该簇 1 个名额，与候选侧"同风格最多1只"口径对称。
+            # 【2026-08-11 修复】此前仅 top1≥0.40 的指数级持仓才占簇，导致弥散型
+            #   主动持仓(如 519770/013107 top1=全指信息0.225~0.229, 相互收益相关
+            #   0.91)不占簇 → 持有其一仍推荐另一只, 同风格实际持有两只。
+            cluster_count = {}
+            cluster_owner = {}
+            for h in keeps:
+                rb = _safe_dict(h.get("rbsa"))
+                if not rb:
+                    continue
+                t1 = max(rb.items(), key=lambda kv: kv[1])
+                try:
+                    t1w = float(t1[1])
+                except (TypeError, ValueError):
+                    continue
+                if t1w >= STRAT_INDEX_PORT:
+                    cluster_count[t1[0]] = cluster_count.get(t1[0], 0) + 1
+                    cluster_owner.setdefault(t1[0], f"{h['code']} {h.get('name') or ''}".strip())
+            # 复制盘参照池：保留持仓的 RBSA 暴露。Tier2 按 top1 风格簇判重，
+            # 仍检不出"暴露逐格几乎一致、但 top1 相同风格被表述为不同簇"的极端
+            # 孪生（以及 RBSA 键集不同的跨市场孪生）；由 Tier0 逐对 L1 距离兜底。
+            # 每选中一只候选也并入参照池，候选之间同样互查
+            clone_refs = []
+            for h in keeps:
+                rb_h = _safe_dict(h.get("rbsa"))
+                if rb_h:
+                    clone_refs.append((h["code"], h.get("name") or h["code"], rb_h))
+            # 贪心选取：市场内保持 S 降序；跨市场按 S 高者优先（海外受配额限制）；
+            # 重复度三档规则（详见 config）：
+            #   Tier0 复制盘：候选与任一持仓/已选候选 RBSA 暴露 L1≤STRAT_CLONE_L1
+            #         → 同一策略孪生产品（复制盘），必排除，只留一只；
+            #   Tier1 指数级重复：候选 top1≥0.40 且该风格组合已实质持有 → 必排除（同指数）
+            #   Tier2 簇上限：同 top1 风格最多 STRAT_CLUSTER_MAX 只 → 第2只起顺位换风格
+            # 被排除的记入 dup_skips（前端展示原因）
+            ov_cap = min(STRAT_OVERSEAS_SLOT_CAP, free_slots)
+            ov_used = 0
+            ia = ib = 0
+            while len(candidates) < free_slots:
+                ca = a_rows[ia] if ia < len(a_rows) else None
+                co = ov_rows[ib] if (ib < len(ov_rows) and ov_used < ov_cap) else None
+                if ca is None and co is None:
+                    break
+                if co is not None and (ca is None or co["S_total"] >= (ca["S_total"] or 0)):
+                    cand = co; ib += 1; cand_overseas = True
+                else:
+                    cand = ca; ia += 1; cand_overseas = False
+                cand["overlap"] = None
+                cand["dup_reason"] = ""
+                if has_rbsa and cand.get("rbsa"):
+                    rb = cand["rbsa"]
+                    top1_style, top1_w = max(rb.items(), key=lambda kv: kv[1])
+                    cand["overlap"] = round(top1_w, 3)
+                    # Tier0 复制盘：与任一持仓/已选候选暴露逐格几乎一致 → 只留一只
+                    clone_ref, clone_l1 = holding_diag.find_clone_exposure(rb, clone_refs, STRAT_CLONE_L1)
+                    if clone_ref is not None:
+                        cand["dup_reason"] = (f"复制盘重复（与 {clone_ref['code']} {clone_ref['name']} "
+                                              f"暴露几乎一致，L1={clone_l1:.3f}）")
+                        dup_skips.append(cand)
+                        continue
+                    if top1_w >= STRAT_INDEX_TOP1 and port_expo.get(top1_style, 0.0) >= STRAT_INDEX_PORT:
+                        cand["dup_reason"] = f"同指数重复（{top1_style} 已持有）"
+                        dup_skips.append(cand)
+                        continue
+                    if cluster_count.get(top1_style, 0) >= STRAT_CLUSTER_MAX:
+                        owner = cluster_owner.get(top1_style)
+                        owner_txt = f"已由 {owner} 占用" if owner else f"已选{STRAT_CLUSTER_MAX}只"
+                        cand["dup_reason"] = f"同风格重复（{top1_style} {owner_txt}）"
+                        dup_skips.append(cand)
+                        continue
+                    cluster_count[top1_style] = cluster_count.get(top1_style, 0) + 1
+                    cluster_owner.setdefault(top1_style, f"{cand['code']} {cand.get('name') or ''}".strip())
+                    clone_refs.append((cand["code"], cand.get("name") or cand["code"], rb))
+                    # 已选候选也并入暴露池（供①的"已实质持有"判断）
+                    for k, v in rb.items():
+                        try:
+                            fv = float(v)
+                        except (TypeError, ValueError):
+                            continue
+                        if fv > 0:
+                            port_expo[k] = port_expo.get(k, 0.0) + fv
+                # 海外配额只计"真正入选"的候选——被去重跳过的海外候选不占配额，
+                # 让位给顺位下的下一只海外候选
+                if cand_overseas:
+                    ov_used += 1
+                candidates.append(cand)
+            if cand_stats is not None:
+                cand_stats["dup"] = len(dup_skips)
+            if not candidates and not dup_skips:
+                scan_msg = "扫描榜单中暂无 S>70 的候选（或均已持有），建议等待新扫描或放宽槽位"
+            else:
+                n_a = sum(1 for c in candidates if c["region"] == "A股")
+                n_ov = len(candidates) - n_a
+                scan_msg = (f"候选 {len(candidates)} 只（A股 {n_a} / 海外 {n_ov}，海外≤{STRAT_OVERSEAS_SLOT_CAP}槽）："
+                            f"市场内按 S 排序 + 重复度过滤（复制盘/同指数/同风格自动顺位）")
+                if not has_rbsa:
+                    scan_msg += "；旧榜单无暴露数据，重复度过滤未生效（重新扫描后自动开启）"
+        except Exception as e:
+            scan_msg = f"读取扫描榜单失败：{str(e)[:80]}"
+    elif free_slots==0 and not crisis_active:
+        if num_keep_after >= STRAT_SLOTS:
+            scan_msg = f"当前已满 {num_keep_after}/{STRAT_SLOTS} 槽，无空槽可建仓"
+        else:
+            scan_msg = "无空槽"
+    elif crisis_active:
+        scan_msg = "危机模式：禁止新开权益仓，不提供买入候选"
+    elif not scan_file:
+        scan_msg = "暂无扫描榜单数据，请先执行“全市场扫描”以生成候选池"
+
+    # ---- 计算买入金额分配 ----
+    buys = []
+    cash_remaining = cash_after_sells
+    orders = []
+    # 先把卖出订单加入
+    for h in sells:
+        orders.append({
+            "side": "SELL",
+            "code": h["code"],
+            "name": h["name"],
+            "amount": round(float(h.get("sell_amount", h["amount"])),2),
+            "reason": h["action_reason"],
+            "S": h["S_total"],
+        })
+    if candidates and free_slots>0:
+        # V3.9 等权槽位买入：先把可用现金按生效槽位平分成"份"，
+        # 每只候选买 1 份（不超过每槽目标 per_slot），剩余现金保留现金池。
+        #   份 = min(每槽目标, 可用现金 ÷ 槽位数)   （现金不足时每份按槽缩水）
+        #   份 ≥ 最低买入额 10 元；可买只数 = min(候选数, 现金能买起的份数)
+        # 例: 现金100 + 10槽 → 每份10元, 5个候选各买10元, 花50剩50（不花光）
+        MIN_BUY = 10.0
+        slots_now = slots_eff if slots_eff > 0 else STRAT_SLOTS
+        share = 0.0
+        if cash_after_sells > 0:
+            share = cash_after_sells / slots_now
+        if per_slot > 0 and per_slot < share:
+            share = per_slot
+        share = round(max(share, MIN_BUY), 2) if share > 0 else 0.0
+        n_buy = len(candidates)
+        if share > 0:
+            n_buy = min(n_buy, int(cash_after_sells // share))
+        for c in candidates:
+            if len(buys) >= n_buy:
+                break
+            if cash_remaining < share:
+                break
+            buy_amt = share
+            # 最低 10 元门槛（基金申购起点）
+            if buy_amt < MIN_BUY:
+                continue
+            c["suggested_amount"] = round(buy_amt,2)
+            # 估算目标占比
+            c["target_pct"] = round(buy_amt/total_capital*100,2) if total_capital>0 else 0
+            buys.append(c)
+            cash_remaining = round(cash_remaining - buy_amt,2)
+            ov_txt = "海外候选" if c.get("region") == "海外" else "A股候选"
+            dup_txt = f" · 与组合重叠 {c['overlap']*100:.0f}%" if c.get("overlap") is not None else ""
+            orders.append({
+                "side": "BUY",
+                "code": c["code"],
+                "name": c["name"],
+                "amount": round(buy_amt,2),
+                "reason": f"S={c['S_total']:.1f} 候选买入 · {c.get('rating','')} · {ov_txt}{dup_txt}",
+                "S": c["S_total"],
+                "region": c.get("region", "A股"),
+            })
+        # 若现金有剩余，说明槽位未填满，提示
+        if buys and cash_remaining > 1000:
+            # 可选：把剩余现金留在现金池吃 2.5% 收益，不强制用完
+            pass
+        # V3.9: 有候选但一只都没买成 → 明确原因（避免"推荐0只"无解释）
+        buy_note = None
+        if candidates and not buys:
+            if cash_after_sells < MIN_BUY:
+                buy_note = (f"可用现金仅 {cash_after_sells:,.0f} 元（<{MIN_BUY:.0f} 元），"
+                            f"暂不买入；请补充可用现金或减少持仓")
+            elif share and cash_after_sells < share:
+                buy_note = (f"可用现金 {cash_after_sells:,.0f} 元低于每份 {share:,.0f} 元"
+                            f"（现金÷{slots_now}槽），暂不买入")
+            else:
+                buy_note = "候选均未达到买入条件，建议检查现金与门槛"
+
+    # ---- 目标配置 & 风险提示 ----
+    total_invested_after = sum(h["target_amount"] for h in keeps) + sum(b.get("suggested_amount",0) for b in buys)
+    # 若有持仓未约定金额（amount=0），则 total_invested_after 可能偏小；用 total_capital 归一
+    # 生成仓位分布明细
+    allocation = []
+    for h in keeps:
+        pkt = round(h["target_amount"]/total_capital*100,1) if total_capital>0 else 0
+        allocation.append({"code": h["code"], "name": h["name"], "amount": h["target_amount"], "pct": pkt, "S": h["S_total"], "type": "hold"})
+    for b in buys:
+        pkt = b.get("target_pct", round(b["suggested_amount"]/total_capital*100,1) if total_capital>0 else 0)
+        allocation.append({"code": b["code"], "name": b["name"], "amount": b["suggested_amount"], "pct": pkt, "S": b["S_total"], "type": "buy"})
+    # 现金占比
+    cash_pct_after = round(cash_remaining/total_capital*100,1) if total_capital>0 else 0
+
+    warnings = []
+    warnings.extend(flat_warns)
+    # P4-3: 原"赛道集中告警"已移除 — P3-4 证实回测从未执行 35% 上限(死配置),
+    # P4-4 终版裁决模型无风格上限; 风格暴露改为 portfolio_rbsa 中性展示(市值加权)。
+    # 持仓中个别高风险
+    for h in holdings_detail:
+        if h["is_error"]:
+            warnings.append(f"{h['code']} {h['name']} 评分失败，暂不纳入纪律，需人工复核")
+        else:
+            if h.get("data_incomplete"):
+                warnings.append(f"{h['code']} {h['name']} 档案数据缺失（数据源限流），任期类风控已豁免、评分仅供参考，建议稍后重试")
+            if h.get("penalty_detail", {}).get("R_MDD") and h["penalty_detail"]["R_MDD"] and h["penalty_detail"]["R_MDD"]>2.0:
+                warnings.append(f"{h['code']} 超额回撤比 {h['penalty_detail']['R_MDD']} 偏高（>2.0 毒性区），即使暂未触发卖出也建议控制仓位")
+        # 单基 20% 移动止损接近线（真实净值自动计算）
+        st = h.get("stop") or {}
+        if st.get("status") == "near":
+            warnings.append(f"{h['code']} {h['name']} 自入场日({st.get('entry_date')})高点 {st.get('peak')} 已回撤 {st['dd']*100:.1f}%，接近20%移动止损线（触发价 {st.get('trigger_nav')}），建议收紧仓位")
+        elif st.get("status") == "triggered":
+            warnings.append(f"{h['code']} {h['name']} 已触发20%移动止损（自入场高点回撤 {st['dd']*100:.1f}%）→ 清仓")
+        elif st.get("status") in ("need_entry", "no_data") and st.get("reason"):
+            warnings.append(f"{h['code']} {h['name']}：{st['reason']}")
+    # 危机
+    if crisis_active:
+        warnings.append(f"危机模式已激活（{crisis.get('reason','')}），已禁止新开仓，现有持仓仅按 S<{STRAT_SELL_TH:.0f} 或 20%移动止损退出")
+    # CPPI 提示（真实净值自动计算 → 动态槽位）
+    if total_capital>0 and holdings_value + cash >0 and STRAT_CPPI:
+        if cppi_ok:
+            w = (f"CPPI 动态槽位：组合净值自高点 {cppi['hwm']:,.0f} 元回撤 {cppi['dd']*100:.1f}% → {cppi['tier_name']}（{cppi['slots']} 槽）")
+            if cppi_slots == 0:
+                w += "；已进入清仓档，全部持仓转卖出，等待右侧信号重启"
+            if cppi.get("next_trigger"):
+                w += f"；再跌至 {cppi['next_trigger']['value']:,.0f} 元（-{abs(cppi['next_trigger']['dd'])*100:.0f}%）降为 {cppi['next_trigger']['slots']} 槽"
+            if cppi.get("restore"):
+                w += f"；回升至 {cppi['restore']['value']:,.0f} 元（回撤 {cppi['restore']['dd']*100:.0f}% 内）恢复 {cppi['restore']['slots']} 槽"
+            warnings.append(w)
+        else:
+            warnings.append(f"CPPI 风险预算：回撤≤-15%限6槽 / ≤-20%限3槽 / ≤-25%清仓（{cppi.get('reason','提供买入日期/成本后自动计算真实触发状态')}）")
+    # 现金不足提示（V3.9 等权槽位：每份=share，剩余现金保留）
+    if buys and per_slot > 0 and per_slot * len(candidates) > cash_after_sells:
+        warnings.append(f"可用现金 {cash_after_sells:,.0f} 元不足以按每槽 {per_slot:,.0f} 元买满候选，已按每份 {share:,.0f} 元买入 {len(buys)} 只，剩余现金保留（吃 {STRAT_CASH_YIELD*100:.1f}% 现金收益）")
+    # 空槽
+    if free_slots==0 and not crisis_active and num_keep_after < STRAT_SLOTS:
+        pass
+
+    summary = dict(
+        total_capital=round(float(total_capital),2),
+        cash_before=round(float(cash),2),
+        holdings_value_before=holdings_value,
+        total_before=round(holdings_value+cash,2),
+        per_slot=per_slot,
+        sell_proceeds=sell_proceeds,
+        cash_after_sells=cash_after_sells,
+        num_holdings_before=len(holdings_detail),
+        num_sells=len(sells),
+        num_keeps=num_keep_after,
+        free_slots_before=free_slots,
+        num_buys=len(buys),
+        total_invested_after=round(float(total_invested_after),2),
+        cash_after=round(float(cash_remaining),2),
+        cash_pct_after=cash_pct_after,
+        max_slots=STRAT_SLOTS,
+        max_slots_by_macro=max_slots_by_macro,
+        cppi_slots=cppi_slots if cppi_ok else STRAT_SLOTS,
+        slots_eff=slots_eff,
+        cppi_tier=cppi.get("tier_name") if cppi_ok else None,
+        portfolio_dd=round(cppi["dd"], 4) if cppi_ok else None,
+        crisis_active=crisis_active,
+    )
+
+    resp = dict(
+        ok=True,
+        strategy=dict(
+            version=STRAT_VERSION,
+            buy_th=STRAT_BUY_TH, sell_th=STRAT_SELL_TH, slots=STRAT_SLOTS,
+            per_slot=per_slot,
+            cash_yield=STRAT_CASH_YIELD,
+            trail_stop=STRAT_TRAIL_STOP,
+            rebalance=STRAT_REBALANCE,
+            overseas_slot_cap=STRAT_OVERSEAS_SLOT_CAP,
+            overlap_skip=STRAT_OVERLAP_SKIP,
+            cluster_max=STRAT_CLUSTER_MAX,
+            index_top1=STRAT_INDEX_TOP1,
+            clone_l1=STRAT_CLONE_L1,
+            cppi_rules=[
+                dict(dd=STRAT_CPPI_DD1, slots=STRAT_CPPI_SLOTS1),
+                dict(dd=STRAT_CPPI_DD2, slots=STRAT_CPPI_SLOTS2),
+                dict(dd=STRAT_CPPI_DD3, slots=STRAT_CPPI_SLOTS3),
+            ],
+            crisis=crisis,
+            max_slots_by_macro=max_slots_by_macro,
+            slots_eff=slots_eff,
+        ),
+        cppi=clean(cppi),
+        portfolio=portfolio_rbsa,
+        summary=summary,
+        holdings=clean(holdings_detail),
+        sells=clean(sells),
+        keeps=clean(keeps),
+        buys=clean(buys),
+        candidates=clean(candidates),
+        dup_skips=clean(dup_skips),
+        cand_stats=cand_stats,
+        buy_note=buy_note,
+        allocation=clean(allocation),
+        orders=clean(orders),
+        warnings=warnings,
+        scan_msg=scan_msg,
+        ref_stamp=ref_stamp,
+        model_version=model_ver,
+        asof=dict(expected=provider.expected_last_td(), ref=ref_stamp),
+    )
+    return jsonify(clean(resp))
+
+
+if __name__ == "__main__":
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    print("============================================================", flush=True)
+    print(" 量化选基系统 V3.8 — 生产级 WSGI 引擎启动 (Production WSGI Server)", flush=True)
+    print("============================================================", flush=True)
+    host = os.environ.get("QFP_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    port = _parse_int(os.environ.get("QFP_PORT", 8000), 8000, low=1, high=65535)
+    print(f" * Listening on {host}:{port}", flush=True)
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        print(" * Warning: network access enabled; APIs contain private local portfolio data", flush=True)
+    vst = v8_guard.prewarm()
+    print(f" * V8/MiniRacer guard: singleton={vst.get('singleton')} "
+          f"available={vst.get('available')}"
+          + (f" ({vst['error']})" if vst.get("error") else ""), flush=True)
+    print("============================================================", flush=True)
+    try:
+        from waitress import serve
+        serve(app, host=host, port=port, threads=8, ident="quant-fund-picker")
+    except ImportError:
+        # 禁止回退到单线程 wsgiref：任一慢接口都会让整页一直转圈
+        app.run(host=host, port=port, threaded=True, use_reloader=False)

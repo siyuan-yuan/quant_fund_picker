@@ -1,0 +1,1841 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>量化选基 — V3.7 规则合成模型</title>
+<!-- 系统字体：不依赖 Google Fonts，避免预览环境外网阻塞首屏 -->
+<style>
+  :root{
+    --bg:#fcfcfa;
+    --surface:#ffffff;
+    --surface-2:#f5f5f4;
+    --line:#e7e5e4;
+    --line-strong:#d6d3d1;
+    --ink:#0c0a09;
+    --muted:#57534e;
+    --faint:#a8a29e;
+    --accent:#0c0a09;
+    --accent-soft:#f5f5f4;
+    --success:#15803d;
+    --success-soft:#f0fdf4;
+    --danger:#be123c;
+    --danger-soft:#fff1f2;
+    --warn:#a16207;
+    --radius:10px;
+    --radius-lg:14px;
+  --sans:"Inter", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --serif:"Instrument Serif", "Songti SC", Georgia, serif;
+  --mono:"JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html{color-scheme:light;scroll-behavior:smooth}
+  body{background:var(--bg);color:var(--ink);font:14px/1.6 var(--sans);-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+  ::selection{background:#1c1917;color:#fff}
+  ::placeholder{color:var(--faint)}
+  a{color:inherit;text-underline-offset:3px}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px}
+  @media(max-width:640px){.wrap{padding:0 16px}}
+
+  /* header */
+  header{position:sticky;top:0;z-index:20;background:rgba(252,252,250,.86);backdrop-filter:saturate(1.2) blur(8px);border-bottom:1px solid var(--line)}
+  .head{height:56px;display:flex;align-items:center;gap:16px}
+  .brand{display:flex;align-items:baseline;gap:10px}
+  .brand b{font-family:var(--serif);font-size:22px;font-weight:400;letter-spacing:-.02em}
+  .brand span{font:11px var(--mono);letter-spacing:.06em;color:var(--muted);border:1px solid var(--line);padding:3px 7px;border-radius:999px}
+  .head-status{margin-left:auto;display:flex;align-items:center;gap:8px;font:12px var(--mono);color:var(--muted)}
+  .dot{width:7px;height:7px;border-radius:50%;background:var(--faint);flex:none}
+  .dot.ok{background:var(--success);box-shadow:0 0 0 4px rgba(21,128,61,.12)}
+  .dot.busy{background:var(--warn);box-shadow:0 0 0 4px rgba(161,98,7,.12);animation:pulse 1.6s ease-out infinite}
+  .dot.err{background:var(--danger);box-shadow:0 0 0 4px rgba(190,18,60,.12)}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+  /* nav */
+  .subnav{display:flex;gap:20px;overflow:auto;scrollbar-width:none;border-bottom:1px solid var(--line);margin-bottom:32px}
+  .subnav::-webkit-scrollbar{display:none}
+  .subnav a{font:13px var(--sans);color:var(--muted);padding:14px 2px 12px;border-bottom:2px solid transparent;white-space:nowrap;text-decoration:none}
+  .subnav a.active{color:var(--ink);border-color:var(--ink)}
+  .subnav a:hover{color:var(--ink)}
+
+  /* type */
+  h2{font-family:var(--serif);font-size:22px;font-weight:400;letter-spacing:-.02em;line-height:1.2;margin:0}
+  h2 + p{margin-top:8px}
+  .eyebrow{font:11px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
+  .muted{color:var(--muted)}
+  .faint{color:var(--faint)}
+  .mono{font-family:var(--mono)}
+  .tabular{font-variant-numeric:tabular-nums}
+
+  /* sections */
+  section{padding:32px 0;border-bottom:1px solid var(--line)}
+  section:last-of-type{border-bottom:none}
+  .section-head{display:flex;align-items:baseline;justify-content:space-between;gap:16px;margin-bottom:20px;flex-wrap:wrap}
+  .section-head h2{flex:none}
+  .hint{font:12px var(--sans);color:var(--faint);line-height:1.6}
+
+  /* panels - flat, no nested cards */
+  .panel{background:var(--surface);border:1px solid var(--line);border-radius:var(--radius-lg);padding:20px}
+  @media(max-width:640px){.panel{padding:16px}}
+
+  /* water */
+  .water-grid{display:grid;grid-template-columns: 1.1fr .9fr;gap:24px;align-items:center}
+  @media(max-width:860px){.water-grid{grid-template-columns:1fr}}
+  .gauge{display:flex;align-items:center;gap:20px}
+  .gauge-num{font-family:var(--serif);font-size:42px;line-height:1;letter-spacing:-.04em;min-width:92px}
+  .gauge-num small{font:11px var(--mono);letter-spacing:.06em;color:var(--faint);display:block;margin-top:4px}
+  .meter{flex:1}
+  .track{height:4px;background:var(--surface-2);border-radius:999px;position:relative;overflow:hidden}
+  .track i{position:absolute;left:0;top:0;bottom:0;border-radius:999px;transition:width .6s cubic-bezier(.2,.8,.2,1)}
+  .track-ticks{display:flex;justify-content:space-between;font:10px var(--mono);color:var(--faint);margin-top:6px}
+  .regime{font:13px var(--sans);color:var(--muted);padding:10px 12px;background:var(--surface-2);border-radius:8px;border:1px solid var(--line)}
+  .slots{margin-top:14px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;padding-top:14px;border-top:1px solid var(--line)}
+  .slots b{font-family:var(--serif);font-size:20px;font-weight:400;letter-spacing:-.02em}
+  .slots span{font:12px var(--mono);color:var(--muted)}
+
+  /* terrain */
+  .terrain{display:grid;grid-template-columns:repeat(6,1fr);gap:10px}
+  @media(max-width:1024px){.terrain{grid-template-columns:repeat(4,1fr)}}
+  @media(max-width:640px){.terrain{grid-template-columns:repeat(2,1fr)}}
+  .t{border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--surface)}
+  .t-name{font:12px var(--sans);font-weight:500}
+  .t-meta{font:11px var(--mono);color:var(--faint);margin-top:2px}
+  .t-bar{height:3px;background:var(--surface-2);border-radius:999px;margin:10px 0 6px;overflow:hidden}
+  .t-bar i{display:block;height:100%;border-radius:999px;transition:width .5s ease}
+  .t-pct{font:13px var(--mono);font-weight:500;letter-spacing:-.02em}
+  .c-low{color:var(--success)} .c-mid{color:var(--warn)} .c-high{color:var(--danger)}
+  .skeleton{height:86px;border:1px solid var(--line);border-radius:10px;background:linear-gradient(100deg, var(--surface-2) 40%, #fff 50%, var(--surface-2) 60%);background-size:200% 100%;animation:shimmer 1.4s linear infinite}
+  @keyframes shimmer{to{background-position:-200% 0}}
+
+  /* forms */
+  .form-row{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+  @media(max-width:640px){.form-row{grid-template-columns:1fr}}
+  .field label{font:12px var(--sans);font-weight:500;color:var(--muted);display:block;margin-bottom:6px}
+  .field input,.field textarea, .field select{width:100%;background:var(--surface);border:1px solid var(--line);border-radius:8px;padding:10px 12px;font:13px var(--mono);color:var(--ink);outline:none;transition:border-color .15s, box-shadow .15s}
+  .field input:focus,.field textarea:focus,.field select:focus{border-color:var(--ink);box-shadow:0 0 0 3px rgba(12,10,9,.08)}
+  .field textarea{resize:vertical;min-height:132px;line-height:1.6}
+  .actions{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:14px}
+  .btn{appearance:none;border:1px solid transparent;border-radius:999px;padding:10px 18px;font:13px var(--sans);font-weight:500;cursor:pointer;transition:all .15s}
+  .btn:active{transform:translateY(1px)}
+  .btn-primary{background:var(--ink);color:#fff;border-color:var(--ink)}
+  .btn-primary:hover{background:#1c1917}
+  .btn-ghost{background:var(--surface);color:var(--ink);border-color:var(--line)}
+  .btn-ghost:hover{border-color:var(--line-strong);background:var(--surface-2)}
+  .btn:disabled{opacity:.45;cursor:not-allowed;transform:none}
+  :where(a,button,input,textarea,select,[tabindex]):focus-visible{outline:2px solid var(--ink);outline-offset:3px}
+  @media(prefers-reduced-motion:reduce){
+    html{scroll-behavior:auto}
+    *,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}
+  }
+  .status{margin-top:10px;display:flex;align-items:center;gap:8px;font:12px var(--mono);color:var(--muted);min-height:16px;flex-wrap:wrap}
+  .preview{margin-top:10px;background:var(--surface-2);border:1px solid var(--line);border-radius:8px;padding:10px 12px;font:12px var(--mono);color:var(--muted);line-height:1.7;white-space:pre-wrap}
+
+  /* toolbar */
+  .toolbar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+  .toolbar input{flex:0 1 220px}
+  .seg{display:inline-flex;background:var(--surface-2);border:1px solid var(--line);border-radius:999px;padding:3px;gap:2px}
+  .seg button{border:none;background:transparent;color:var(--muted);padding:6px 12px;border-radius:999px;font:12px var(--sans);font-weight:500;cursor:pointer}
+  .seg button.on{background:var(--ink);color:#fff}
+  .count{margin-left:auto;font:12px var(--mono);color:var(--faint)}
+
+  /* tables */
+  .table-wrap{border:1px solid var(--line);border-radius:var(--radius);overflow:auto;max-height:560px;background:var(--surface)}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  thead th{position:sticky;top:0;z-index:2;background:var(--surface);font:11px var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--faint);text-align:right;padding:10px 12px;border-bottom:1px solid var(--line);white-space:nowrap;cursor:pointer}
+  thead th:first-child, tbody td:first-child{text-align:center}
+  th:nth-child(2),th:nth-child(3),td:nth-child(2),td:nth-child(3){text-align:left}
+  td{padding:10px 12px;text-align:right;border-bottom:1px solid #f5f5f4;white-space:nowrap;font-family:var(--mono);font-variant-numeric:tabular-nums}
+  td.name{font-family:var(--sans);max-width:220px;overflow:hidden;text-overflow:ellipsis}
+  tbody tr:hover{background:#fafaf9}
+  .score{font-family:var(--serif);font-size:14px;letter-spacing:-.02em}
+  .badge{display:inline-flex;align-items:center;gap:6px;padding:2px 8px;border-radius:999px;font:11px var(--sans);font-weight:500;border:1px solid var(--line);white-space:nowrap}
+  .b-green{background:var(--success-soft);color:var(--success);border-color:#bbf7d0}
+  .b-amber{background:#fffbeb;color:var(--warn);border-color:#fde68a}
+  .b-red{background:var(--danger-soft);color:var(--danger);border-color:#fecdd3}
+  .b-blue{background:#eff6ff;color:#1d4ed8;border-color:#bfdbfe}
+  .b-mute{background:var(--surface-2);color:var(--muted);border-color:var(--line)}
+  .pen{color:var(--danger);font:11px var(--sans);max-width:220px;overflow:hidden;text-overflow:ellipsis}
+
+  /* waterfall */
+  .wf{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}
+  @media(max-width:860px){.wf{grid-template-columns:1fr}}
+  .wf-title{font-family:var(--serif);font-size:18px;letter-spacing:-.02em}
+  .wf-meta{font:12px var(--mono);color:var(--faint);margin-top:4px}
+  .chips{margin-top:8px}
+  .chips span{display:inline-flex;border:1px solid var(--line);border-radius:999px;padding:3px 8px;margin:3px 4px 0 0;font:11px var(--mono);color:var(--muted);background:var(--surface-2)}
+  .fbar{margin:10px 0}
+  .fbar label{font:12px var(--sans);color:var(--muted);display:flex;justify-content:space-between;margin-bottom:4px}
+  .fbar label b{font-family:var(--mono);font-size:12px;color:var(--ink)}
+  .fbar .tr{height:4px;background:var(--surface-2);border-radius:999px;overflow:hidden}
+  .fbar .tr i{display:block;height:100%;border-radius:999px;transition:width .5s ease}
+  .facts{font:12px var(--mono);color:var(--muted);line-height:1.8}
+  .plist{margin-top:8px}
+  .plist li{list-style:none;font:12px var(--sans);color:var(--danger);padding:3px 0}
+  .plist li.ok{color:var(--success)}
+
+  /* rebalance */
+  .rb{display:grid;grid-template-columns:360px 1fr;gap:20px;align-items:start}
+  @media(max-width:980px){.rb{grid-template-columns:1fr}}
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+  @media(max-width:860px){.kpis{grid-template-columns:repeat(2,1fr)}}
+  .kpi{border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--surface)}
+  .kpi label{font:10px var(--mono);letter-spacing:.08em;text-transform:uppercase;color:var(--faint)}
+  .kpi b{font-family:var(--serif);font-size:20px;font-weight:400;letter-spacing:-.02em;display:block;margin-top:2px}
+  .kpi small{font:11px var(--mono);color:var(--muted)}
+  .orders{display:grid;gap:8px}
+  .order{display:flex;align-items:center;gap:12px;border:1px solid var(--line);border-radius:10px;padding:12px;background:var(--surface)}
+  .order .side{font:11px var(--mono);letter-spacing:.06em;text-transform:uppercase;padding:4px 8px;border-radius:999px;border:1px solid var(--line);flex:none}
+  .order.sell .side{background:var(--danger-soft);color:var(--danger);border-color:#fecdd3}
+  .order.buy .side{background:var(--success-soft);color:var(--success);border-color:#bbf7d0}
+  .order .meta{flex:1;min-width:0}
+  .order .meta b{font:13px var(--sans);font-weight:500}
+  .order .meta div{font:12px var(--mono);color:var(--faint);margin-top:2px}
+  .order .amt{font-family:var(--serif);font-size:15px;letter-spacing:-.02em;text-align:right}
+  .order .amt small{font:11px var(--mono);color:var(--faint);display:block}
+  .alloc-bar{height:6px;background:var(--surface-2);border-radius:999px;overflow:hidden;display:flex;margin:8px 0 6px}
+  .alloc-bar i{display:block;height:100%}
+  .legend{display:flex;gap:12px;flex-wrap:wrap;font:11px var(--mono);color:var(--faint)}
+  .legend span{display:inline-flex;align-items:center;gap:6px}
+  .legend em{width:8px;height:8px;border-radius:999px;display:inline-block}
+  .empty{padding:28px;text-align:center;font:13px var(--sans);color:var(--muted);border:1px dashed var(--line);border-radius:var(--radius);background:var(--surface-2)}
+  .led-filter{display:flex;gap:10px;align-items:end;flex-wrap:wrap;margin-top:12px}
+  .led-filter .field{flex:0 1 300px;min-width:220px}
+  .led-stats{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin:12px 0 0}
+  @media(max-width:860px){.led-stats{grid-template-columns:repeat(2,1fr)}}
+  tr.led-on{background:#f5f5f4}
+  tr.led-click{cursor:pointer}
+  /* 定投止盈表格复选框（对齐 ink 色板） */
+  #tp-list input[type=checkbox]{width:15px;height:15px;accent-color:var(--ink);cursor:pointer;margin:0;vertical-align:middle}
+
+  footer{padding:32px 0 24px;color:var(--faint);font:11px var(--mono);line-height:1.8;text-align:center;border-top:1px solid var(--line);margin-top:32px}
+  .hide{display:none}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap head">
+    <div class="brand"><b>量化选基</b><span>V3.8</span></div>
+    <div class="head-status"><span class="dot" id="hd-dot"></span><span id="hd-date">加载中…</span></div>
+  </div>
+</header>
+<div class="wrap">
+  <nav class="subnav">
+    <a href="#sec-water" class="active">市场</a>
+    <a href="#sec-scan">扫描</a>
+    <a href="#sec-board">榜单</a>
+    <a href="#sec-rebalance">持仓诊断</a>
+    <a href="#sec-single">单基</a>
+  </nav>
+
+  <section id="sec-water">
+    <div class="section-head">
+      <h2>市场水位</h2>
+      <span class="hint">6 风格等权 · 5年 PE 分位</span>
+    </div>
+    <div class="panel">
+      <div class="water-grid">
+        <div>
+          <div class="gauge">
+            <div class="gauge-num"><span id="water-num">—</span><small>估值分位</small></div>
+            <div class="meter">
+              <div class="track"><i id="water-bar"></i></div>
+              <div class="track-ticks"><span>0</span><span>20</span><span>50</span><span>100</span></div>
+            </div>
+          </div>
+          <div class="slots">
+            <span class="faint">可建仓</span><b id="water-slots">— / 10 槽</b><span id="water-slots-sub" class="mono faint"></span>
+          </div>
+        </div>
+        <div>
+          <div class="regime" id="regime">—</div>
+          <div class="hint" id="reversal" style="margin-top:10px"></div>
+        </div>
+      </div>
+    </div>
+    <div class="terrain" id="terrain" style="margin-top:12px">
+      <div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div><div class="skeleton"></div>
+    </div>
+    <div class="panel" id="macro-panel" style="margin-top:12px">
+      <div class="eyebrow">指数对照 <span class="faint" style="font:11px var(--mono);margin-left:6px">跨市场 · 本地缓存</span></div>
+      <div id="macro-body" style="margin-top:10px"><div class="skeleton"></div><div class="skeleton"></div></div>
+    </div>
+  </section>
+
+  <section id="sec-strategy">
+    <div class="section-head">
+      <h2>执行纪律</h2>
+      <span class="hint">S&gt;70 / S&lt;45 · 10 槽等权</span>
+    </div>
+    <div class="panel" id="strategy-card" style="display:grid;grid-template-columns:1fr 1fr;gap:20px">
+      <div>
+        <div class="eyebrow">信号</div>
+        <div id="st-signal" style="margin-top:8px;font:13px var(--sans);line-height:1.8;color:var(--muted)">加载中…</div>
+      </div>
+      <div>
+        <div class="eyebrow">风控</div>
+        <div id="st-risk" style="margin-top:8px;font:13px var(--sans);line-height:1.8;color:var(--muted)">加载中…</div>
+      </div>
+      <div style="grid-column:1/-1;display:flex;gap:10px;flex-wrap:wrap;padding-top:16px;border-top:1px solid var(--line);font:12px var(--mono);color:var(--muted)">
+        <span id="st-crisis">加载中…</span><span style="margin-left:auto" id="st-cppi"></span>
+      </div>
+      <div id="st-decision" style="grid-column:1/-1;padding:10px 12px;border-radius:8px;border:1px solid var(--line);font:13px var(--sans)" class="hide"></div>
+    </div>
+  </section>
+
+  <section id="sec-scan">
+    <div class="section-head">
+      <h2>全市场扫描</h2>
+      <button class="btn btn-ghost" style="padding:6px 12px;font-size:12px" onclick="loadResults()">加载最近榜单</button>
+    </div>
+    <div class="panel">
+      <div class="form-row" style="align-items:end">
+        <div class="field"><label>右侧池</label><input class="mono" id="in-right" type="number" value="400"></div>
+        <div class="field"><label>左侧池</label><input class="mono" id="in-left" type="number" value="150"></div>
+        <div style="display:flex;gap:8px"><button class="btn btn-primary" id="btn-scan" onclick="startScan()">开始扫描</button></div>
+      </div>
+      <div style="margin-top:10px;display:grid;gap:8px">
+        <div class="field" style="max-width:420px">
+          <label>扫描模式</label>
+          <select id="scan-mode" onchange="updateScanModeUI()">
+            <option value="default">漏斗扫描（右侧 / 左侧 / 新星 Top100）</option>
+            <option value="all_main">全部主池（仅近3年完整）</option>
+            <option value="all_target">全部目标类型</option>
+          </select>
+        </div>
+        <span class="hint" id="scan-mode-hint">默认模式会按右侧池 / 左侧池 / 新星池做漏斗深算。</span>
+      </div>
+      <div class="track" style="margin-top:14px;height:4px"><i id="pg" style="background:var(--ink)"></i></div>
+      <div class="status"><span class="dot" id="st-dot"></span><span id="st">空闲</span></div>
+    </div>
+  </section>
+
+  <section id="sec-board">
+    <div class="section-head">
+      <h2>榜单</h2>
+      <span class="hint">点击行查看穿透</span>
+    </div>
+    <div class="panel" style="padding:0;overflow:hidden">
+      <div style="padding:12px;border-bottom:1px solid var(--line);display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <input id="kw" placeholder="搜索 代码 / 名称" oninput="renderBoard()" style="flex:1;min-width:180px;background:var(--surface-2);border:1px solid var(--line);border-radius:999px;padding:8px 14px;font:13px var(--sans);outline:none">
+        <div class="seg" id="flt-seg">
+          <button data-f="all" class="on" onclick="setFlt('all')">全部</button>
+          <button data-f="green" onclick="setFlt('green')">≥70</button>
+          <button data-f="yellow" onclick="setFlt('yellow')">50–70</button>
+          <button data-f="veto" onclick="setFlt('veto')">否决</button>
+        </div>
+        <div class="seg" id="mkt-seg">
+          <button data-m="all" class="on" onclick="setMkt('all')">全部</button>
+          <button data-m="a" onclick="setMkt('a')">A股</button>
+          <button data-m="ov" onclick="setMkt('ov')">海外</button>
+        </div>
+        <span class="count mono" id="bd-n"></span>
+      </div>
+      <div class="hint" style="padding:8px 14px 0">A股与海外基金不在同一参照系，分数不可横向比较：先定配置比例，再在各自榜单内选（海外建议配置思维，A股按信号+止损）。</div>
+      <div class="table-wrap" style="border:none;border-radius:0">
+        <table id="board"><thead><tr>
+          <th>#</th><th>代码</th><th>名称</th>
+          <th data-k="S_total" onclick="sortBy('S_total')">总分</th>
+          <th>评级</th><th>信号</th>
+          <th data-k="F_value" onclick="sortBy('F_value')">估值</th>
+          <th data-k="F_alpha" onclick="sortBy('F_alpha')">Alpha</th>
+          <th data-k="F_momentum" onclick="sortBy('F_momentum')">动量</th>
+          <th data-k="val_pct" onclick="sortBy('val_pct')">分位</th>
+          <th>风控</th><th></th>
+        </tr></thead><tbody></tbody></table>
+      </div>
+      <div class="empty" id="bd-empty" style="margin:12px">暂无榜单，先执行扫描</div>
+    </div>
+  </section>
+
+  <section id="sec-rebalance">
+    <div class="section-head">
+      <h2>持仓诊断</h2>
+      <span class="hint">台账即持仓：记录每笔买卖 → 生成方案（评分 / 20% 止损 / CPPI 槽位）</span>
+    </div>
+    <div class="panel" style="padding:14px" id="ledger-panel">
+      <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
+        <b>持仓台账（买卖历史 · 自动保存）</b>
+        <span class="hint">分批买入/卖出在此记录；可按基金查看流水并汇总主动买入 / 定投 / 卖出</span>
+      </div>
+      <div style="margin-top:12px">
+        <div class="form-row">
+          <div class="field" style="max-width:170px"><label>基金代码</label><input id="led-code" class="mono" placeholder="161725"></div>
+          <div class="field" style="max-width:150px"><label>方向</label><select id="led-side" onchange="toggleSideMode()">
+            <option value="buy" selected>主动买入</option>
+            <option value="dca">定投买入</option>
+            <option value="sell">主动卖出</option></select></div>
+          <div class="field" id="box-led-dates"><label>下单日 · 每行一条（15:00 前当天 / 15:00 后下一交易日）</label><textarea id="led-dates" rows="3" class="mono" style="min-height:88px" placeholder="2021-06-01&#10;2023-02-01&#10;2025-09-01"></textarea></div>
+          <div class="field" id="box-led-amts"><label>扣款总额 · 含申购费，系统自动扣</label><textarea id="led-amts" rows="3" class="mono" style="min-height:88px" placeholder="20000&#10;10000&#10;8000"></textarea></div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center">
+          <button class="btn btn-primary" id="btn-led-add" style="padding:8px 16px" onclick="ledAdd()">添加记录</button>
+          <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="refreshLedgerNav()">刷新净值</button>
+          <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="ledExport()">导出台账</button>
+          <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="document.getElementById('led-file').click()">导入台账</button>
+          <input type="file" id="led-file" accept=".csv,.txt,.json" style="display:none" onchange="ledImportFile()">
+          <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="ledClear(this)">清空台账</button>
+        </div>
+        <div class="status"><span class="dot" id="led-dot"></span><span id="led-st">就绪</span></div>
+        <div style="margin-top:12px;padding-top:12px;border-top:1px solid var(--line)">
+          <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
+            <b style="font-size:13px">买入费率设置</b>
+            <span class="hint">优先级：单基金覆盖 ＞ 自动查询折后费率 ＞ 默认费率；填写 0 表示免申购费。导出台账会带上费率，导入时自动恢复</span>
+          </div>
+          <div class="form-row" style="margin-top:8px;align-items:end">
+            <div class="field" style="max-width:130px"><label>默认费率 %</label><input id="fee-default" class="mono" value="0.15" inputmode="decimal"></div>
+            <button class="btn btn-ghost" style="padding:7px 10px;font-size:12px" onclick="saveDefaultFee()">保存默认</button>
+            <div class="field" style="max-width:130px"><label>基金代码</label><input id="fee-code" class="mono" placeholder="016452" inputmode="numeric"></div>
+            <div class="field" style="max-width:130px"><label>该基金费率 %</label><input id="fee-rate" class="mono" placeholder="0.12" inputmode="decimal"></div>
+            <button class="btn btn-ghost" style="padding:7px 10px;font-size:12px" onclick="saveFundFee()">添加 / 修改</button>
+          </div>
+          <div id="fee-overrides" class="hint" style="margin-top:8px">加载费率设置…</div>
+        </div>
+      </div>
+      <div id="dca-panel" class="hide" style="margin-top:10px;padding:14px;background:var(--surface-2);border:1px solid var(--line);border-radius:8px">
+        <div class="form-row">
+          <div class="field"><label>开始定投日期</label><input id="dca-start" class="mono" placeholder="2023-06-15"></div>
+          <div class="field"><label>每期金额</label><input id="dca-amt" class="mono" placeholder="1000"></div>
+          <div class="field"><label>频率</label><select id="dca-freq">
+            <option value="daily">每日</option>
+            <option value="monthly" selected>每月</option>
+            <option value="biweekly">每两周</option>
+            <option value="weekly">每周</option></select></div>
+          <div class="field"><label>结束日期（可选）</label><input id="dca-end" class="mono" placeholder="默认至今"></div>
+        </div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px;align-items:center">
+          <button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="dcaPreview()">生成定投序列</button>
+          <span class="hint" style="color:var(--muted)">休市（A股/海外）自动跳过；按该基金净值日历生成，无需再手删</span>
+        </div>
+        <div class="preview mono" id="dca-preview" style="background:var(--surface)">填写参数后点「生成定投序列」。</div>
+        <div class="actions">
+          <button class="btn btn-primary" id="dca-save-btn" disabled onclick="dcaSave()">保存到台账</button>
+        </div>
+        <div class="status"><span class="dot" id="dca-dot"></span><span id="dca-st">就绪</span></div>
+      </div>
+      <div id="dca-prompt-panel" class="hide" style="margin-top:10px;padding:14px;background:var(--surface-2);border:1px dashed var(--warn);border-radius:8px">
+        <div style="font-weight:bold; color:var(--warn); margin-bottom:8px;">发现待补齐的定投记录：</div>
+        <div id="dca-prompt-list"></div>
+      </div>
+      <div style="margin-top:18px;padding-top:14px;border-top:1px solid var(--line)">
+        <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
+          <b>生成方案</b>
+          <span class="hint">基于台账持仓自动计算：评分 / 20% 入场止损 / CPPI 动态槽位 / 买卖指令</span>
+        </div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin-top:10px">
+          <div class="field" style="flex:0 1 200px"><label>总资金</label><input id="rb-total" class="mono" placeholder="100000 或 10万"></div>
+          <div class="field" style="flex:0 1 200px"><label>可用现金</label><input id="rb-cash" class="mono" placeholder="20000"></div>
+          <button class="btn btn-primary" onclick="runRebalance()" id="rb-btn">生成方案</button>
+          <button class="btn btn-ghost" onclick="rbSave()">记忆</button>
+          <button class="btn btn-ghost" onclick="rbLoad()">恢复</button>
+        </div>
+        <div class="status"><span class="dot" id="rb-dot"></span><span id="rb-st">就绪</span></div>
+        <div id="rb-out" style="margin-top:12px"></div>
+      </div>
+      <div id="tp-panel" style="margin-top:10px;padding:14px;background:var(--surface-2);border:1px solid var(--line);border-radius:8px">
+        <div style="display:flex;gap:8px;align-items:baseline;flex-wrap:wrap">
+          <b>定投止盈 · 分批止盈线</b>
+          <span class="hint">逐笔定投批次按「当前净值 ÷ 买入净值」算涨幅，达到止盈线即可卖出；卖出后该批次不再参与计算</span>
+        </div>
+        <div class="form-row" style="margin-top:10px">
+          <div class="field" style="flex:1 1 240px;max-width:340px"><label>定投计划（基金）</label>
+            <select id="tp-code" onchange="tpLoad()"><option value="">— 加载中 —</option></select></div>
+          <div class="field" style="max-width:100px"><label>止盈线 %</label><input id="tp-threshold" class="mono" value="20"></div>
+          <div class="field" style="flex:1 1 200px;max-width:260px"><label>止盈方式</label>
+            <select id="tp-mode">
+              <option value="keep_cost" selected>卖利润 · 留成本（推荐）</option>
+              <option value="keep_profit">卖成本 · 留利润</option>
+            </select></div>
+          <button class="btn btn-primary" style="padding:8px 16px" onclick="tpDetect()">检测止盈</button>
+        </div>
+        <div class="hint" style="margin-top:6px;line-height:1.7">
+          <b>推荐「卖利润·留成本」</b>：本金继续留在基金里滚动（定投复利引擎不中断），单次只卖约
+          1/6 仓位、赎回费更低，涨了继续跟涨、跌了本金仍在；「卖成本·留利润」适合想快速回收本金、
+          降低该基金敞口（回收后只剩利润免费仓位）。两种模式下总资产相同，只是现金与持仓的分配不同。
+        </div>
+        <div id="tp-list" style="margin-top:10px"></div>
+        <div id="tp-summary" style="margin-top:8px"></div>
+        <div id="tp-actions" class="hide" style="margin-top:10px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <button class="btn btn-primary" onclick="tpExecute()">确认卖出所选批次并记录</button>
+          <button class="btn btn-ghost" onclick="tpSkip()">标记所选批次不卖出</button>
+        </div>
+        <div class="status" style="margin-top:6px"><span class="dot" id="tp-dot"></span><span id="tp-st">就绪</span></div>
+      </div>
+      <div class="hint" style="margin-top:8px;line-height:1.7">同一基金一次可录入多笔：「日期」「金额」按行一一对应（3 个日期 ↔ 3 个金额），方向统一。买入填扣款总额（例 190 → 自动按费率折成确认金额 189.77）；卖出填到账金额。日期填北京 15:00 切日后的下单日，系统按交易日/QDII T+1 取确认净值；同一基金任意多笔，卖出按<b>先进先出</b>扣减成本与份额，全部卖完后自动从诊断中剔除。</div>
+      <div id="led-out"></div>
+    </div>
+  </section>
+
+  <section id="sec-single">
+    <div class="section-head"><h2>单基透视</h2></div>
+    <div class="panel">
+      <div style="display:flex;gap:10px;align-items:end;flex-wrap:wrap">
+        <div class="field" style="flex:0 0 160px"><label>基金代码</label><input id="in-code" placeholder="161725" class="mono"></div>
+        <button class="btn btn-primary" onclick="queryFund(document.getElementById('in-code').value)">解剖</button>
+        <button class="btn btn-ghost" onclick="addToRebalance(document.getElementById('in-code').value)">加入诊断</button>
+      </div>
+      <div class="status"><span class="dot" id="q-dot"></span><span id="qst"></span></div>
+      <div id="wf"></div>
+    </div>
+  </section>
+
+  <section id="sec-watch" style="border-bottom:none">
+    <div class="section-head"><h2>批量评分</h2><span class="hint">仅代码，不含金额</span></div>
+    <div class="panel">
+      <div class="field"><textarea id="watch" rows="3" placeholder="110011&#10;161725"></textarea></div>
+      <div class="actions">
+        <button class="btn btn-ghost" onclick="runWatch()">评分</button>
+      </div>
+      <div class="status"><span class="dot" id="w-dot"></span><span id="wst"></span></div>
+      <div id="wout" style="margin-top:12px"></div>
+    </div>
+  </section>
+
+  <footer>仅量化研究，不构成投资建议 · 天天基金 / 乐咕 / 中证 / 新浪</footer>
+</div>
+
+<script>window.__BOOT__={{ boot_json|default("{}")|safe }};</script>
+<script>
+let ROWS=[], sortKey='S_total', sortDir=-1, flt='all', mkt='all', poll=null;
+function takeBoot(k){const b=window.__BOOT__; if(!b||b[k]==null) return null; const v=b[k]; delete b[k]; return v;}
+function jfetch(url, opts){
+  const o=Object.assign({}, opts||{});
+  const ms=o.timeout==null?20000:o.timeout; delete o.timeout;
+  const ctrl=new AbortController();
+  const t=setTimeout(()=>ctrl.abort(), ms);
+  o.signal=ctrl.signal;
+  return fetch(url,o).finally(()=>clearTimeout(t));
+}
+const OVERSEAS_TYPES=new Set(['指数型-海外股票','QDII-普通股票','QDII-混合偏股','QDII-混合灵活','QDII-混合平衡','QDII-混合债','QDII-纯债','QDII-商品','QDII-FOF','QDII-REITs']);
+function regionOf(r){return (r.region)||(OVERSEAS_TYPES.has(r.ftype)?'海外':'A股')}
+function regionBadge(r){return regionOf(r)==='海外'?'<span class="badge b-blue" style="margin-right:6px">海外</span>':''}
+const G={
+  dot:'<svg viewBox="0 0 10 10" fill="currentColor"><circle cx="5" cy="5" r="4"/></svg>',
+  bolt:'<svg viewBox="0 0 10 10" fill="currentColor"><path d="M5.8 0 2 5.6h2.5L3.6 10 8.4 3.8H5.7L7.4 0z"/></svg>',
+  dia:'<svg viewBox="0 0 10 10" fill="currentColor"><path d="M5 0l4 5-4 5-4-5z"/></svg>',
+  veto:'<svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="5" cy="5" r="3.6"/><path d="M2.5 2.5l5 5"/></svg>',
+  ring:'<svg viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="5" cy="5" r="3.4"/></svg>'};
+function setStatus(a,b,k,t){const d=document.getElementById(a);if(d)d.className='dot '+(k||'');const e=document.getElementById(b);if(e)e.textContent=t}
+function fmtYuan(n){if(n==null||isNaN(n))return '—';n=Number(n);if(Math.abs(n)>=10000)return (n/10000).toFixed(n%10000===0?0:2)+'万';return n.toLocaleString('zh-CN')}
+function fmtYuanFull(n){if(n==null||isNaN(n))return '—';return Number(n).toLocaleString('zh-CN',{minimumFractionDigits:0,maximumFractionDigits:0})+' 元'}
+function fmtYuan2(n){if(n==null||isNaN(n))return '—';return Number(n).toLocaleString('zh-CN',{minimumFractionDigits:2,maximumFractionDigits:2})+' 元'}
+// 所有来自接口/外部数据源的文本在拼入 innerHTML 前统一转义，避免基金名称、
+// 数据源错误消息或台账备注被解释成 HTML。数值仍应先经格式化函数收敛。
+function escHtml(v){return String(v==null?'':v).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function safeFundCode(v){const c=String(v==null?'':v).padStart(6,'0');return /^\d{6}$/.test(c)?c:''}
+function parseYuan(s){if(s==null||s==='')return 0;if(typeof s==='number')return s;let t=String(s).trim().replace(/,/g,'').replace(/，/g,'').replace(/\s+/g,'');if(!t)return 0;let m=1;const low=t.toLowerCase();if(low.endsWith('万元')||low.endsWith('万')){t=t.replace(/万元?$/,'').replace(/万$/,'');m=10000}else if(low.endsWith('w')){t=t.slice(0,-1);m=10000}else if(low.endsWith('k')){t=t.slice(0,-1);m=1000}t=t.replace(/[¥￥元]/g,'');const v=parseFloat(t);return isNaN(v)?0:v*m}
+function updateScanModeUI(){const mode=document.getElementById('scan-mode')?.value||'default'; const r=document.getElementById('in-right'), l=document.getElementById('in-left'), h=document.getElementById('scan-mode-hint'); const useFunnel=(mode==='default'); if(r) r.disabled=!useFunnel; if(l) l.disabled=!useFunnel; if(r) r.title=useFunnel?'':'全量模式下忽略右侧池'; if(l) l.title=useFunnel?'':'全量模式下忽略左侧池'; if(h){h.textContent=mode==='all_main'?'扫描全部主池：近3年完整的目标基金（A股四类 + 海外指数QDII），约 4580 只。' : (mode==='all_target'?'扫描全部目标类型：混合型-偏股 / 股票型 / 指数型-股票 / 混合型-灵活 / 指数型-海外股票，含次新基金，约 6630 只。':'默认模式会按右侧池 / 左侧池 / 新星池做漏斗深算。')}}
+
+async function loadStrategyState(){
+  try{
+    const j=takeBoot('strategy')||await (await jfetch('/api/strategy_state',{timeout:12000})).json();
+    const sg=j.signal||{}, cs=j.crisis||{}, csh=j.cash||{}, mr=j.micro_risk||{}, dc=j.decision||{};
+    document.getElementById('st-signal').innerHTML=`S&gt;${sg.buy_th} 买 · S&lt;${sg.sell_th} 卖 · ${sg.slots} 槽`;
+    document.getElementById('st-risk').innerHTML=`现金 ${(csh.annual_yield*100).toFixed(1)}% · 止损 ${(mr.trail_stop*100).toFixed(0)}%`;
+    document.getElementById('st-crisis').textContent=cs.active?`危机 · ${cs.reason}`: (cs.data_insufficient?'数据不足':'正常');
+    document.getElementById('st-crisis').style.color=cs.active?'var(--danger)':'var(--muted)';
+    document.getElementById('st-cppi').textContent=(j.cppi?.rules||[]).map(r=>`≤${(r.drawdown_lte*100).toFixed(0)}%→${r.max_slots===0?'清仓':r.max_slots+'槽'}`).join(' · ');
+    const ws=document.getElementById('water-slots'), wss=document.getElementById('water-slots-sub');
+    if(ws){const max=dc.max_slots_by_macro ?? sg.slots; const isC=cs.active; ws.textContent=`${max} / ${sg.slots}`; ws.style.color=isC?'var(--danger)':'var(--ink)'; if(wss) wss.textContent=isC?'禁新开仓':'可建仓';}
+    const dec=document.getElementById('st-decision');
+    if(dec){ if(dc.new_buy_allowed){dec.className='';dec.style.cssText='grid-column:1/-1;padding:10px 12px;border-radius:8px;border:1px solid #bbf7d0;background:var(--success-soft);color:var(--success);font:12px var(--mono)';dec.textContent=`可建仓 · 最多 ${dc.max_slots_by_macro} 槽`} else {dec.className='';dec.style.cssText='grid-column:1/-1;padding:10px 12px;border-radius:8px;border:1px solid #fecdd3;background:var(--danger-soft);color:var(--danger);font:12px var(--mono)';dec.textContent=dc.message; dec.classList.remove('hide')} }
+  }catch(e){}
+}
+async function loadTerrain(){
+  const box=document.getElementById('terrain');
+  try{
+    const j=takeBoot('terrain')||await (await jfetch('/api/terrain',{timeout:20000})).json();
+    box.innerHTML=j.items.map(x=>{
+      if(x.error) return `<div class="t"><div class="t-name">${escHtml(x.name)}</div><div class="t-meta">${escHtml(x.error)}</div></div>`;
+      const p=Math.max(0,Math.min(100,Number(x.pct??50))), cls=p<=30?'c-low':(p<=70?'c-mid':'c-high'), c=p<=30?'var(--success)':(p<=70?'var(--warn)':'var(--danger)');
+      return `<div class="t"><div class="t-name">${escHtml(x.name)}</div><div class="t-meta">PE ${escHtml(x.pe)} · ${escHtml(x.date)}</div><div class="t-bar"><i style="width:${p}%;background:${c}"></i></div><div class="t-pct ${cls}">${p}%</div></div>`;
+    }).join('');
+    if(j.asof){
+      document.getElementById('hd-date').textContent=`${j.asof} · ${j.water!=null? j.water+'%':''}`;
+      document.getElementById('hd-dot').className='dot '+(j.asof<j.asof_expected?'err':'ok');
+    }
+    const w=j.water; if(w!=null){const wc=w<=20?'var(--success)':(w>=90?'var(--danger)':(w>=70?'var(--warn)':'var(--ink)')); document.getElementById('water-num').innerHTML=`<span style="color:${wc}">${w}</span>`; const b=document.getElementById('water-bar'); requestAnimationFrame(()=>{b.style.width=w+'%';b.style.background=wc}); document.getElementById('regime').textContent=j.regime||'—';}
+    if(j.reversal&&!j.reversal.error){const r=j.reversal; document.getElementById('reversal').innerHTML=`MA20 ${r.above_ma20?'之上':'之下'} · 量比 ${r.vol_ratio??'—'}${r.reversal?' · 放量反转':''}`;}
+  }catch(e){box.innerHTML='<div class="empty">加载失败</div>';}
+}
+function fmtPctS(v){ if(v==null||isNaN(v)) return '—'; const p=v*100; return (p>0?'+':'')+p.toFixed(1)+'%'; }
+function retStyle(v){ if(v==null||isNaN(v)) return ''; return v>0?'color:var(--success)':(v<0?'color:var(--danger)':''); }
+async function loadMacro(){
+  const box=document.getElementById('macro-body');
+  try{
+    const j=await (await jfetch('/api/macro',{timeout:15000})).json();
+    if(!j.ok) throw new Error('fail');
+    const rows=(j.indices||[]).map(x=> x.error
+      ? `<tr><td class="name">${escHtml(x.label)}</td><td colspan="4" class="mono faint">${escHtml(x.error)}</td></tr>`
+      : `<tr><td class="name">${escHtml(x.label)}</td><td class="mono" style="text-align:right">${x.close==null?'—':Number(x.close).toLocaleString('en-US',{maximumFractionDigits:2})}</td><td class="mono" style="text-align:right;${retStyle(x.ret_126d)}">${fmtPctS(x.ret_126d)}</td><td class="mono" style="text-align:right;${retStyle(x.ret_252d)}">${fmtPctS(x.ret_252d)}</td><td class="mono faint" style="text-align:right">${escHtml(x.asof||'')}</td></tr>`).join('');
+    const cx=j.cross||{};
+    const bandCls=cx.band==='overseas_strong'?'b-blue':(cx.band==='a_strong'?'b-amber':'b-mute');
+    box.innerHTML=`<div class="table-wrap"><table><thead><tr><th>指数</th><th style="text-align:right">收盘</th><th style="text-align:right">6月</th><th style="text-align:right">1年</th><th style="text-align:right">截至</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div style="margin-top:10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <span class="badge ${bandCls}">${escHtml(cx.band_label||'—')}</span>
+        <span class="mono" style="font:12px var(--mono);color:var(--muted)">跨市场相对强度 252d（标普500 − 沪深300）：<b style="color:var(--ink)">${fmtPctS(cx.diff_252d)}</b></span>
+      </div>
+      <div class="hint" style="margin-top:8px">${escHtml(cx.note||'')}</div>`;
+  }catch(e){ box.innerHTML='<div class="empty">指数对照加载失败</div>'; }
+}
+async function refreshScanStatus(){
+  const s=await (await jfetch('/api/scan/status',{timeout:8000})).json();
+  const tot=s.total||0,done=s.done||0;
+  document.getElementById('pg').style.width=tot?Math.round(done/tot*100)+'%':(s.phase==='done'?'100%':((s.phase==='universe'||s.phase==='scoring')?'6%':'0%'));
+  if(s.phase==='universe'){
+    document.getElementById('btn-scan').disabled=true;
+    setStatus('st-dot','st','busy',s.message||'正在构建扫描池…');
+  }else if(s.phase==='scoring'){
+    document.getElementById('btn-scan').disabled=true;
+    setStatus('st-dot','st','busy',`${done}/${tot} · ${s.elapsed}s`);
+  }else if(s.phase==='done'){
+    setStatus('st-dot','st','ok',s.message||'完成');
+    if(poll) clearInterval(poll); poll=null;
+    document.getElementById('btn-scan').disabled=false;
+    loadResults();
+  }else if(s.phase==='error'){
+    setStatus('st-dot','st','err',s.message||'扫描失败');
+    if(poll) clearInterval(poll); poll=null;
+    document.getElementById('btn-scan').disabled=false;
+  }else{
+    if(poll) clearInterval(poll); poll=null;
+    document.getElementById('btn-scan').disabled=false;
+  }
+  return s;
+}
+async function startScan(){
+  const r=+document.getElementById('in-right').value, l=+document.getElementById('in-left').value;
+  const mode=document.getElementById('scan-mode')?.value||'default';
+  const payload=mode==='default'?{right:r,left:l}:{scan_mode:mode};
+  const res=await fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  const j=await res.json();
+  if(!j.ok){
+    if(res.status===409 || String(j.message||'').includes('扫描进行中')){
+      document.getElementById('btn-scan').disabled=true;
+      setStatus('st-dot','st','busy','检测到已有扫描进行中，正在接管进度…');
+      startPoll();
+      return;
+    }
+    setStatus('st-dot','st','err',j.message||'启动失败');
+    return;
+  }
+  document.getElementById('btn-scan').disabled=true;
+  const bootMsg=mode==='all_main'?'启动全量主池扫描…':(mode==='all_target'?'启动全量目标类型扫描…':'启动…');
+  setStatus('st-dot','st','busy',bootMsg);
+  startPoll();
+}
+function startPoll(){
+  if(poll) clearInterval(poll);
+  refreshScanStatus().catch(()=>{});
+  poll=setInterval(()=>{refreshScanStatus().catch(()=>{})},1500);
+}
+function poolPct(r,a){return a.length? a.filter(x=>x.S_total<=r.S_total).length/a.length:0}
+function sigOf(r){const ps=String(r.penalty_str||''); const veto=/-100%/.test(ps)||((r.penalties||[]).some(p=>p[1]>=1)); if(veto) return `<span class="badge b-red">否决</span>`; if(r.channel==='新星') return r.S_total>=50?`<span class="badge b-blue">观察</span>`:`<span class="badge b-mute">—</span>`; if((r.rating||'').includes('封顶')) return `<span class="badge b-green">Buy·帽</span>`; if(r.S_total>=70) return `<span class="badge b-green">买入</span>`; if(r.S_total<45) return `<span class="badge b-red">卖出</span>`; if(r.S_total>=50) return `<span class="badge b-amber">持有</span>`; return `<span class="badge b-mute">回避</span>`}
+async function loadResults(){const j=takeBoot('results')||await (await jfetch('/api/results',{timeout:25000})).json(); ROWS=j.rows||[]; const M=ROWS.filter(r=>r.channel!=='新星'); ROWS.forEach(r=>r.pool_pct=poolPct(r,M)); document.getElementById('bd-empty').style.display=ROWS.length?'none':''; document.getElementById('bd-n').textContent=ROWS.length?`${j.n} · ${j.stamp} · ${j.asof||''}${j.n_a!=null?` · A股 ${j.n_a} · 海外 ${j.n_ov}`:''}`:''; renderBoard()}
+function setFlt(f){flt=f; document.querySelectorAll('#flt-seg button').forEach(b=>b.classList.toggle('on',b.dataset.f===f)); renderBoard()}
+function setMkt(m){mkt=m; document.querySelectorAll('#mkt-seg button').forEach(b=>b.classList.toggle('on',b.dataset.m===m)); renderBoard()}
+function sortBy(k){if(sortKey===k) sortDir*=-1; else{sortKey=k;sortDir=-1} renderBoard()}
+function ratingCell(r){const rt=String(r.rating||''); if(rt.includes('🌱')) return `<span class="badge b-blue">观察</span>`; if(rt.includes('封顶')) return `<span class="badge b-green">Buy·帽</span>`; if(r.S_total>=85) return `<span class="badge b-green">StrongBuy</span>`; if(r.S_total>=70) return `<span class="badge b-green">Buy</span>`; if(r.S_total>=50) return `<span class="badge b-amber">Hold</span>`; return `<span class="badge b-red">Sell</span>`}
+function renderBoard(){
+  const kw=(document.getElementById('kw').value||'').trim();
+  let v=ROWS.filter(r=>{
+    if(kw&&!(r.name.includes(kw)||String(r.code).includes(kw)))return false;
+    if(flt==='green'&&!(r.S_total>=70))return false;
+    if(flt==='yellow'&&!(r.S_total>=50&&r.S_total<70))return false;
+    if(flt==='veto'&&!/-100%/.test(String(r.penalty_str||'')))return false;
+    if(mkt==='a'&&regionOf(r)!=='A股')return false;
+    if(mkt==='ov'&&regionOf(r)!=='海外')return false;
+    return true;
+  }); v.sort((a,b)=>((b[sortKey]??-999)-(a[sortKey]??-999))*(sortDir===1?-1:1)*-1); v=v.slice(0,300);
+  document.querySelector('#board tbody').innerHTML=v.map((r,i)=>`<tr onclick="queryFund('${safeFundCode(r.code)}')" style="cursor:pointer">
+    <td>${i+1}</td><td>${safeFundCode(r.code)}</td><td class="name">${regionBadge(r)}${escHtml(r.name)}</td>
+    <td class="score">${escHtml(r.S_total)}</td><td>${ratingCell(r)}</td><td>${sigOf(r)}</td>
+    <td>${escHtml(r.F_value??'')}</td><td>${escHtml(r.F_alpha??'')}</td><td>${escHtml(r.F_momentum??'')}</td>
+    <td>${r.val_pct!=null?(r.val_pct*100).toFixed(0)+'%':''}</td>
+    <td class="pen">${escHtml(r.penalty_str||'')}</td><td><button class="btn btn-ghost" style="padding:4px 8px;font-size:11px" onclick="event.stopPropagation();addToRebalance('${safeFundCode(r.code)}')">加入</button></td></tr>`).join('');
+}
+async function queryFund(code){
+  code=(code||'').trim(); if(!code) return;
+  setStatus('q-dot','qst','busy','拉取…'); document.getElementById('wf').innerHTML='';
+  try{const j=await (await fetch('/api/fund/'+code.padStart(6,'0'),{method:'POST'})).json(); if(!j.ok){setStatus('q-dot','qst','err',j.message);return} setStatus('q-dot','qst','ok',`${j.fund.last_date} · 参照 ${j.fund.ref_stamp||'—'}`); renderWaterfall(j.fund,'wf')}catch(e){setStatus('q-dot','qst','err','失败')}
+}
+function bar(l,v,c){v=v??0; return `<div class="fbar"><label><span>${l}</span><b>${(+v).toFixed(1)}</b></label><div class="tr"><i style="width:${v}%;background:${c}"></i></div></div>`}
+function renderWaterfall(f,mount){
+  if(f.pool_pct==null&&ROWS.length) f.pool_pct=ROWS.filter(x=>x.S_total<=f.S_total).length/ROWS.length;
+  const we=Object.entries(f.rbsa||{}).sort((a,b)=>b[1]-a[1]).filter(x=>x[1]>0.03).map(x=>`<span>${escHtml(x[0])} ${(x[1]*100).toFixed(0)}%</span>`).join('');
+  const pens=(f.penalties&&f.penalties.length)? f.penalties.map(p=>`<li><span>×</span>${escHtml(p[0])} ${escHtml(p[1])}</li>`).join('') : '<li class="ok">无风控</li>';
+  const pd=f.penalty_detail||{};
+  const scoreBadge=f.S_total!=null? `<span class="badge ${f.S_total>=70?'b-green':(f.S_total>=50?'b-amber':'b-red')}" style="font-size:13px;padding:5px 10px">总分 ${f.S_total}</span>` : `<span class="badge b-mute">总分 —</span>`;
+  // P4-3: A/C 份额建议(纯展示; C 类服务费率是假设值, 不参与模型评分)
+  const sc=f.share_class||{}; let acHtml='';
+  if(sc.has_pair&&sc.siblings){
+    const a=sc.siblings.A||{}, c=sc.siblings.C||{};
+    const feePct=a.buy_fee!=null?(a.buy_fee*100).toFixed(2)+'%':'—';
+    const svc=sc.c_service_fee_annual!=null?(sc.c_service_fee_annual*100).toFixed(2)+'%/年':'—';
+    const be=sc.breakeven_years!=null?sc.breakeven_years+'年':'—';
+    const rec=sc.breakeven_years!=null?(sc.self_cls==='C'?`预期持有&gt;${sc.breakeven_years}年 → 换 A 更省费`:`预期持有&gt;${sc.breakeven_years}年买 A, 否则买 C`):'';
+    acHtml=`<div class="eyebrow" style="margin-top:12px">份额建议 (A/C)</div>
+      <div style="margin-top:6px;font:12px var(--mono);color:var(--muted);line-height:1.8">${a.code?`<span>${a.code} ${escHtml(a.name)}</span> 申购费 ${feePct}<br>`:''}${c.code?`<span>${c.code} ${escHtml(c.name)}</span> 服务费≈${svc}<br>`:''}盈亏平衡 <b style="color:var(--ink)">${be}</b>${rec?` · ${rec}`:''}</div>
+      <div class="hint" style="margin-top:4px">${escHtml(sc.note||'')}</div>`;
+  }
+  document.getElementById(mount).innerHTML=`<div class="wf">
+    <div><div class="wf-title">${safeFundCode(f.code)} ${escHtml(f.name)}</div><div style="display:flex;gap:8px;align-items:center;margin:8px 0;flex-wrap:wrap">${scoreBadge}${sigOf(f)}${ratingCell(f)}</div><div class="wf-meta">${escHtml(f.ftype)} · ${f.is_passive?'被动':'主动'} · ${f.panel_mode==='overseas'?'境外面板':'A股面板'} · 数据 ${escHtml(f.last_date)}${f.model_version?` · ${escHtml(f.model_version)}`:''}${f.ref_stamp?` · 参照 ${escHtml(f.ref_stamp)}`:''}${f.data_incomplete?' · <span style="color:var(--danger)">档案数据缺失</span>':''}</div>
+      ${bar('F_value',f.F_value,'#15803d')}${bar('F_alpha',f.F_alpha,'#1d4ed8')}${bar('F_momentum',f.F_momentum,'#a16207')}
+      <div class="facts">分位 ${f.val_pct!=null?(f.val_pct*100).toFixed(1)+'%':'—'} · 趋势 ${f.trend_ok?'是':'否'} · IR ${f.ir_winrate!=null?(f.ir_winrate*100).toFixed(0)+'%':'—'} · 下行捕获 ${f.down_capture??'—'}</div>
+      ${acHtml}
+    </div><div><div class="eyebrow">穿透</div><div class="chips">${we||'<span style="color:var(--faint)">—</span>'}</div><div class="eyebrow" style="margin-top:12px">风控</div><ul class="plist">${pens}</ul><div class="facts">R_MDD ${pd.R_MDD??'—'}（回撤 ${pd.mdd_fund??'—'}/${pd.mdd_bench??'—'}） · 任职 ${f.tenure_days?Math.round(f.tenure_days/365)+'年':'—'} · 规模 ${f.scale??'—'}亿</div></div></div>`;
+}
+let WROWS=[], WD_OPEN=[];
+async function runWatch(){
+  const codes=document.getElementById('watch').value.split(/[\s,，、]+/).filter(Boolean); if(!codes.length) return;
+  const CH=6,chunks=[]; for(let i=0;i<codes.length;i+=CH) chunks.push(codes.slice(i,i+CH));
+  WROWS=[]; WD_OPEN=[]; let WREF=null;
+  for(let ci=0;ci<chunks.length;ci++){
+    setStatus('w-dot','wst','busy',`${ci+1}/${chunks.length}`);
+    try{const j=await (await fetch('/api/watchlist',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({codes:chunks[ci]})})).json(); if(j.ok){WROWS=WROWS.concat(j.rows||[]); if(j.ref_stamp&&!WREF)WREF=j.ref_stamp}}catch(e){chunks[ci].forEach(c=>WROWS.push({code:c,error:'失败'}))}
+  }
+  WROWS.forEach(r=>r.pool_pct=poolPct(r,WROWS)); WD_OPEN=WROWS.map(()=>WROWS.length<=6);
+  setStatus('w-dot','wst','ok',`完成 · 参照 ${WREF||'—'}`);
+  renderWatch();
+}
+function renderWatch(){
+  const html=WROWS.map((r,i)=>{
+    if(r.error) return `<tr><td>${safeFundCode(r.code)}</td><td colspan="6" style="color:var(--danger);text-align:left">${escHtml(r.error)}</td></tr>`;
+    const open=WD_OPEN[i]?'':'hide';
+    return `<tr onclick="toggleWd(${i})" style="cursor:pointer"><td>${safeFundCode(r.code)}</td><td class="name">${escHtml(r.name)}</td><td class="score">${escHtml(r.S_total)}</td><td>${ratingCell(r)}</td><td>${sigOf(r)}</td><td>${r.F_value??''}</td><td>${r.F_alpha??''}</td></tr><tr class="hide" id="wd-${i}"><td colspan="7"><div id="wfm-${i}"></div></td></tr>`;
+  }).join('');
+  document.getElementById('wout').innerHTML=`<div class="table-wrap"><table><thead><tr><th>代码</th><th>名称</th><th>总分</th><th>评级</th><th>信号</th><th>估值</th><th>Alpha</th></tr></thead><tbody>${html}</tbody></table></div>`;
+  WROWS.forEach((r,i)=>{if(WD_OPEN[i]&&!r.error) renderWaterfall(r,'wfm-'+i)})
+}
+function toggleWd(i){ WD_OPEN[i]=!WD_OPEN[i]; document.getElementById('wd-'+i)?.classList.toggle('hide',!WD_OPEN[i]); if(WD_OPEN[i]) renderWaterfall(WROWS[i],'wfm-'+i)}
+function addToRebalance(c){
+  c=String(c).padStart(6,'0');
+  const d=new Date(), today=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  document.getElementById('led-code').value=c;
+  document.getElementById('led-side').value='buy';
+  document.getElementById('led-dates').value=today;
+  document.getElementById('led-amts').value='10000';
+  document.getElementById('sec-rebalance').scrollIntoView({behavior:'smooth'});
+  setStatus('led-dot','led-st','ok','已填入台账表单：核对日期/金额后点「添加记录」');
+}
+
+// ============ 操作台账（买卖历史 · 自动保存到服务器 output/ledger.json） ============
+let LEDGER_TXNS=[];
+let LEDGER_VIEW_CODE=''; // 空=全部基金流水
+// 使用浏览器本地日期而不是 toISOString() 的 UTC 日期；北京时间 00:00～07:59
+// 若取 UTC 会误判成“昨天”，导致“补齐至今天”少补一天。
+function localDateStr(d=new Date()){
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+let FEE_SETTINGS={default_rate:0.0015,overrides:{}};
+function renderFeeSettings(s){
+  if(s) FEE_SETTINGS={default_rate:Number(s.default_rate??0.0015),overrides:Object.assign({},s.overrides||{})};
+  const inp=document.getElementById('fee-default');
+  if(inp) inp.value=(FEE_SETTINGS.default_rate*100).toFixed(4).replace(/0+$/,'').replace(/\.$/,'');
+  const box=document.getElementById('fee-overrides');
+  if(!box) return;
+  const rows=Object.entries(FEE_SETTINGS.overrides).sort(([a],[b])=>a.localeCompare(b));
+  box.innerHTML=rows.length?`单基金覆盖：${rows.map(([code,rate])=>`<span class="badge b-blue" style="margin:2px 5px 2px 0;cursor:pointer" title="点击填入修改框" onclick="editFundFee('${code}')">${code} ${(Number(rate)*100).toFixed(4).replace(/0+$/,'').replace(/\.$/,'')}% <i style="font-style:normal;margin-left:4px" title="删除覆盖" onclick="event.stopPropagation();deleteFundFee('${code}')">×</i></span>`).join('')}`:'暂无单基金覆盖；未查到费率时使用默认值。';
+}
+function feePctValue(id){
+  const raw=String(document.getElementById(id)?.value??'').trim();
+  if(raw==='') return null;
+  const v=Number(raw);
+  return Number.isFinite(v)&&v>=0&&v<=10?v/100:null;
+}
+async function persistFeeSettings(okText){
+  try{
+    const j=await (await fetch('/api/fee_settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(FEE_SETTINGS)})).json();
+    if(!j.ok){setStatus('led-dot','led-st','err',j.message||'费率保存失败');return false;}
+    renderFeeSettings(j); await updateLedger();
+    setStatus('led-dot','led-st','ok',okText); return true;
+  }catch(e){setStatus('led-dot','led-st','err','费率保存失败：无法连接服务器');return false;}
+}
+async function saveDefaultFee(){
+  const rate=feePctValue('fee-default');
+  if(rate==null){setStatus('led-dot','led-st','err','默认费率须在 0%～10% 之间');return;}
+  FEE_SETTINGS.default_rate=rate;
+  await persistFeeSettings(`默认买入费率已设为 ${(rate*100).toFixed(4).replace(/0+$/,'').replace(/\.$/,'')}%`);
+}
+async function saveFundFee(){
+  const rawCode=String(document.getElementById('fee-code')?.value||'').replace(/\D/g,'');
+  const code=rawCode?rawCode.padStart(6,'0'):'';
+  const rate=feePctValue('fee-rate');
+  if(!/^\d{6}$/.test(code)||code==='000000'){setStatus('led-dot','led-st','err','基金代码需为6位数字');return;}
+  if(rate==null){setStatus('led-dot','led-st','err','基金费率须在 0%～10% 之间');return;}
+  FEE_SETTINGS.overrides[code]=rate;
+  if(await persistFeeSettings(`${code} 买入费率已设为 ${(rate*100).toFixed(4).replace(/0+$/,'').replace(/\.$/,'')}%`)){
+    document.getElementById('fee-code').value=''; document.getElementById('fee-rate').value='';
+  }
+}
+function editFundFee(code){
+  document.getElementById('fee-code').value=code;
+  document.getElementById('fee-rate').value=(Number(FEE_SETTINGS.overrides[code])*100).toFixed(4).replace(/0+$/,'').replace(/\.$/,'');
+}
+async function deleteFundFee(code){
+  delete FEE_SETTINGS.overrides[code];
+  await persistFeeSettings(`已删除 ${code} 单基金覆盖，将按自动查询或默认费率计算`);
+}
+// 定投终止/忽略/止盈标记（持久化，output/dca_state.json）。
+// 终止/忽略以「该轮定投最后扣款日 lastDate」为轮次指纹：同一轮已终止 → 不再反复询问；
+// 之后开始新一轮定投（出现更晚的扣款记录）→ lastDate 变化 → 自动重新提醒。
+// take_profit: {code: {plan:{threshold,mode}, lots:{lotKey:{mode,soldAmount,soldDate,costNav,nav}}}}，
+// 已止盈批次不再参与计算。
+let DCA_STATE = {terminated:{}, ignored:{}, take_profit:{}};
+let LEDGER_NAV_TRIED=false;
+async function updateLedger(){
+  try{
+    const today=localDateStr();
+    const j=takeBoot('ledger')||await (await jfetch('/api/ledger?today='+encodeURIComponent(today),{timeout:15000})).json();
+    LEDGER_TXNS=j.txns||[];
+    if(j.fee_settings) renderFeeSettings(j.fee_settings);
+    if(j.dca_state){
+      DCA_STATE.terminated = Object.assign({}, j.dca_state.terminated||{}, DCA_STATE.terminated);
+      DCA_STATE.ignored = Object.assign({}, j.dca_state.ignored||{}, DCA_STATE.ignored);
+      DCA_STATE.take_profit = Object.assign({}, j.dca_state.take_profit||{}, DCA_STATE.take_profit);
+    }
+    renderLedger(j);
+    if(typeof checkMissingDCA === 'function') checkMissingDCA(j.dca_due);
+    if(typeof tpMaybeAutoDetect === 'function') tpMaybeAutoDetect();
+    const exp=j.nav_expected;
+    const stale=(j.funds||[]).some(f=>f.state&&f.state.nav_asof&&exp&&f.state.nav_asof<exp);
+    if(stale && !LEDGER_NAV_TRIED){
+      LEDGER_NAV_TRIED=true;
+      refreshLedgerNav();
+    }
+  }catch(e){}
+}
+async function refreshLedgerNav(){
+  setStatus('led-dot','led-st','busy','正在刷新净值…');
+  try{
+    const r=await (await jfetch('/api/nav/refresh',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}',timeout:90000})).json();
+    const n=r.refreshed||0;
+    await updateLedger();
+    setStatus('led-dot','led-st', n?'ok':'err', n?`已刷新 ${n}/${r.total||n} 只净值`:'净值源暂时不可用，市值按本地缓存截止日计算');
+  }catch(e){ setStatus('led-dot','led-st','err','净值刷新失败'); }
+}
+async function ledAdd(){
+  // 结构化录入：代码 + 方向 + 日期(多条) + 金额(多条, 与日期一一对应)
+  const code=document.getElementById('led-code').value.replace(/\D/g,'').padStart(6,'0');
+  if(!/^\d{6}$/.test(code)){ setStatus('led-dot','led-st','err','基金代码需为 6 位数字'); return; }
+  let side=document.getElementById('led-side').value;
+  let isDca = false;
+  if(side === 'dca') {
+    side = 'buy';
+    isDca = true;
+  }
+  const dates=String(document.getElementById('led-dates').value).split(/[\n;；]+/).map(l=>l.trim()).filter(Boolean);
+  const amts=String(document.getElementById('led-amts').value).split(/[\n;；]+/).map(l=>l.trim()).filter(Boolean);
+  if(!dates.length){ setStatus('led-dot','led-st','err','请填写日期（每行一条）'); return; }
+  if(dates.length!==amts.length){
+    setStatus('led-dot','led-st','err',`日期 ${dates.length} 条 / 金额 ${amts.length} 条，数量不一致，请一一对应`); return;
+  }
+  const norm=d=>{const x=d.replace(/[/.]/g,'-'); return /^\d{8}$/.test(x)?`${x.slice(0,4)}-${x.slice(4,6)}-${x.slice(6,8)}`:x};
+  for(const d of dates){
+    const dd=norm(d);
+    if(!/^\d{4}-\d{1,2}-\d{1,2}$/.test(dd)){ setStatus('led-dot','led-st','err',`日期格式无效：${d}（应为 YYYY-MM-DD）`); return; }
+  }
+  const txns=LEDGER_TXNS.slice();
+  for(let i=0;i<dates.length;i++){
+    const a=parseYuan(amts[i]);
+    if(!a||a<=0){ setStatus('led-dot','led-st','err',`金额无效：${amts[i]}`); return; }
+    const txn = {code, side, date:norm(dates[i]), amount:a};
+    if(isDca) txn.isDca = true;
+    txns.push(txn);
+  }
+  const j=await (await fetch('/api/ledger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({txns})})).json();
+  if(j.ok){
+    document.getElementById('led-dates').value='';
+    document.getElementById('led-amts').value='';
+    await updateLedger();
+    setStatus('led-dot','led-st','ok',`已添加 ${dates.length} 条${side==='buy'?'买入':'卖出'}记录`);
+  }else setStatus('led-dot','led-st','err',j.message||'保存失败');
+}
+async function ledDel(id){
+  const txns=LEDGER_TXNS.filter(t=>t.id!==id);
+  const j=await (await fetch('/api/ledger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({txns})})).json();
+  if(j.ok) await updateLedger();
+}
+async function ledClear(btn){
+  // 两步确认（iframe 环境 alert/confirm 可能被拦截，用按钮二次点击代替）
+  if(!btn._arm){ btn._arm=true; const old=btn.textContent; btn.textContent='确认清空？'; setTimeout(()=>{btn._arm=false; btn.textContent=old;},3000); return; }
+  btn._arm=false; btn.textContent='清空台账';
+  await fetch('/api/ledger',{method:'DELETE'});
+  LEDGER_TXNS=[]; renderLedger({txns:[],funds:[]});
+  DCA_STATE={terminated:{},ignored:{},take_profit:{}};   // 台账清空后旧标记一并失效，避免压制新一轮提醒/止盈
+  checkMissingDCA();
+  tpPopulate();
+  tpLoad();
+  setStatus('led-dot','led-st','ok','台账已清空');
+}
+
+let dcaGeneratedTxns = [];
+
+function toggleSideMode(){
+  const side = document.getElementById('led-side').value;
+  const p = document.getElementById('dca-panel');
+  const dBox = document.getElementById('box-led-dates');
+  const aBox = document.getElementById('box-led-amts');
+  const addBtn = document.getElementById('btn-led-add');
+  if(side === 'dca') {
+    p.classList.remove('hide');
+    dBox.classList.add('hide');
+    aBox.classList.add('hide');
+    addBtn.classList.add('hide');
+  } else {
+    p.classList.add('hide');
+    dBox.classList.remove('hide');
+    aBox.classList.remove('hide');
+    addBtn.classList.remove('hide');
+  }
+}
+
+async function dcaPreview(){
+  const code=document.getElementById('led-code').value.replace(/\D/g,'').padStart(6,'0');
+  if(!/^\d{6}$/.test(code)){ setStatus('dca-dot','dca-st','err','基金代码需为 6 位数字'); return; }
+  const st=document.getElementById('dca-start').value.trim();
+  const ed=document.getElementById('dca-end').value.trim();
+  const fq=document.getElementById('dca-freq').value;
+  const amt=parseYuan(document.getElementById('dca-amt').value);
+  if(amt<=0){ setStatus('dca-dot','dca-st','err','金额无效'); return; }
+  const norm=d=>{const x=d.replace(/[/.]/g,'-'); return /^\d{8}$/.test(x)?`${x.slice(0,4)}-${x.slice(4,6)}-${x.slice(6,8)}`:x;};
+  const d0=norm(st);
+  if(!/^\d{4}-\d{1,2}-\d{1,2}$/.test(d0)){ setStatus('dca-dot','dca-st','err','开始日期格式无效'); return; }
+  setStatus('dca-dot','dca-st','busy','按交易日生成（自动跳过休市）...');
+  try{
+    const body={code, start_date:d0, amount:amt, freq:fq};
+    if(ed) body.end_date=norm(ed);
+    const j=await (await fetch('/api/dca/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)})).json();
+    if(!j.ok){ setStatus('dca-dot','dca-st','err',j.message||'生成失败'); document.getElementById('dca-save-btn').disabled=true; return; }
+    dcaGeneratedTxns=(j.lots||[]).map(x=>({code, side:'buy', isDca:true, date:x.date, amount:x.amount}));
+    if(!dcaGeneratedTxns.length){
+      setStatus('dca-dot','dca-st','err','区间内无交易日（休市已跳过）');
+      document.getElementById('dca-preview').textContent='';
+      document.getElementById('dca-save-btn').disabled=true;
+      return;
+    }
+    document.getElementById('dca-preview').textContent=dcaGeneratedTxns.map(x=>`${x.date} ${x.amount}元`).join('\n');
+    document.getElementById('dca-save-btn').disabled=false;
+    setStatus('dca-dot','dca-st','ok',`生成 ${dcaGeneratedTxns.length} 笔（已跳过休市），共 ${fmtYuanFull(j.total!=null?j.total:dcaGeneratedTxns.length*amt)}`);
+  }catch(e){ setStatus('dca-dot','dca-st','err','生成失败'); document.getElementById('dca-save-btn').disabled=true; }
+}
+
+async function dcaSave(){
+  if(!dcaGeneratedTxns.length) return;
+  const txns=LEDGER_TXNS.slice().concat(dcaGeneratedTxns);
+  setStatus('dca-dot','dca-st','run','保存中...');
+  const j=await (await fetch('/api/ledger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({txns})})).json();
+  if(j.ok){
+    await updateLedger();
+    document.getElementById('led-side').value = 'buy';
+    toggleSideMode();
+    setStatus('led-dot','led-st','ok',`已导入 ${dcaGeneratedTxns.length} 笔定投`);
+    dcaGeneratedTxns=[];
+    document.getElementById('dca-preview').textContent='';
+    document.getElementById('dca-save-btn').disabled=true;
+    setStatus('dca-dot','dca-st','ok','就绪');
+  }else{
+    setStatus('dca-dot','dca-st','err',j.message||'保存失败');
+  }
+}
+
+let missingDcaCandidates = [];
+const ignoredDCAs = new Set();
+
+function dcaRoundClosed(code, lastDate) {
+  // 该轮定投是否已结束（终止/忽略），避免每次打开都重复询问。
+  // 以「标记日期」为界：台账当前最后扣款日 <= 标记日期 → 视为同一轮已结束，不再询问；
+  // 之后出现更晚的扣款记录（lastDate 更大）→ 判断为新的一轮，自动恢复提醒。
+  // 用「≤」而非「==」的原因：重新导入台账时，若导入源缺了最近几笔（或补记笔数略有出入），
+  // 最后扣款日可能比当初标记时更早——此时仍应沿用「已终止/已忽略」结论，不再反复询问。
+  const bound = m => (m && (m.terminatedDate || m.lastDate)) || null;
+  const tb = bound(DCA_STATE.terminated?.[code]);
+  const ib = bound(DCA_STATE.ignored?.[code]);
+  const b = (tb && ib) ? (tb > ib ? tb : ib) : (tb || ib);
+  return !!b && lastDate <= b;
+}
+
+function ymdParts(ymd){
+  const m=String(ymd||'').slice(0,10).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  return m ? [+m[1], +m[2], +m[3]] : null;
+}
+function ymdAddDays(ymd, n){
+  const p=ymdParts(ymd); if(!p) return '';
+  return localDateStr(new Date(p[0], p[1]-1, p[2]+n));
+}
+function ymdWeekday(ymd){
+  const p=ymdParts(ymd); if(!p) return -1;
+  return new Date(p[0], p[1]-1, p[2]).getDay();
+}
+function ymdDiffDays(a, b){
+  const pa=ymdParts(a), pb=ymdParts(b);
+  if(!pa||!pb) return NaN;
+  return Math.round((new Date(pa[0],pa[1]-1,pa[2]) - new Date(pb[0],pb[1]-1,pb[2])) / 86400000);
+}
+function ymdAddMonths(ymd, n){
+  const p=ymdParts(ymd); if(!p) return '';
+  const dt=new Date(p[0], p[1]-1+n, 1);
+  const dim=new Date(dt.getFullYear(), dt.getMonth()+1, 0).getDate();
+  dt.setDate(Math.min(p[2], dim));
+  return localDateStr(dt);
+}
+function nextDcaYmd(last, freq){
+  if(!last || !freq) return '';
+  let nxt='';
+  if(freq==='daily') nxt=ymdAddDays(last,1);
+  else if(freq==='weekly') nxt=ymdAddDays(last,7);
+  else if(freq==='biweekly') nxt=ymdAddDays(last,14);
+  else if(freq==='monthly') nxt=ymdAddMonths(last,1);
+  else return '';
+  if(freq==='daily'){
+    while(ymdWeekday(nxt)===0||ymdWeekday(nxt)===6) nxt=ymdAddDays(nxt,1);
+  } else {
+    const wd=ymdWeekday(nxt);
+    if(wd===6) nxt=ymdAddDays(nxt,2);
+    else if(wd===0) nxt=ymdAddDays(nxt,1);
+  }
+  return nxt;
+}
+function inferDcaFreqFromGap(days){
+  if(!(days>=1)) return null;
+  if(days<=4) return {freq:'daily', fqName:'每日'};
+  if(days<=9) return {freq:'weekly', fqName:'每周'};
+  if(days>=12 && days<=16) return {freq:'biweekly', fqName:'每两周'};
+  if(days>=27 && days<=33) return {freq:'monthly', fqName:'每月'};
+  return null;
+}
+function detectOverdueDca(txns, todayStr){
+  const byCode={};
+  for(const t of txns||[]){
+    if(t.side!=='buy' || !t.isDca) continue;
+    if(!byCode[t.code]) byCode[t.code]=[];
+    byCode[t.code].push(t);
+  }
+  const out=[];
+  for(const code in byCode){
+    const rows=byCode[code].slice().sort((a,b)=>String(a.date).localeCompare(String(b.date)));
+    if(rows.length<2) continue;
+    const last=rows[rows.length-1];
+    const lastAmt=Number(last.amount);
+    let streak=1;
+    for(let i=rows.length-2;i>=0;i--){
+      if(Math.abs(Number(rows[i].amount)-lastAmt)<1e-6) streak++;
+      else break;
+    }
+    if(streak<2) continue;
+    const gap=ymdDiffDays(last.date, rows[rows.length-2].date);
+    const inf=inferDcaFreqFromGap(gap);
+    if(!inf) continue;
+    const nextDate=nextDcaYmd(last.date, inf.freq);
+    if(nextDate && nextDate<=todayStr){
+      out.push({code, amount:lastAmt, lastDate:last.date, nextDate, freq:inf.freq, fqName:inf.fqName});
+    }
+  }
+  return out;
+}
+function checkMissingDCA(serverDue) {
+  // 日期一律用本地 YYYY-MM-DD 字符串比较。
+  // 旧逻辑 new Date('YYYY-MM-DD') 被当成 UTC 0 点，再 setDate 后变成「到期日 08:00」；
+  // 与 today=本地 00:00 比较时，周五最后一笔、周一到期会被漏掉（016452 / 001092）。
+  const todayStr = localDateStr();
+  const byCode = {};
+  for(const c of detectOverdueDca(LEDGER_TXNS, todayStr).concat(Array.isArray(serverDue)?serverDue:[])){
+    if(!c || !c.code) continue;
+    const lastDate=String(c.lastDate||c.last_date||'').slice(0,10);
+    if(!lastDate) continue;
+    if(ignoredDCAs.has(c.code + '|' + lastDate)) continue;
+    if(dcaRoundClosed(c.code, lastDate)) continue;
+    const nd=c.nextDate||c.next_date;
+    const nextDate=(typeof nd==='string' && /^\d{4}-\d{2}-\d{2}/.test(nd)) ? nd.slice(0,10) : (nd instanceof Date ? localDateStr(nd) : nextDcaYmd(lastDate, c.freq));
+    byCode[c.code]={
+      code:c.code, amount:Number(c.amount), lastDate, nextDate,
+      freq:c.freq, fqName:c.fqName||c.freq_label||''
+    };
+  }
+  const candidates = Object.values(byCode);
+  
+  missingDcaCandidates = candidates;
+  const panel = document.getElementById('dca-prompt-panel');
+  if(!panel) return;
+  if(!candidates.length) {
+    panel.classList.add('hide');
+    return;
+  }
+  
+  panel.classList.remove('hide');
+  let html = candidates.map((c, i) => `
+    <div style="margin-bottom:10px; padding-bottom:10px; border-bottom:1px solid var(--line); font-size:13px">
+      <div style="margin-bottom:6px;">
+        检测到 <b>${c.code}</b> 存在定投记录（${c.fqName} ${c.amount}元，最近一笔为 ${c.lastDate}）。定投是否已终止？
+      </div>
+      <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+        <button class="btn btn-primary" style="padding:4px 8px;font-size:12px" onclick="fillMissingDCA(${i}, true)">未终止，补齐至今天</button>
+        <div style="display:flex; align-items:center; gap:4px; background:var(--surface); padding:2px 6px; border-radius:4px; border:1px solid var(--line)">
+          <span style="color:var(--muted)">终止于:</span>
+          <input type="text" id="dca-term-${i}" class="mono" style="width:90px; border:none; background:transparent; outline:none; font-size:12px" value="${todayStr}">
+          <button class="btn btn-ghost" style="padding:2px 6px;font-size:12px" onclick="fillMissingDCA(${i}, false)">补齐至此日</button>
+        </div>
+        <button class="btn btn-ghost" style="padding:4px 8px;font-size:12px" title="本轮不再提醒；若之后新增更晚的定投记录（新一轮），会自动重新提醒" onclick="ignoreMissingDCA(${i})">直接忽略</button>
+      </div>
+    </div>
+  `).join('');
+  document.getElementById('dca-prompt-list').innerHTML = html;
+}
+
+async function saveDcaState(){
+  try{
+    await fetch('/api/dca_state',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({terminated:DCA_STATE.terminated, ignored:DCA_STATE.ignored, take_profit:DCA_STATE.take_profit||{}})});
+  }catch(e){}
+}
+
+async function ignoreMissingDCA(idx) {
+  const c = missingDcaCandidates[idx];
+  if(c){
+    ignoredDCAs.add(c.code + '|' + c.lastDate);
+    DCA_STATE.ignored[c.code] = { lastDate: c.lastDate };   // 本轮忽略持久化：刷新页面不再询问
+    await saveDcaState();
+  }
+  checkMissingDCA();
+}
+
+async function fillMissingDCA(idx, toToday) {
+  const c = missingDcaCandidates[idx];
+  if(!c) return;
+  const endStr = toToday ? localDateStr() : document.getElementById('dca-term-'+idx).value.trim();
+  const norm = d => { const x = String(d).replace(/[/.]/g,'-'); return /^\d{8}$/.test(x)?`${x.slice(0,4)}-${x.slice(4,6)}-${x.slice(6,8)}`:x; };
+  const endD = new Date(norm(endStr) + 'T00:00:00');
+  if(isNaN(endD)) { setStatus('led-dot','led-st','err','日期格式无效，请填写 YYYY-MM-DD'); return; }
+
+  const nd = c.nextDate;
+  const startStr = (typeof nd === 'string' && /^\d{4}-\d{2}-\d{2}/.test(nd))
+    ? nd.slice(0,10)
+    : localDateStr(nd instanceof Date ? nd : new Date(nd));
+  setStatus('led-dot','led-st','run',`正在计算 ${c.code} ${startStr} 至 ${norm(endStr)} 的应补记录…`);
+  let pj;
+  try{
+    const resp = await fetch('/api/dca/preview',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({code:c.code, start_date:startStr, amount:c.amount, freq:c.freq, end_date:norm(endStr)})});
+    pj = await resp.json();
+  }catch(e){
+    setStatus('led-dot','led-st','err','补齐失败：无法连接服务器，请重试');
+    return;
+  }
+  // 旧逻辑吞掉 preview 的错误后仍把候选隐藏，造成“点了按钮但没有补”的假成功。
+  // 现在只有明确生成并成功保存后才改变本地状态；失败会展示原因并保留按钮供重试。
+  if(!pj.ok){
+    setStatus('led-dot','led-st','err',`补齐失败：${pj.message||'无法生成定投记录'}`);
+    return;
+  }
+  const txnsToAdd = (pj.lots||[]).map(x=>({code:c.code, side:'buy', isDca:true, date:x.date, amount:x.amount}));
+
+  // 选择了「补齐至此日」= 明确告知定投已终止。先准备标记，必须等台账保存成功后
+  // 再持久化，避免“台账写失败但状态已终止”把尚未补齐的记录永久隐藏。
+  let terminatedInfo = null;
+  if(!toToday){
+    let lastDcaDate = c.lastDate;
+    for(const t of txnsToAdd) if(t.date > lastDcaDate) lastDcaDate = t.date;
+    terminatedInfo = { lastDate: lastDcaDate, terminatedDate: norm(endStr) };
+  }
+
+  if(!txnsToAdd.length) {
+    if(terminatedInfo){
+      DCA_STATE.terminated[c.code] = terminatedInfo;
+      ignoredDCAs.add(c.code + '|' + c.lastDate);
+      await saveDcaState();
+      checkMissingDCA();
+      setStatus('led-dot','led-st','ok',`已标记 ${c.code} 定投终止（${terminatedInfo.terminatedDate}），区间内无需补记`);
+    } else {
+      setStatus('led-dot','led-st','err','补齐失败：服务器未返回应补记录，请重试');
+    }
+    return;
+  }
+
+  setStatus('led-dot','led-st','run','补齐保存中...');
+  const txns = LEDGER_TXNS.slice().concat(txnsToAdd);
+  let j;
+  try{
+    j = await (await fetch('/api/ledger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({txns})})).json();
+  }catch(e){
+    setStatus('led-dot','led-st','err','补齐保存失败：无法连接服务器，请重试');
+    return;
+  }
+  if(j.ok){
+    ignoredDCAs.add(c.code + '|' + c.lastDate);
+    if(terminatedInfo){
+      DCA_STATE.terminated[c.code] = terminatedInfo;
+      await saveDcaState();
+    }
+    await updateLedger();
+    const pending = Number(pj.pending||0);
+    setStatus('led-dot','led-st','ok',`已成功补齐 ${txnsToAdd.length} 笔定投记录${pending?`（其中 ${pending} 笔净值待确认）`:''}${terminatedInfo ? '，并已标记该轮定投终止（不再重复询问）' : ''}`);
+  } else {
+    setStatus('led-dot','led-st','err',j.message || '保存失败');
+  }
+}
+
+function normLedDate(d){const x=String(d).trim().replace(/[/.]/g,'-'); return /^\d{8}$/.test(x)?`${x.slice(0,4)}-${x.slice(4,6)}-${x.slice(6,8)}`:x}
+
+// ============ 定投止盈 · 分批止盈线 ============
+let TP_PREVIEW = null, TP_AUTO_DONE = false;
+function fmtTpAmt(n){ return (Number(n)||0).toLocaleString('zh-CN',{minimumFractionDigits:2, maximumFractionDigits:2}) + ' 元'; }
+
+function tpFundOptions(){
+  const byCode = {};
+  for(const t of LEDGER_TXNS){
+    if(t.side === 'buy' && t.isDca) (byCode[t.code] = byCode[t.code] || []).push(t);
+  }
+  const names = {};
+  const lj = window._lastLedger;
+  if(lj && lj.funds) for(const f of lj.funds) names[f.code] = f.name;
+  return Object.keys(byCode).sort().map(code => {
+    const ts = byCode[code].slice().sort((a,b) => a.date < b.date ? -1 : 1);
+    const last = ts[ts.length-1].date;
+    const closed = dcaRoundClosed(code, last);
+    return {code, name: names[code] || code, n: ts.length, closed};
+  });
+}
+
+function tpPopulate(){
+  const sel = document.getElementById('tp-code');
+  if(!sel) return;
+  const cur = sel.value;
+  const opts = tpFundOptions();
+  sel.innerHTML = '<option value="">— 选择定投计划（基金） —</option>'
+    + opts.map(o => `<option value="${safeFundCode(o.code)}">${safeFundCode(o.code)} ${escHtml(o.name)}（定投 ${o.n} 笔 · ${o.closed ? '已终止' : '进行中'}）</option>`).join('');
+  if(cur && opts.some(o => o.code === cur)) sel.value = cur;
+  return opts;
+}
+
+function tpLoad(){
+  const code = document.getElementById('tp-code')?.value;
+  if(!code){ document.getElementById('tp-list').innerHTML=''; document.getElementById('tp-summary').innerHTML=''; document.getElementById('tp-actions').classList.add('hide'); return; }
+  tpDetect();
+}
+
+function tpMaybeAutoDetect(){
+  const sel = document.getElementById('tp-code');
+  if(!sel) return;
+  const opts = tpFundOptions();
+  tpPopulate();
+  if(!opts.length){
+    // 台账无定投记录：给出空状态指引，避免模块呈现「死区」
+    const box = document.getElementById('tp-list');
+    if(box) box.innerHTML = '<div class="empty" style="padding:10px">台账暂无定投买入记录 — 先在「定投导入」录入，再进行分批止盈</div>';
+    const sum = document.getElementById('tp-summary');
+    if(sum) sum.innerHTML = '';
+    const act = document.getElementById('tp-actions');
+    if(act) act.classList.add('hide');
+    return;
+  }
+  if(!sel.value){
+    // 初始：自动选中第一个「进行中」的定投计划并检测（之后用户手动切换）
+    const first = opts.find(o => !o.closed) || opts[0];
+    if(first){ sel.value = first.code; if(!TP_AUTO_DONE){ TP_AUTO_DONE = true; tpDetect(); } }
+  }
+}
+
+async function tpDetect(){
+  const code = document.getElementById('tp-code')?.value;
+  if(!code){ return; }
+  const thr = parseFloat(document.getElementById('tp-threshold').value) || 20;
+  const mode = document.getElementById('tp-mode').value;
+  setStatus('tp-dot','tp-st','busy','止盈检测中...');
+  try{
+    const j = await (await fetch(`/api/dca_tp/preview?code=${code}&threshold=${thr}&mode=${mode}`)).json();
+    if(!j.ok){ setStatus('tp-dot','tp-st','err', j.message || '检测失败'); return; }
+    TP_PREVIEW = j;
+    renderTp(j);
+  }catch(e){ setStatus('tp-dot','tp-st','err','检测失败'); }
+}
+
+function renderTp(j){
+  const box = document.getElementById('tp-list');
+  const rows = j.lots || [];
+  const modeHint = j.mode === 'keep_cost'
+    ? '卖出「利润」= 涨幅×成本，剩余 = 成本继续在场'
+    : '卖出「成本」= 成本，剩余 = 利润免费仓位';
+  if(!rows.length){ box.innerHTML = '<div class="empty" style="padding:10px">该基金暂无定投买入批次</div>'; return; }
+  const nSkip = j.nSkipped || rows.filter(r=>r.status==='skipped').length;
+  const trs = rows.map((l, i) => {
+    const checked = l.status === 'hit' ? ' checked' : '';
+    const badge = l.status === 'hit' ? '<span class="badge b-red">已达线</span>'
+      : (l.status === 'sold' ? '<span class="badge b-green">已止盈</span>'
+      : (l.status === 'skipped' ? '<span class="badge b-mute">不卖出</span>' : '<span class="badge b-mute">未达线</span>'));
+    const sell = l.status === 'hit' ? `<b style="color:var(--danger)">${fmtTpAmt(l.sellAmount)}</b>` : '—';
+    const soldInfo = (l.status === 'sold' && l.soldInfo)
+      ? `<div class="hint">${l.soldInfo.soldDate||''} 已卖 ${fmtTpAmt(l.soldInfo.soldAmount)}（${l.soldInfo.mode === 'keep_cost' ? '卖利润' : '卖成本'}）</div>`
+      : ((l.status === 'skipped' && l.soldInfo)
+        ? `<div class="hint">${l.soldInfo.skipDate||''} 已标记不卖</div>` : '');
+    return `<tr>
+      <td>${l.status === 'hit' ? `<input type="checkbox" value="${l.key}"${checked}>` : ''}</td>
+      <td class="mono">${l.date}</td>
+      <td style="text-align:right" class="mono">${fmtYuanFull(l.amount)}</td>
+      <td class="mono" style="text-align:right">${l.costNav}</td>
+      <td class="mono" style="text-align:right">${l.navNow}</td>
+      <td class="mono" style="text-align:right;${l.gain >= j.threshold ? 'color:var(--danger);font-weight:bold' : ''}">${l.gain.toFixed(2)}%</td>
+      <td>${badge}</td>
+      <td style="text-align:right">${sell}${soldInfo}</td>
+    </tr>`;
+  }).join('');
+  box.innerHTML = `<div class="table-wrap" style="border:none;border-radius:0;padding:0">
+    <table><thead><tr><th style="width:26px"></th><th>扣款日</th><th style="text-align:right">定投金额(成本)</th><th>买入复权净值</th><th>当前复权净值</th><th>涨幅</th><th>状态</th><th>建议卖出</th></tr></thead>
+    <tbody>${trs}</tbody></table>
+  </div><div class="hint" style="margin-top:4px">净值截至 ${j.navDate} · ${modeHint}</div>`;
+  const sum = document.getElementById('tp-summary');
+  const nPend = j.n - j.nHit - j.nSold - nSkip;
+  sum.innerHTML = `共 <b>${j.n}</b> 笔定投批次：<b style="color:var(--danger)">已达线 ${j.nHit} 笔</b>（建议卖出合计
+    <b style="color:var(--danger)">${fmtTpAmt(j.hitTotal)}</b>）· 已止盈 <b>${j.nSold}</b> 笔 · 不卖出 <b>${nSkip}</b> 笔 · 未达线 <b>${nPend}</b> 笔`;
+  const act = document.getElementById('tp-actions');
+  if(j.nHit > 0) act.classList.remove('hide'); else act.classList.add('hide');
+  setStatus('tp-dot','tp-st', j.nHit > 0 ? 'busy' : 'ok', j.nHit > 0 ? `今日有 ${j.nHit} 笔达到 ${j.threshold}% 止盈线` : '今日无批次达到止盈线');
+}
+
+async function tpExecute(){
+  if(!TP_PREVIEW) return;
+  const checked = Array.from(document.querySelectorAll('#tp-list input[type=checkbox]:checked')).map(x => x.value);
+  if(!checked.length){ alert('请勾选要止盈卖出的批次'); return; }
+  const body = {code: TP_PREVIEW.code, threshold: TP_PREVIEW.threshold, mode: TP_PREVIEW.mode, lotKeys: checked};
+  setStatus('tp-dot','tp-st','busy','卖出记录中...');
+  try{
+    const r = await (await fetch('/api/dca_tp/execute', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})).json();
+    if(r.ok){
+      if(r.dca_state){
+        DCA_STATE.take_profit = Object.assign({}, r.dca_state.take_profit||{}, DCA_STATE.take_profit);
+      }
+      await updateLedger();
+      setStatus('tp-dot','tp-st','ok', r.message || `已记录卖出 ${r.added} 笔`);
+      tpDetect();
+    } else {
+      alert(r.message || '执行失败');
+      setStatus('tp-dot','tp-st','err', r.message || '执行失败');
+    }
+  }catch(e){ setStatus('tp-dot','tp-st','err','执行失败'); }
+}
+async function tpSkip(){
+  if(!TP_PREVIEW) return;
+  const checked = Array.from(document.querySelectorAll('#tp-list input[type=checkbox]:checked')).map(x => x.value);
+  if(!checked.length){ alert('请勾选要标记为不卖出的批次'); return; }
+  const body = {code: TP_PREVIEW.code, threshold: TP_PREVIEW.threshold, mode: TP_PREVIEW.mode, lotKeys: checked};
+  setStatus('tp-dot','tp-st','busy','标记不卖出...');
+  try{
+    const r = await (await fetch('/api/dca_tp/skip', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})).json();
+    if(r.ok){
+      if(r.dca_state){
+        DCA_STATE.take_profit = Object.assign({}, r.dca_state.take_profit||{}, DCA_STATE.take_profit);
+      }
+      await updateLedger();
+      setStatus('tp-dot','tp-st','ok', r.message || `已标记 ${r.added} 笔不卖出`);
+      tpDetect();
+    } else {
+      alert(r.message || '标记失败');
+      setStatus('tp-dot','tp-st','err', r.message || '标记失败');
+    }
+  }catch(e){ setStatus('tp-dot','tp-st','err','标记失败'); }
+}
+
+function fmtFeePct(rate){
+  const n=Number(rate);
+  if(!Number.isFinite(n)) return '';
+  return (n*100).toFixed(4).replace(/0+$/,'').replace(/\.$/,'');
+}
+function parseFeePctText(s){
+  const t=String(s==null?'':s).trim().replace(/%/g,'').replace(/％/g,'');
+  if(t==='') return null;
+  const v=Number(t);
+  if(!Number.isFinite(v)||v<0||v>10) return null;
+  return v/100;
+}
+function parseFeeSettingsBlock(text){
+  const out={default_rate:null, overrides:{}};
+  const lines=String(text).split(/[\r\n]+/).map(l=>l.trim());
+  let mode=false;
+  for(const line of lines){
+    if(/^#\s*买入费率/.test(line) || /^(类型)[,，\s]+代码/.test(line)){
+      mode=true;
+      if(/^(类型)/.test(line)) continue;
+      continue;
+    }
+    if(/^#/.test(line)){ mode=false; continue; }
+    if(!mode || !line) continue;
+    const parts=line.split(/[,，]/).map(x=>x.trim());
+    const kind=parts[0]||'', rawCode=parts[1]||'', rate=parseFeePctText(parts[2]);
+    if(rate==null) continue;
+    if(/默认|default/i.test(kind)) out.default_rate=rate;
+    else {
+      const code=String(rawCode).replace(/\D/g,'').padStart(6,'0');
+      if(/^\d{6}$/.test(code) && code!=='000000') out.overrides[code]=rate;
+    }
+  }
+  return out;
+}
+function countImportedFees(fees){
+  if(!fees) return 0;
+  return (fees.default_rate!=null?1:0)+Object.keys(fees.overrides||{}).length;
+}
+function ledExport(){
+  const hasFees=!!(FEE_SETTINGS && (FEE_SETTINGS.default_rate!=null || Object.keys(FEE_SETTINGS.overrides||{}).length));
+  if(!LEDGER_TXNS.length && !hasFees){ setStatus('led-dot','led-st','err','台账为空，无可导出'); return; }
+  const esc=v=>{const s=String(v==null?'':v); return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s};
+  const rows=[['日期','方向','代码','金额','备注']];
+  for(const t of LEDGER_TXNS) rows.push([t.date, t.side==='buy'?(t.isDca?'定投买入':'买入'):'卖出', t.code, t.amount, esc(t.note||'')]);
+  const stRows=[['代码','定投状态','最后扣款日','终止日']];
+  const markCodes=new Set([...Object.keys(DCA_STATE.terminated||{}), ...Object.keys(DCA_STATE.ignored||{})]);
+  for(const code of [...markCodes].sort()){
+    const term=DCA_STATE.terminated[code], ign=DCA_STATE.ignored[code];
+    if(term) stRows.push([code,'已终止', term.lastDate||'', term.terminatedDate||'']);
+    else if(ign) stRows.push([code,'已忽略', ign.lastDate||'', '']);
+  }
+  let csv=rows.map(r=>r.join(',')).join('\n');
+  if(stRows.length>1){
+    csv += '\n\n#定投状态（导入时自动恢复，标记过的基金不再询问是否还在定投）\n'+stRows.map(r=>r.join(',')).join('\n');
+  }
+  const tpRows=[['代码','批次键','扣款日','金额','止盈决定','决定日','卖出金额']];
+  const tpAll=DCA_STATE.take_profit||{};
+  for(const code of Object.keys(tpAll).sort()){
+    const lots=(tpAll[code]&&tpAll[code].lots)||{};
+    for(const key of Object.keys(lots).sort()){
+      const rec=lots[key]||{};
+      const parts=String(key).split('|');
+      const lotDate=parts[0]||'';
+      const lotAmt=parts[1]||'';
+      const isSkip = rec.action==='skip' || rec.skipped;
+      tpRows.push([code, key, lotDate, lotAmt, isSkip?'不卖出':'已卖出', rec.skipDate||rec.soldDate||'', rec.soldAmount==null?'':rec.soldAmount]);
+    }
+  }
+  if(tpRows.length>1){
+    csv += '\n\n#定投止盈（导入时恢复：已卖出 / 不卖出，不再重复提示）\n'+tpRows.map(r=>r.join(',')).join('\n');
+  }
+  const feeRows=[['类型','代码','费率%']];
+  if(FEE_SETTINGS && FEE_SETTINGS.default_rate!=null) feeRows.push(['默认','',fmtFeePct(FEE_SETTINGS.default_rate)]);
+  for(const [code,rate] of Object.entries((FEE_SETTINGS&&FEE_SETTINGS.overrides)||{}).sort(([a],[b])=>a.localeCompare(b))){
+    feeRows.push(['覆盖', code, fmtFeePct(rate)]);
+  }
+  if(feeRows.length>1){
+    csv += '\n\n#买入费率（导入时自动恢复，不必重新填写）\n'+feeRows.map(r=>r.join(',')).join('\n');
+  }
+  const b=new Blob(["\uFEFF"+csv],{type:'text/csv'});
+  const a=document.createElement('a'); a.href=URL.createObjectURL(b);
+  a.download='ledger_'+new Date().toISOString().slice(0,10)+'.csv'; a.click();
+  const nMark=stRows.length-1, nTp=tpRows.length-1, nFee=feeRows.length-1;
+  setStatus('led-dot','led-st','ok',`已导出 ${LEDGER_TXNS.length} 条流水`+(nMark?` + ${nMark} 条定投终止/忽略`:'')+(nTp?` + ${nTp} 条止盈决定`:'')+(nFee?` + ${nFee} 条费率设置`:'')+'（CSV，可用 Excel 打开）');
+}
+function parseDcaStateBlock(text){
+  const out={terminated:{}, ignored:{}, take_profit:{}};
+  const lines=String(text).split(/[\r\n]+/).map(l=>l.trim());
+  let mode='';
+  for(const line of lines){
+    if(/^#\s*定投状态/.test(line) || /^(代码)[,，\s]+定投状态/.test(line)){ mode='dca'; if(/^(代码)/.test(line)) continue; continue; }
+    if(/^#\s*定投止盈/.test(line) || /^(代码)[,，\s]+批次/.test(line)){ mode='tp'; if(/^(代码)/.test(line)) continue; continue; }
+    if(!mode || !line) continue;
+    if(line[0]==='#' ){ mode=''; continue; }
+    const parts=line.split(/[,，]/).map(x=>x.trim());
+    const code=(parts[0]||'').replace(/\D/g,'').padStart(6,'0');
+    if(!/^\d{6}$/.test(code) || parts.length<2) continue;
+    if(mode==='dca'){
+      const st=parts[1]||'', last=parts[2]||'', term=parts[3]||'';
+      if(/终止/.test(st)) out.terminated[code]={lastDate: last||term, terminatedDate: term||last||undefined};
+      else if(/忽略/.test(st)) out.ignored[code]={lastDate: last||term};
+    } else if(mode==='tp'){
+      const key=parts[1]||'';
+      if(!key || key.indexOf('|')<0) continue;
+      const decision=parts[4]||'', decDate=parts[5]||'', soldAmt=parts[6]||'';
+      const entry=out.take_profit[code] || {plan:{threshold:20, mode:'keep_cost'}, lots:{}};
+      if(/不卖/.test(decision)){
+        entry.lots[key]={action:'skip', skipDate: decDate||undefined};
+      } else if(/卖/.test(decision)){
+        const rec={action:'sold', soldDate: decDate||undefined};
+        const a=parseYuan(soldAmt);
+        if(a>0) rec.soldAmount=a;
+        entry.lots[key]=rec;
+      } else continue;
+      out.take_profit[code]=entry;
+    }
+  }
+  return out;
+}
+function parseLedgerFile(text){
+  const out=[];
+  const isSide=s=>/^(买|买入|定投|定投买入|buy|b|dca|卖|卖出|sell|s)$/i.test(String(s).trim());
+  const isDate=s=>/^\d{4}[-/.]\d{1,2}[-/.]\d{1,2}$/.test(String(s).trim())||/^\d{8}$/.test(String(s).trim());
+  const lines=String(text).split(/[\r\n]+/).map(l=>l.trim()).filter(Boolean);
+  for(const line of lines){
+    if(/^#/.test(line)) continue;
+    if(/^(日期|date)[,\s]/.test(line.toLowerCase())) continue;
+    if(/^(代码)[,，\s]+定投状态/.test(line)) continue;
+    if(/^(代码)[,，\s]+批次/.test(line)) continue;
+    if(/^(类型)[,，\s]+代码/.test(line)) continue;
+    let parts=line.split(',').map(x=>x.trim()).filter(Boolean);
+    if(parts.length<4) parts=line.split(/[\s，;；]+/).filter(Boolean);
+    if(parts.length<4) continue;
+    let date,side,code,amount;
+    if(isDate(parts[0])&&isSide(parts[1])&&/^\d{6}$/.test(parts[2].replace(/\D/g,''))){
+      date=parts[0]; side=parts[1]; code=parts[2].replace(/\D/g,'').padStart(6,'0'); amount=parts[3];
+    } else if(/^\d{6}$/.test(parts[0].replace(/\D/g,''))&&isSide(parts[1])&&isDate(parts[2])){
+      code=parts[0].replace(/\D/g,'').padStart(6,'0'); side=parts[1]; date=parts[2]; amount=parts[3];
+    } else continue;
+    const a=parseYuan(amount);
+    if(!/^\d{6}$/.test(code)||!isDate(date)||!a||a<=0) continue;
+    const isSell = /^(卖|卖出|sell|s)$/i.test(side);
+    const isDca = /^(定投|定投买入|dca)$/i.test(side);
+    const txn = {code, side: isSell ? 'sell' : 'buy', date:normLedDate(date), amount:a};
+    if (isDca) txn.isDca = true;
+    out.push(txn);
+  }
+  return {txns:out, dcaState:parseDcaStateBlock(text), feeSettings:parseFeeSettingsBlock(text)};
+}
+async function applyImportedDcaState(st){
+  if(!st) return 0;
+  const term=st.terminated||{}, ign=st.ignored||{}, tp=st.take_profit||{};
+  let n=Object.keys(term).length+Object.keys(ign).length;
+  DCA_STATE.terminated = Object.assign({}, DCA_STATE.terminated, term);
+  DCA_STATE.ignored = Object.assign({}, DCA_STATE.ignored, ign);
+  for(const code of Object.keys(tp)){
+    const entry=tp[code]||{};
+    const cur=DCA_STATE.take_profit[code]||{plan:{threshold:20,mode:'keep_cost'}, lots:{}};
+    const lots=Object.assign({}, cur.lots||{}, entry.lots||{});
+    DCA_STATE.take_profit[code]={plan: entry.plan||cur.plan||{threshold:20,mode:'keep_cost'}, lots};
+    n += Object.keys(entry.lots||{}).length;
+  }
+  if(!n) return 0;
+  await saveDcaState();
+  return n;
+}
+async function applyImportedFeeSettings(fees){
+  if(!fees) return 0;
+  let n=0;
+  if(fees.default_rate!=null){
+    const r=Number(fees.default_rate);
+    if(Number.isFinite(r)&&r>=0&&r<=0.1){ FEE_SETTINGS.default_rate=r; n++; }
+  }
+  const ov=fees.overrides||{};
+  for(const [code0, rate0] of Object.entries(ov)){
+    const code=String(code0).replace(/\D/g,'').padStart(6,'0');
+    const rate=Number(rate0);
+    if(!/^\d{6}$/.test(code)||code==='000000') continue;
+    if(!Number.isFinite(rate)||rate<0||rate>0.1) continue;
+    FEE_SETTINGS.overrides[code]=rate;
+    n++;
+  }
+  if(!n) return 0;
+  try{
+    const j=await (await fetch('/api/fee_settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(FEE_SETTINGS)})).json();
+    if(!j.ok) return 0;
+    renderFeeSettings(j);
+    return n;
+  }catch(e){ return 0; }
+}
+async function ledImportFile(){
+  const inp=document.getElementById('led-file');
+  const f=inp.files&&inp.files[0];
+  if(!f) return;
+  let text, parsed=[], importedState=null, importedFees=null;
+  try{ text=await f.text(); }catch(e){ setStatus('led-dot','led-st','err','文件读取失败'); inp.value=''; return; }
+  if(/\.json$/i.test(f.name)){
+    try{
+      const data=JSON.parse(text);
+      const arr=Array.isArray(data)?data:(data.txns||[]);
+      parsed=arr.filter(t=>t&&t.code&&t.date&&t.amount).map(t=>{
+        const isSell = /^(卖|卖出|sell|s)$/i.test(t.side||'buy');
+        const isDca = /^(定投|定投买入|dca)$/i.test(t.side||'');
+        const txn = {code:String(t.code).replace(/\D/g,'').padStart(6,'0'), side:isSell?'sell':'buy', date:normLedDate(t.date), amount:parseYuan(t.amount)};
+        if(isDca || t.isDca) txn.isDca = true;
+        return txn;
+      }).filter(x=>/^\d{6}$/.test(x.code)&&x.amount>0);
+      importedState = data.dca_state || {terminated:data.terminated||{}, ignored:data.ignored||{}};
+      importedFees = data.fee_settings || data.fees || null;
+    }catch(e){ setStatus('led-dot','led-st','err','JSON 解析失败'); inp.value=''; return; }
+  } else {
+    const pack=parseLedgerFile(text);
+    parsed=pack.txns; importedState=pack.dcaState; importedFees=pack.feeSettings;
+  }
+  const nFeeIn=countImportedFees(importedFees);
+  const nDcaIn=importedState?Object.keys(importedState.terminated||{}).length+Object.keys(importedState.ignored||{}).length+Object.keys(importedState.take_profit||{}).length:0;
+  if(!parsed.length && !nFeeIn && !nDcaIn){ setStatus('led-dot','led-st','err','未解析到有效记录（CSV: 日期,方向,代码,金额；也可只含买入费率）'); inp.value=''; return; }
+  let added=0;
+  if(parsed.length){
+    const txns=LEDGER_TXNS.slice();
+    const seen=new Set(txns.map(t=>t.code+'|'+t.date+'|'+t.side+'|'+t.amount));
+    for(const r of parsed){
+      const k=r.code+'|'+r.date+'|'+r.side+'|'+r.amount;
+      if(seen.has(k)) continue;
+      seen.add(k); txns.push(r); added++;
+    }
+    const j=await (await fetch('/api/ledger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({txns})})).json();
+    if(!j.ok){ setStatus('led-dot','led-st','err',j.message||'导入失败'); inp.value=''; return; }
+  }
+  const nMark=await applyImportedDcaState(importedState);
+  const nFee=await applyImportedFeeSettings(importedFees);
+  await updateLedger();
+  const bits=[];
+  if(parsed.length) bits.push(`已导入 ${added} 条（共解析 ${parsed.length} 条，跳过重复 ${parsed.length-added} 条）`);
+  if(nMark) bits.push(`恢复 ${nMark} 条定投终止/忽略/止盈`);
+  if(nFee) bits.push(`恢复 ${nFee} 条买入费率`);
+  if(!bits.length) bits.push('文件已读，无新增内容');
+  setStatus('led-dot','led-st','ok',bits.join('，')+(parsed.length&&!nMark&&!nFee?'。旧 CSV 不含标记/费率的话请重新点一次「导出台账」':''));
+  inp.value='';
+}
+async function ledRecord(code, side, amount, note){
+  const amt=parseYuan(amount);
+  if(!amt||amt<=0){ setStatus('led-dot','led-st','err','金额无效'); return; }
+  const d=new Date(), date=`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+  const txns=LEDGER_TXNS.slice();
+  txns.push({code, side, date, amount:amt, note:note||(side==='buy'?'诊断导入':'诊断导出')});
+  const j=await (await fetch('/api/ledger',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({txns})})).json();
+  if(j.ok){ await updateLedger(); setStatus('led-dot','led-st','ok',`已记入台账：${code} ${side==='buy'?'买入':'卖出'} ${fmtYuan(amt)}（日期 ${date}）`); }
+  else setStatus('led-dot','led-st','err',j.message||'写入失败');
+}
+async function ledRecordBuy(code){
+  const inp=document.getElementById('led-buy-'+code);
+  await ledRecord(code,'buy',inp?inp.value:null,'诊断买入');
+}
+async function ledRecordSell(code){
+  const inp=document.getElementById('led-sell-'+code);
+  await ledRecord(code,'sell',inp?inp.value:null,'诊断卖出');
+}
+function ledgerStats(txns){
+  let buy=0,dca=0,sell=0,nBuy=0,nDca=0,nSell=0;
+  for(const t of txns){
+    const a=Number(t.amount)||0;
+    if(t.side==='sell'){ sell+=a; nSell++; }
+    else if(t.isDca){ dca+=a; nDca++; }
+    else { buy+=a; nBuy++; }
+  }
+  return {buy,dca,sell,nBuy,nDca,nSell,n:txns.length,net:buy+dca-sell};
+}
+function setLedgerView(code){
+  LEDGER_VIEW_CODE=code||'';
+  if(LEDGER_VIEW_CODE){
+    const inp=document.getElementById('led-code');
+    if(inp) inp.value=LEDGER_VIEW_CODE;
+  }
+  if(window._lastLedger) renderLedger(window._lastLedger);
+}
+function renderLedger(j){
+  window._lastLedger=j;
+  const txns=j.txns||[], funds=j.funds||[];
+  const box=document.getElementById('led-out');
+  if(!box) return;
+  if(!txns.length&&!funds.length){ box.innerHTML='<div class="empty" style="padding:16px;margin-top:10px">暂无持仓记录 — 在上方填写 代码 / 方向 / 日期 / 金额 添加买入（日期与金额支持多行一一对应），或点「定投导入」批量生成，即可生成方案。</div>'; return; }
+  const names={};
+  for(const f of funds) names[f.code]=f.name||f.code;
+  const codes=[...new Set(txns.map(t=>t.code).concat(funds.map(f=>f.code)))].filter(Boolean).sort();
+  if(LEDGER_VIEW_CODE && !codes.includes(LEDGER_VIEW_CODE)) LEDGER_VIEW_CODE='';
+  const viewCode=LEDGER_VIEW_CODE;
+  const viewTxns=(viewCode?txns.filter(t=>t.code===viewCode):txns.slice()).sort((a,b)=>a.date<b.date?1:a.date>b.date?-1:0);
+  const stt=ledgerStats(viewTxns);
+  const optHtml='<option value="">全部基金（'+codes.length+' 只）</option>'+codes.map(c=>'<option value="'+safeFundCode(c)+'"'+(c===viewCode?' selected':'')+'>'+safeFundCode(c)+' '+escHtml(names[c]&&names[c]!==c?names[c]:'')+'</option>').join('');
+  const title=viewCode?(safeFundCode(viewCode)+' '+escHtml(names[viewCode]&&names[viewCode]!==viewCode?names[viewCode]:'')+' · '+viewTxns.length+' 笔'):('全部流水 · '+viewTxns.length+' 笔');
+  const tRows=viewTxns.map(t=>`<tr><td class="mono">${escHtml(t.date)}</td><td>${t.side==='buy'?(t.isDca?'<span class="badge b-blue">定投买入</span>':'<span class="badge b-green">主动买入</span>'):'<span class="badge b-red">卖出</span>'}</td><td class="mono">${safeFundCode(t.code)}</td><td style="text-align:right">${fmtYuanFull(t.amount)}</td><td><button class="btn btn-ghost" style="padding:2px 8px;font-size:11px" onclick="ledDel('${escHtml(t.id)}')">删</button></td></tr>`).join('');
+  const fRows=funds.map(f=>{
+    const st=f.state||{};
+    const on=viewCode===f.code?' led-on':'';
+    const click=`class="led-click${on}" onclick="setLedgerView('${f.code}')" title="查看该基金全部买卖记录"`;
+    if(st.flat) return `<tr ${click}><td class="mono">${safeFundCode(f.code)}</td><td class="name">${escHtml(f.name)}</td><td class="mono faint" colspan="5">已全部卖出</td><td class="mono faint">—</td><td><span class="badge b-mute">已清仓</span></td></tr>`;
+    const dd=st.dd==null?'—':fmtPct(st.dd);
+    const fundDd=st.dd_fund==null?'—':fmtPct(st.dd_fund);
+    const col=st.status==='triggered'?'var(--danger)':(st.status==='near'?'var(--warn)':'var(--muted)');
+    const fundCol=st.dd_fund==null?'var(--faint)':(st.dd_fund<=-0.20?'var(--danger)':(st.dd_fund<=-0.10?'var(--warn)':'var(--muted)'));
+    const holdTip=`持仓回撤：本轮开仓以来最高净值 ${st.peak??'—'}（${st.peak_date||'—'}）→ 当前；20%止损看这一列`;
+    const fundTip=`整只基金相对历史最高净值 ${st.peak_fund??'—'}（${st.peak_fund_date||'—'}）的当前回撤；与是否持有无关，不触发止损`;
+    const stBadge=st.status==='triggered'?'<span class="badge b-red">止损清仓</span>':(st.status==='near'?'<span class="badge b-amber">接近止损</span>':'<span class="badge b-green">正常</span>');
+    const over=st.over_sell?' <span class="badge b-amber" title="卖出金额超过持有份额，请核对记录">超额卖出</span>':'';
+    const exp=j.nav_expected; const stale=st.nav_asof&&exp&&st.nav_asof<exp; const feeSrc={override:'单基设置',auto:'自动',default:'默认'}[st.buy_fee_source]||''; const feeTxt=st.buy_fee!=null?`费 ${(st.buy_fee*100).toFixed(2)}%${feeSrc?'（'+feeSrc+'）':''}`:`费 —`; const asof=st.nav_asof?(stale?`净值停在 ${st.nav_asof}`:`净值 ${st.nav_asof}`):''; const pend=st.pending_buy>0?` · 在途 ${fmtYuanFull(st.pending_buy)}`:'';
+    return `<tr ${click}><td class="mono">${safeFundCode(f.code)}</td><td class="name">${escHtml(f.name)}<div class="hint">${feeTxt}${asof?' · '+escHtml(asof):''}${pend}</div></td><td class="mono" style="text-align:center">${st.lots_n??'—'}</td><td style="text-align:right" class="mono">${fmtYuanFull(st.mv_now)}</td><td style="text-align:right" class="mono">${fmtYuanFull(st.basis)}</td><td style="text-align:right" class="mono">${fmtPct(st.ret_held)}</td><td class="mono" style="text-align:right;color:${col}" title="${escHtml(holdTip)}">${dd}</td><td class="mono" style="text-align:right;color:${fundCol}" title="${escHtml(fundTip)}">${fundDd}</td><td>${stBadge}${over}</td></tr>`;
+  }).join('');
+  let mv=0,basis=0;
+  for(const f of funds){ const st=f.state||{}; if(!st.flat){ mv+=(st.mv_now||0); basis+=(st.basis||0); } }
+  const ret=basis>0?fmtPct(mv/basis-1):'—';
+  const emptyTx=viewTxns.length?'':`<tr><td colspan="5" class="faint" style="text-align:center">该基金暂无流水</td></tr>`;
+  box.innerHTML=`<div class="led-filter">
+      <div class="field"><label>查看基金流水</label>
+        <select id="led-view-code" onchange="setLedgerView(this.value)">${optHtml}</select></div>
+      <div style="padding-bottom:8px">
+        ${viewCode?`<button class="btn btn-ghost" style="padding:6px 10px;font-size:12px" onclick="setLedgerView('')">看全部</button>`:''}
+      </div>
+      <span class="hint" style="padding-bottom:10px">点右侧持仓行也可只看该基金；下拉选「全部基金」回到合账</span>
+    </div>
+    <div class="led-stats">
+      <div class="kpi"><label>主动买入</label><b>${fmtYuanFull(stt.buy)}</b><small>${stt.nBuy} 笔</small></div>
+      <div class="kpi"><label>定投买入</label><b>${fmtYuanFull(stt.dca)}</b><small>${stt.nDca} 笔</small></div>
+      <div class="kpi"><label>卖出</label><b>${fmtYuanFull(stt.sell)}</b><small>${stt.nSell} 笔</small></div>
+      <div class="kpi"><label>净投入</label><b>${fmtYuanFull(stt.net)}</b><small>${title}</small></div>
+    </div>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:12px">
+    <div style="flex:1 1 360px;min-width:280px"><div class="table-wrap" style="border:none;border-radius:0;padding:0">
+      <table><thead><tr><th>日期</th><th>方向</th><th>代码</th><th>金额</th><th></th></tr></thead><tbody>${tRows||emptyTx}</tbody></table>
+    </div></div>
+    <div style="flex:1.4 1 480px;min-width:320px"><div class="table-wrap" style="border:none;border-radius:0;padding:0">
+      <table><thead><tr><th>代码</th><th>名称</th><th>笔数</th><th>持有金额</th><th>剩余成本</th><th>持有收益</th><th title="本轮开仓以来最高净值→当前；20%止损看这一列">持仓回撤</th><th title="整只基金历史最高净值→当前；只展示，不触发止损">基金高点回撤</th><th>状态</th></tr></thead>
+      <tbody>${fRows}<tr style="border-top:2px solid var(--line);font-weight:600"><td colspan="3">合计</td><td class="mono" style="text-align:right">${fmtYuan2(mv)}</td><td class="mono" style="text-align:right">${fmtYuan2(basis)}</td><td class="mono" style="text-align:right">${ret}</td><td colspan="3"></td></tr></tbody></table>
+    </div></div>
+  </div>
+  <div class="hint" style="margin-top:8px">持有金额=已确认份额×最新单位净值 + 在途申购（对齐支付宝「持有金额」）。<b>持仓回撤</b>=本轮开仓以来最高净值→当前（20%止损只看这一列）；<b>基金高点回撤</b>=整只基金历史最高净值→当前（只展示）。QDII 在确认净值尚未公布前不会按最新净值折份额。净值落后时点「刷新净值」。止盈确认卖出后再删流水会把仓位加回。</div>`;
+}
+
+function rbSave(){localStorage.setItem('rb_data',JSON.stringify({total:document.getElementById('rb-total').value,cash:document.getElementById('rb-cash').value})); setStatus('rb-dot','rb-st','ok','已记忆')}
+function rbLoad(){try{const d=JSON.parse(localStorage.getItem('rb_data')||'null'); if(!d) return; document.getElementById('rb-total').value=d.total||'';document.getElementById('rb-cash').value=d.cash||'';}catch(e){}}
+async function runRebalance(){
+  const total=parseYuan(document.getElementById('rb-total').value), cash=parseYuan(document.getElementById('rb-cash').value);
+  if(!LEDGER_TXNS.length&&!total&&!cash){ setStatus('rb-dot','rb-st','err','台账为空且未填现金：请添加买入记录或填写可用现金'); return; }
+  document.getElementById('rb-btn').disabled=true; setStatus('rb-dot','rb-st','busy','计算中…');
+  document.getElementById('rb-out').innerHTML='<div class="empty">计算中…</div>';
+  try{
+    const r=await fetch('/api/rebalance',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({total_capital:total||0,cash:cash||0,holdings:[]})});
+    const j=await r.json(); if(!j.ok){setStatus('rb-dot','rb-st','err',j.message); document.getElementById('rb-out').innerHTML=`<div class="empty" style="color:var(--danger)">${escHtml(j.message)}</div>`; return}
+    setStatus('rb-dot','rb-st','ok',`完成 · 参照 ${j.ref_stamp||'—'}`); renderRebalance(j);
+    updateLedger();   // 台账市值可能因锚定微调，刷新汇总
+  }catch(e){const msg=e.name==='AbortError'?'请求超时（180秒），建议减少持仓只数后重试':(e.message||'网络错误'); setStatus('rb-dot','rb-st','err',msg); document.getElementById('rb-out').innerHTML=`<div class="empty" style="color:var(--danger);border-color:#fecdd3;background:var(--danger-soft)">请求失败：${escHtml(msg)}<br><span style="color:var(--muted)">单基可用说明服务正常；持仓批量对并发更敏感，建议分2批（每次≤3只）或稍后重试。已自动降并发至2线程。</span><br><button class="btn btn-ghost" style="margin-top:8px;padding:6px 12px;font-size:12px" onclick="runRebalance()">重试</button></div>`}finally{document.getElementById('rb-btn').disabled=false}
+}
+function fmtPct(v,d=1){if(v==null||isNaN(v))return '—';return (v*100).toFixed(d)+'%'}
+function stopBadge(st){
+  if(!st) return '<span class="badge b-mute">—</span>';
+  if(st.status==='triggered') return '<span class="badge b-red">止损清仓</span>';
+  if(st.status==='near') return '<span class="badge b-amber">接近止损</span>';
+  if(st.status==='ok') return '<span class="badge b-green">正常</span>';
+  return '<span class="badge b-mute">需日期</span>';
+}
+function fundDdCell(st){
+  const dd=st&&st.dd_fund;
+  const txt=dd==null?'—':fmtPct(dd);
+  const col=dd==null?'var(--faint)':(dd<=-0.20?'var(--danger)':(dd<=-0.10?'var(--warn)':'var(--muted)'));
+  const tip=`整只基金相对历史最高净值 ${st&&st.peak_fund!=null?st.peak_fund:'—'}（${(st&&st.peak_fund_date)||'—'}）的当前回撤；与是否持有无关，不触发20%止损`;
+  return `<td class="mono" style="color:${col}" title="${escHtml(tip)}">${txt}</td>`;
+}
+function stopCell(h){
+  const st=h.stop||{};
+  const fund=fundDdCell(st);
+  if(!st.computable) return `<td class="mono faint">—</td><td class="mono faint">—</td>${fund}<td><span class="badge b-mute">${st.status==='need_entry'?'需日期/收益率':'—'}</span></td>`;
+  const dd=st.dd==null?'—':fmtPct(st.dd);
+  const col=st.status==='triggered'?'var(--danger)':(st.status==='near'?'var(--warn)':'var(--muted)');
+  const tip=`持仓回撤：入场 ${st.entry_date||'?'}${st.inferred?'（收益率推断）':''} · 本轮高点 ${st.peak}（${st.peak_date}）· 20%触发价 ${st.trigger_nav} · 真实持有收益 ${fmtPct(st.ret_held)}${st.infer_ambiguous?' · ≈疑似多笔/定投买入：入场日与回撤为近似值，建议在操作台账记录每笔买卖后重新诊断':''}`;
+  const mark=st.infer_ambiguous?' ≈':(st.inferred?'*':'');
+  return `<td class="mono" style="color:${st.infer_ambiguous?'var(--warn)':'var(--muted)'}" title="${escHtml(tip)}">${st.entry_date||'—'}${mark}</td><td class="mono" style="color:${col};font-weight:600" title="${escHtml(tip)}">${dd}</td>${fund}<td title="${escHtml(tip)}">${stopBadge(st)}</td>`;
+}
+function cppiPanelHtml(cp,s){
+  if(!cp || !cp.computable) return '';
+  const tier=cp.slots===0?'var(--danger)':(cp.slots<=3?'#ea580c':(cp.slots<=6?'#d97706':'var(--success)'));
+  const tierName=cp.tier_name||(cp.slots+' 槽');
+  const restore=cp.restore?`<div style="margin-top:8px;font:12px var(--sans);color:var(--muted);line-height:1.75">
+    <b style="color:var(--success)">↗ 回补提示：</b>组合值回升至 <b class="mono">${fmtYuanFull(cp.restore.value)}</b>（回撤收窄至 ${fmtPct(cp.restore.dd)} 线）→ 恢复 <b>${cp.restore.slots} 槽</b>。
+    ${cp.restore.last_on?`<span style="color:var(--faint)">上次站上该线：${cp.restore.last_on}。</span>`:''}</div>`:'';
+  const next=cp.next_trigger?`<div style="margin-top:6px;font:12px var(--sans);color:var(--muted);line-height:1.75">
+    <b style="color:var(--warn)">↘ 下一减仓线：</b>再跌至 <b class="mono">${fmtYuanFull(cp.next_trigger.value)}</b>（-${Math.abs(cp.next_trigger.dd*100).toFixed(0)}%）→ 降为 <b>${cp.next_trigger.slots===0?'清仓':cp.next_trigger.slots+' 槽'}</b></div>`:'';
+  const evs=(cp.events||[]).slice(-4).map(e=>{
+    const lbl=e.kind==='trigger'?'触发':(e.kind==='restore'?'回补':'新高');
+    const col=e.kind==='trigger'?'var(--warn)':(e.kind==='restore'?'var(--success)':'var(--muted)');
+    return `<div style="font:11px var(--mono);color:${col}">${e.date} ${lbl}${e.dd!=null?' '+fmtPct(e.dd,0)+'线':''} → ${e.slots===0?'清仓':e.slots+'槽'}</div>`;
+  }).join('');
+  return `<div class="panel" style="margin-top:14px;padding:14px">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      <b>组合 CPPI 动态槽位</b>
+      <span class="badge" style="background:${tier}1a;color:${tier};border-color:${tier}66">${tierName} · ${cp.slots} 槽</span>
+      <span class="hint">规则：回撤≤-15%→6槽 / ≤-20%→3槽 / ≤-25%→清仓；回补带 -13% / -18% / -23%，新高满槽</span>
+    </div>
+    <div style="display:flex;gap:14px;flex-wrap:wrap;margin-top:10px">
+      <div style="flex:1 1 300px;min-width:260px">
+        <svg id="cppi-chart" viewBox="0 0 640 170" style="width:100%;height:auto;display:block;background:var(--surface-2);border:1px solid var(--line);border-radius:8px"></svg>
+        <div class="legend" style="margin-top:6px"><span><em style="background:var(--ink)"></em>组合净值</span><span><em style="background:#a8a29e"></em>HWM ${fmtYuan(cp.hwm)}</span><span><em style="background:#d97706"></em>-15%线</span><span><em style="background:#ea580c"></em>-20%线</span><span><em style="background:#dc2626"></em>-25%线</span></div>
+      </div>
+      <div style="flex:0 0 auto;min-width:250px">
+        <div class="kpis" style="grid-template-columns:repeat(2,minmax(0,1fr))">
+          <div class="kpi"><label>当前组合值</label><b>${fmtYuan(cp.current)}</b><small>含现金 ${fmtYuan(cp.cash)}</small></div>
+          <div class="kpi"><label>自高点回撤</label><b style="color:${cp.dd<=-0.25?'var(--danger)':(cp.dd<=-0.15?'var(--warn)':'var(--ink)')}">${fmtPct(cp.dd)}</b><small>HWM ${fmtYuan(cp.hwm)}</small></div>
+          <div class="kpi"><label>CPPI 档位</label><b style="color:${tier}">${tierName}</b><small>${cp.slots} / ${cp.full_slots} 槽</small></div>
+          <div class="kpi"><label>生效槽位</label><b>${s.slots_eff??cp.slots}</b><small>${s.crisis_active?'危机·禁新开仓':'宏观×CPPI'}</small></div>
+        </div>
+        ${restore}${next}
+        ${evs?`<div style="margin-top:8px;padding-top:8px;border-top:1px dashed var(--line)">${evs}</div>`:''}
+      </div>
+    </div>
+    <div style="margin-top:8px;font:11px var(--sans);color:var(--faint)">曲线 = 当前持仓市值 × 天天基金净值路径重建；台账多笔买卖采用现金流中性口径，加仓不会刷新高点、减仓不会制造回撤（现金按常数）。HWM 随真实净值新高上移。</div>
+  </div>`;
+}
+function drawCppiChart(cp){
+  const el=document.getElementById('cppi-chart');
+  if(!el||!cp||!cp.chart||!cp.chart.value||cp.chart.value.length<2) return;
+  const W=640,H=170,padL=8,padR=8,padT=12,padB=20;
+  const v=cp.chart.value, dates=cp.chart.dates, hwmF=cp.hwm;
+  const lines=[{r:0.85,c:'#d97706'},{r:0.80,c:'#ea580c'},{r:0.75,c:'#dc2626'}];
+  let lo=Math.min.apply(null,v), hi=Math.max.apply(null,v);
+  lines.forEach(l=>{hi=Math.max(hi,hwmF*l.r)});
+  hi=Math.max(hi,hwmF*1.02); lo=Math.min(lo,hwmF*0.72);
+  const X=i=>padL+i*(W-padL-padR)/(v.length-1);
+  const Y=x=>padT+(1-(x-lo)/(hi-lo))*(H-padT-padB);
+  const pt=v.map((x,i)=>X(i).toFixed(1)+','+Y(x).toFixed(1)).join(' ');
+  const area=pt+` ${X(v.length-1).toFixed(1)},${Y(lo).toFixed(1)} ${X(0).toFixed(1)},${Y(lo).toFixed(1)}`;
+  let s=`<polygon points="${area}" fill="rgba(12,10,9,0.07)"></polygon>`;
+  s+=`<polyline points="${pt}" fill="none" stroke="#0c0a09" stroke-width="1.6"></polyline>`;
+  s+=`<line x1="${X(0)}" y1="${Y(hwmF)}" x2="${X(v.length-1)}" y2="${Y(hwmF)}" stroke="#a8a29e" stroke-width="1.2" stroke-dasharray="5 4"></line>`;
+  lines.forEach(l=>{const y=Y(hwmF*l.r); s+=`<line x1="${X(0)}" y1="${y}" x2="${X(v.length-1)}" y2="${y}" stroke="${l.c}" stroke-width="1" stroke-dasharray="2 3" opacity="0.8"></line>`});
+  s+=`<text x="${padL}" y="${H-6}" font-size="9" fill="#a8a29e">${dates[0]}</text>`;
+  s+=`<text x="${W-padR-78}" y="${H-6}" font-size="9" fill="#a8a29e">${dates[dates.length-1]}</text>`;
+  s+=`<text x="${padL}" y="${Y(hwmF)-4}" font-size="9" fill="#a8a29e">HWM ${fmtYuan(hwmF)}</text>`;
+  const last=v[v.length-1];
+  s+=`<circle cx="${X(v.length-1)}" cy="${Y(last)}" r="3" fill="#0c0a09"></circle>`;
+  s+=`<text x="${X(v.length-1)-46}" y="${Y(last)+14}" font-size="9" fill="#0c0a09" font-weight="600">${fmtYuan(last)}</text>`;
+  el.innerHTML=s;
+}
+function renderRebalance(j){
+  const s=j.summary||{}, holdings=j.holdings||[], orders=j.orders||[], alloc=j.allocation||[];
+  const totalCap=s.total_capital||0, perSlot=s.per_slot||0;
+  const cppiHtml=cppiPanelHtml(j.cppi||{}, s);
+  const kpis=`<div class="kpis">
+    <div class="kpi"><label>总资金</label><b>${fmtYuanFull(totalCap)}</b><small>每槽 ${fmtYuanFull(perSlot)}</small></div>
+    <div class="kpi"><label>持仓 / 现金</label><b>${fmtYuan(s.holdings_value_before)}</b><small>/ ${fmtYuan(s.cash_before)}</small></div>
+    <div class="kpi"><label>操作</label><b>${s.num_sells? s.num_sells+' 卖出':'—'}</b><small>保留 ${s.num_keeps||0}</small></div>
+    <div class="kpi"><label>现金余额</label><b>${fmtYuan(s.cash_after)}</b><small>${s.cash_pct_after||0}%</small></div>
+  </div>`;
+  const nErr=holdings.filter(h=>h.is_error).length;
+  const nRetry=holdings.filter(h=>h.is_error && h.retryable!==false).length;
+  const errBanner=nErr? `<div style="margin-top:12px;padding:10px 12px;border:1px solid #fde68a;background:#fffbeb;border-radius:8px;font:12px var(--mono);display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span>${nErr} 只待复核${nRetry? ` · ${nRetry} 只可重试`:``}</span>${nRetry? `<button class="btn btn-ghost" style="padding:4px 10px;font-size:12px" onclick="retryFailedHoldings()">重试可重试项</button>`:``}<span style="color:var(--faint)">新基历史不足无需重试</span></div>`:'';
+  const hRows=holdings.map(h=>{
+    if(h.is_error){
+      const canRetry=h.retryable!==false;
+      return `<tr style="background:${canRetry?'#fffbeb':'#f5f5f4'}"><td>${safeFundCode(h.code)}</td><td class="name">${escHtml(h.name)}</td><td style="text-align:right">${fmtYuanFull(h.amount)}</td><td class="mono faint">—</td><td class="mono faint">—</td><td class="mono faint">—</td><td>—</td><td><span class="badge ${canRetry?'b-amber':'b-mute'}">${canRetry?'待重试':'观察仓'}</span></td><td><span class="badge b-mute">—</span></td><td style="max-width:240px;white-space:normal;font:12px var(--sans);color:var(--muted)">${escHtml(h.error||'')}</td><td>${canRetry?`<button class="btn btn-ghost" style="padding:4px 8px;font-size:11px" onclick="retryRebalanceSingle('${safeFundCode(h.code)}')">重试</button>`:`<span class="mono faint">—</span>`}</td></tr>`;
+    }
+    const act=h.action==='sell'?'卖出':'持有';
+    return `<tr><td>${safeFundCode(h.code)}</td><td class="name">${escHtml(h.name)}</td><td style="text-align:right">${fmtYuanFull(h.amount)}</td>${stopCell(h)}<td class="score">${escHtml(h.S_total??'—')}</td><td>${ratingCell(h)}</td><td>${sigOf(h)}</td><td>${escHtml(h.action_label||act)}</td><td style="text-align:right">${fmtYuanFull(h.target_amount)}</td></tr>`;
+  }).join('');
+  const hTable=`<div style="margin-top:14px"><div class="table-wrap"><table><thead><tr><th>代码</th><th>名称</th><th>金额</th><th>入场日</th><th title="本轮开仓以来最高净值→当前；20%止损看这一列">持仓回撤</th><th title="整只基金历史最高净值→当前；只展示，不触发止损">基金高点回撤</th><th>20%止损</th><th>总分</th><th>评级</th><th>信号</th><th>操作</th><th>目标</th></tr></thead><tbody>${hRows}</tbody></table></div></div>`;
+  // 重复度过滤在服务端静默执行（同指数/同风格顺位推荐），不展示明细
+  const nBuyOrders=orders.filter(o=>o.side==='BUY').length;
+  const noteHtml=(j.buy_note&&!nBuyOrders)? `<div style="margin-top:8px;font:12px var(--sans);color:var(--warn)">${escHtml(j.buy_note)}</div>`:'';
+  const statsHtml=(j.cand_stats&&j.cand_stats.total>0)? `<div style="margin-top:10px;font:12px var(--sans);color:var(--faint);line-height:1.7">建议买入 · 榜单 S&gt;70 共 <b style="color:var(--muted)">${j.cand_stats.gt70}</b> 只 · 未持有候选 <b style="color:var(--muted)">${j.cand_stats.total}</b> 只 · 已排除重复 <b style="color:var(--muted)">${j.cand_stats.dup}</b> 只 · 本次推荐 ${nBuyOrders} 只</div>`:'';
+  const orderHtml=orders.length? `<div style="margin-top:14px"><div class="orders">${orders.map(o=>{
+    const buyLed=o.side==='BUY'?`<div style="display:flex;gap:6px;align-items:center;margin-left:8px"><input id="led-buy-${o.code}" class="mono" style="width:110px;background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font:12px var(--mono);text-align:right" value="${fmtYuan(o.amount)}"><button class="btn btn-ghost" style="padding:4px 8px;font-size:11px" onclick="ledRecordBuy('${o.code}')">买入→台账</button></div>`:`<div style="display:flex;gap:6px;align-items:center;margin-left:8px"><input id="led-sell-${o.code}" class="mono" style="width:110px;background:var(--surface-2);border:1px solid var(--line);border-radius:6px;padding:4px 8px;font:12px var(--mono);text-align:right" value="${fmtYuan(o.amount)}"><button class="btn btn-ghost" style="padding:4px 8px;font-size:11px" onclick="ledRecordSell('${o.code}')">卖出→台账</button></div>`;
+    return `<div class="order ${o.side==='SELL'?'sell':'buy'}"><span class="side">${o.side==='SELL'?'卖出':'买入'}</span><div class="meta"><b>${safeFundCode(o.code)} ${escHtml(o.name)}</b><div>${escHtml(o.reason||'')}</div></div><div class="amt">${fmtYuanFull(o.amount)}</div>${buyLed}</div>`;
+  }).join('')}</div>${noteHtml}${statsHtml}<div style="margin-top:8px;display:flex;gap:8px"><button class="btn btn-ghost" style="padding:6px 12px;font-size:12px" onclick="copyOrders()">复制</button><button class="btn btn-ghost" style="padding:6px 12px;font-size:12px" onclick="downloadOrders()">导出</button></div></div>`:`<div class="empty" style="margin-top:12px">${escHtml(j.scan_msg||'无操作')}</div>`;
+  const allocHtml=alloc.length? `<div style="margin-top:14px"><div class="alloc-bar">${alloc.map((a,i)=>`<i style="width:${a.pct}%;background:${['#0c0a09','#57534e','#a8a29e','#d6d3d1','#e7e5e4'][i%5]}"></i>`).join('')}<i style="width:${s.cash_pct_after||0}%;background:var(--surface-2);border:1px dashed var(--line)"></i></div><div class="legend">${alloc.map((a,i)=>`<span><em style="background:${['#0c0a09','#57534e','#a8a29e'][i%3]}"></em>${a.code} ${a.pct}%</span>`).join('')}<span><em style="background:var(--surface-2);border:1px solid var(--line)"></em>现金 ${s.cash_pct_after||0}%</span></div></div>`:'';
+  // P4-3 持仓穿透: 按持仓市值加权的风格暴露(中性展示; 35% 上限告警已按 P3-4/P4-4 移除)
+  const pf=j.portfolio_rbsa||{};
+  const pfHtml=pf.n? `<div style="margin-top:14px;padding:12px 14px;border:1px solid var(--line);border-radius:8px">
+    <div class="eyebrow">持仓风格穿透 <span class="faint" style="font:11px var(--mono);margin-left:6px">${escHtml(pf.basis||'市值加权')} · ${pf.n} 只</span></div>
+    <div class="chips">${(pf.top||[]).map(t=>`<span>${escHtml(t.style)} <b>${t.pct}%</b></span>`).join('')||'<span>—</span>'}</div>
+    <div class="hint" style="margin-top:8px">${escHtml(pf.note||'')}</div></div>`:'';
+  document.getElementById('rb-out').innerHTML=kpis+cppiHtml+errBanner+hTable+pfHtml+orderHtml+allocHtml;
+  window._lastRebalance=j;
+  drawCppiChart(j.cppi||{});
+}
+function copyOrders(){const j=window._lastRebalance; if(!j) return; const t=(j.orders||[]).map(o=>`${o.side} ${o.code} ${o.amount}`).join('\n'); navigator.clipboard.writeText(t).then(()=>setStatus('rb-dot','rb-st','ok','已复制'))}
+function downloadOrders(){const j=window._lastRebalance; if(!j) return; const rows=[['side','code','amount']].concat((j.orders||[]).map(o=>[o.side,o.code,o.amount])); const csv=rows.map(r=>r.join(',')).join('\n'); const b=new Blob(["\uFEFF"+csv],{type:'text/csv'}); const a=document.createElement('a'); a.href=URL.createObjectURL(b); a.download='orders.csv'; a.click()}
+async function retryRebalanceSingle(code){
+  try{const j=await (await fetch('/api/fund/'+String(code).padStart(6,'0'),{method:'POST'})).json(); if(!j.ok) return; const last=window._lastRebalance; if(!last) return; const i=last.holdings.findIndex(h=>h.code===code); if(i>=0){const f=j.fund; last.holdings[i]={...last.holdings[i], name:f.name, S_total:f.S_total, rating:f.rating, is_error:false, error:null, action:f.S_total<45?'sell':'hold', action_label:f.S_total<45?'卖出':'持有'}; renderRebalance(last)}}catch(e){}
+}
+async function retryFailedHoldings(){const last=window._lastRebalance; if(!last) return; const list=last.holdings.filter(x=>x.is_error && x.retryable!==false); if(!list.length){alert("无可重试项（新基历史不足无需重试）");return} for(const h of list){await retryRebalanceSingle(h.code); await new Promise(r=>setTimeout(r,600))}}
+
+updateScanModeUI();
+updateLedger();
+loadStrategyState();
+loadTerrain();
+loadMacro();
+loadResults().catch(()=>{ const e=document.getElementById('bd-empty'); if(e) e.textContent='榜单加载超时，请点「加载最近榜单」重试'; });
+refreshScanStatus().then(s=>{ if(s && (s.phase==='universe' || s.phase==='scoring')) startPoll(); }).catch(()=>{});
+setTimeout(()=>{
+  const d=document.getElementById('hd-date');
+  if(d && d.textContent==='加载中…'){
+    d.textContent='本地缓存';
+    const dot=document.getElementById('hd-dot');
+    if(dot) dot.className='dot';
+  }
+}, 4000);
+</script>
+</body>
+</html>

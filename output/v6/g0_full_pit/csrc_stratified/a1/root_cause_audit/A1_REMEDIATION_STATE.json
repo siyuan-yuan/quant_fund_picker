@@ -1,0 +1,123 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-09-09T21:28:41+08:00",
+  "phase": "a2_implementation_task_6_gate",
+  "status": "A2_TASK_5_TIMELINE_COMPLETE",
+  "immutable_first_adjudication": "a1/v2 G0 FAIL",
+  "frozen_checkpoint_count": 1371,
+  "frozen_checkpoint_sha256": "477b944f504b04bbeb2a24faa4192764fb3eba2ce0ccd5ea3e588bab33172efd",
+  "code_test_manifest_sha256": "eb79046744a72cea5e69a125fece485b944ef3e99e66138b50c34e6da2121403",
+  "development_validation_split_sha256": "507e5990591e01f6f9d3e7a1853051988bf454ac73141b99064b33aeae8806e7",
+  "shadow_census_sha256": "a21d5b9b3ff574a2a644285536081a377db9001be95c2a5eae9430b1242e53cc",
+  "shadow_cache_records": 2808,
+  "shadow_checkpoint_rows": 1371,
+  "shadow_unique_checkpoint_ids": 1371,
+  "tests": {
+    "disclosure": {"count": 56, "exit_code": 0},
+    "classification": {"count": 83, "exit_code": 0},
+    "gate_full": {"count": 76, "exit_code": 0}
+  },
+  "headline_counts": {
+    "INCEPTION_PARSED_CLAUSE": 36,
+    "INCEPTION_TOTAL": 60,
+    "TRANSFORMATION_PARSED_CLAUSE": 3,
+    "TRANSFORMATION_TOTAL": 49,
+    "SECTION_UNCOMPARABLE_TOTAL": 1110,
+    "SECTION_UNCOMPARABLE_INVESTMENT_SECTION_NOT_FOUND": 606,
+    "SECTION_UNCOMPARABLE_EQUITY_CLAUSE_NOT_FOUND": 307,
+    "SECTION_UNCOMPARABLE_DOCUMENT_NOT_APPLICABLE": 176
+  },
+  "diagnostic_runner_revision": "r1 canonical-source deduplication",
+  "diagnostic_runner_sha256": "cce317f4a103c2ecd3dcebb601afd1af596bb75c408602d3728a8260096c03f3",
+  "corrected_checkpoint": "f26d9b78599438fb3da28041e0c0c406dc86cea56c46e41f4881b35d06eb904e: SOURCE_DOCUMENT_AMBIGUOUS -> EQUITY_CLAUSE_AMBIGUOUS",
+  "independent_reviews": {
+    "specification": "APPROVED; no blockers",
+    "quality": "APPROVED; no blockers",
+    "interpretive_limit": "INCEPTION/TERMINAL successful-first means existence of a parsable causal candidate only; it is not an adjudication or PASS"
+  },
+  "census_report": "structured_section_v3_shadow_census_report.md",
+  "development_trace_scope": {"checkpoint_rows": 318, "families": 16, "inception": 5, "transformation": 26, "section_uncomparable": 287},
+  "development_trace_runner": "run_development_section_not_found_trace.py",
+  "development_trace_runner_sha256": "2d798cd6a659952d7553d7bfb3567979359a9468533434b9a6fe83a5fc93ac0b",
+  "development_trace_result": {
+    "checkpoint_rows": 318,
+    "unique_sources": 287,
+    "unique_families": 16,
+    "scan_successes": 287,
+    "scan_failures": 0,
+    "no_heading_term_checkpoints": 301,
+    "narrative_or_reference_term_checkpoints": 17,
+    "standalone_governing_section_checkpoints": 0,
+    "validation_leakage": 0,
+    "inventory_sha256": "9b862f1d9866ead2bed79d4312a758224d54fdccc5a9e954796d0808a0ac186e",
+    "scan_cache_sha256": "fa4a347d02e4936b3ed9cfe414ec358beb11e507c86b7b0e26c09e6d3089ef48",
+    "trace_sha256": "ac7cd7a14ebbaf1c3801ca25b6ba96def5abbe245980bcdc828d6e6cf7d86a61",
+    "summary_sha256": "b4492dcd77accea3f6ef1b713cf5f986a397768d41bbec16f458c07e8b3e65bd"
+  },
+  "development_trace_report": "development_section_not_found/development_section_not_found_report.md",
+  "necessity_assessment": "remaining_work_necessity_assessment.md",
+  "necessity_finding": "Do not remediate all 1,251 A1 unresolved rows. All 1,371 A1 rows are critical by construction; operational-document failures and lexical conversion false positives contaminate the denominator. Continue only inception and genuine legal state-event recovery under a new A2 design.",
+  "transformation_title_triage": {"total": 49, "definite_transaction_conversion_false_positive": 33, "plausible_legal_transformation": 9, "needs_legal_context_review": 7},
+  "a2_design_spec": "docs/superpowers/specs/2026-09-09-v6-g0-a2-observable-state-design.md",
+  "a2_design_spec_sha256": "a6df6ad8287897ddfc21a295f9f7b7ecf6405b632fb5be96918790f0b089926c",
+  "a2_implementation_plan": "docs/superpowers/plans/2026-09-09-v6-g0-a2-observable-state-implementation.md",
+  "a2_implementation_plan_sha256": "4e545d516b6de3e3a667b5d3ee2150d6b21436c0b3b1780b02e6ea7b1c92abaa",
+  "accepted_design_corrections": [
+    "event_id excludes canonical_source_document and enforces Event 1:N Evidence",
+    "state_to_universe_eligibility_v1 and exact 60/30 boundaries are frozen",
+    "decision observations use all 243 monthly last-SSE-trading-day dates from 2006-01 through 2026-03",
+    "source priority cannot override incompatible same-event evidence"
+  ],
+  "a2_task_1": {
+    "tests": "36 passed in 11.05s; exit 0",
+    "red_evidence": "module import failed before implementation; explicit 混合型-偏股 regression then failed with UNRESOLVED_ELIGIBILITY before fix",
+    "a2_eligibility_sha256": "5fc71500a032c9e3f5e6585d9b49e35505be55e58b62fe9264e18d3f351676ee",
+    "contracts_sha256": "583b095c4d88dfbfee47dfa7c9591215b54c0246ae704628514b7b5e63f94914",
+    "test_sha256": "e471739c1f9269a98b0a34dbbdb8ca618195c91ec65e3125179e2084663abf88"
+  },
+  "a2_task_2": {
+    "tests": "33 passed, 1 skipped in 40.45s; exit 0",
+    "red_evidence": "v6.a2_schedule module import failed before implementation",
+    "decision_months": 243,
+    "range": "2006-01 through 2026-03",
+    "pandemic_invariant": "2020-01 -> 2020-01-23",
+    "a2_schedule_sha256": "c4898406da8cab745066a0e4f5bbf7accfa3f8f54581bd821634a03c99275eb5",
+    "contracts_sha256_after_task_2": "dd92308f16c822ab539f86940302305ef2840b9487afb69ca252a6c7162d3fdb",
+    "test_sha256": "a02529188cfd4238e0734975eab64b90bddb89c28e175420efe333595fd5048c",
+    "trade_calendar_sha256": "238a6fbf7df3ae38e23e60283c0e6315b248dd4599422accdf36a2554d2215e7"
+  },
+  "a2_task_3": {
+    "tests": "93 passed in 4.86s; exit 0",
+    "red_evidence": "v6.a2_events module import failed before implementation; two validation-derived fee cases later failed and their rule/test changes were deliberately reverted",
+    "event_identity": "SHA256(family_key|event_type|legal_subject|event_anchor_date|a2-legal-event-v1); source_document excluded",
+    "a2_events_sha256": "1f813bd9f07275045dff893f1a0eebda8c11580a22dd3655ab08a0c9e2babfd5",
+    "test_sha256": "fdbd882846bb4092d91ebe4d19723a0ef899435b72f7863b089b4e4ce21a9872",
+    "validation_isolation_correction": "14 original validation-family transformation titles had been viewed during A1/A2 diagnosis; no rules derived from them remain. Spec now requires a mechanically frozen external 120-row title cohort outside all 60 families."
+  },
+  "a2_task_4": {
+    "tests": "163 passed in 20.77s; exit 0",
+    "red_evidence": "v6.a2_evidence module import failed before implementation; pointer-only evidence then exposed missing numeric-column handling; provenance tests rejected initial acceptance of missing section checksum, explicit family mismatch, missing known_at/legal stage/location, and incomplete termination/continuity provenance before fixes",
+    "conflict_semantics": "source priority is applied only after same-event legal compatibility; incompatible fund types, disjoint allocation intervals, or conflicting effective dates remain UNRESOLVED_EVENT_CONFLICT",
+    "provenance_semantics": "successful state, termination, and affirmative continuity dispositions require known_at, determined legal stage, evidence location, and a 64-hex source checksum; explicit candidate family mismatch fails closed",
+    "continuity_semantics": "affirmative continuity requires a causal same-family predecessor usable no later than the event anchor; document pointers and operational silence never establish state",
+    "a2_evidence_sha256": "fd5190b085dd18a72197c783e64df1689bd1ce0301b5767914c09629692a012f",
+    "task_5_interface_revision": "UNRESOLVED_EVENT_CONFLICT now retains max candidate known_at and latest conflicting legal_effective_from so the timeline can close prior state causally",
+    "test_sha256": "adbc0e6f2e8a963749f0353451e9a4c9b4125052dd5125e4401c50fbdae10c34"
+  },
+  "a2_task_5": {
+    "tests": "156 passed, 1 skipped in 73.38s; exit 0",
+    "red_evidence": "v6.a2_timeline module import failed before implementation; evidence-to-timeline integration then failed because conflict dates were absent; termination test then failed when the fund master omitted termination_date and only the authoritative timeline boundary was available",
+    "timeline_semantics": "state usable_from=max(known_at,legal_effective_from); same-time compatible states intersect before interval construction; strictly later boundaries define valid_to; conflicts close prior state until a later resolved state",
+    "observation_semantics": "active inception-to-termination family/date rows are OBSERVED_STATE, PRE_OBSERVABLE, or UNRESOLVED_EVENT_CONFLICT; authoritative timeline termination also removes later dates from active coverage and is retained as TERMINATED",
+    "eligibility_semantics": "state_to_universe_eligibility_v1 is applied only at decision-date query time and its status, target type, exclusion reason, and version are retained",
+    "a2_timeline_sha256": "86ecbe4ad36bcb00dfc19e9e3f18fd1751bdfaaea9995f9cf260f8375f9d7cdb",
+    "test_sha256": "a9f2866627617a651da1f629160ca0b0202a481e73ff73503bd9691effce77b6"
+  },
+  "next_action": "Execute Task 6 with TDD: create tests/test_v6_a2_gate.py first for every exact Gate boundary and artifact mode/immutability rule, then implement v6/a2_gate.py. Do not write any real A2 denominator, disposition artifact, or formal verdict during Task 6 tests.",
+  "prohibitions": [
+    "Do not modify or rerun a1/v2",
+    "Do not create document_dispositions.csv or a Gate verdict in the shadow phase",
+    "Do not inspect untouched-validation failure examples for rule development",
+    "Do not change A1 checkpoints, thresholds, dispositions, NOOP definition, or classification regex"
+  ]
+}

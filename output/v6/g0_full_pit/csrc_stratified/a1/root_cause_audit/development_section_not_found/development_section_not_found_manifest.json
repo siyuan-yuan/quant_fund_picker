@@ -1,0 +1,9 @@
+{
+  "scope": "development-only INVESTMENT_SECTION_NOT_FOUND",
+  "checkpoint_rows": 318,
+  "unique_sources": 287,
+  "unique_families": 16,
+  "inventory_sha256": "9b862f1d9866ead2bed79d4312a758224d54fdccc5a9e954796d0808a0ac186e",
+  "trace_sha256": "ac7cd7a14ebbaf1c3801ca25b6ba96def5abbe245980bcdc828d6e6cf7d86a61",
+  "summary_sha256": "b4492dcd77accea3f6ef1b713cf5f986a397768d41bbec16f458c07e8b3e65bd"
+}

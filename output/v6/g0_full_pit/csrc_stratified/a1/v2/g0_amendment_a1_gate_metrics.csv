@@ -1,0 +1,18 @@
+gate,metric,role,threshold,numerator,denominator,actual,result,protocol_version,failures
+G0(c),checkpoint_coverage,PRIMARY,>= 0.95,120,1371,0.087527352297593,FAIL,V6-G0-A1,1251
+G0(c),critical_checkpoint_resolution,PRIMARY,== 1.0,120,1371,0.087527352297593,FAIL,V6-G0-A1,1251
+G0(c),fund_coverage_overall,PRIMARY,>= 0.90,45,60,0.75,FAIL,V6-G0-A1,15
+G0(c),coverage_存续_pre2013,PRIMARY,>= 0.80,7,10,0.7,FAIL,V6-G0-A1,3
+G0(c),coverage_存续_2013_2019,PRIMARY,>= 0.80,10,10,1.0,PASS,V6-G0-A1,0
+G0(c),coverage_存续_2020_2026,PRIMARY,>= 0.80,4,10,0.4,FAIL,V6-G0-A1,6
+G0(c),coverage_清盘_pre2013,PRIMARY,>= 0.80,8,10,0.8,PASS,V6-G0-A1,2
+G0(c),coverage_清盘_2013_2019,PRIMARY,>= 0.80,8,10,0.8,PASS,V6-G0-A1,2
+G0(c),coverage_清盘_2020_2026,PRIMARY,>= 0.80,8,10,0.8,PASS,V6-G0-A1,2
+G0(c),causal_violations,PRIMARY,== 0,6,1,6.0,FAIL,V6-G0-A1,6
+G0(c),unresolved_conflicts,PRIMARY,== 0,0,1,0.0,PASS,V6-G0-A1,0
+G0(c),nonpositive_intervals,PRIMARY,== 0,15,1,15.0,FAIL,V6-G0-A1,15
+G0(c),orphan_noops,PRIMARY,== 0,0,1,0.0,PASS,V6-G0-A1,0
+G0(c),critical_unresolved,PRIMARY,== 0,1251,1,1251.0,FAIL,V6-G0-A1,1251
+G0(c),document_parser_coverage,DIAGNOSTIC,diagnostic only,1676,1993,0.8409433015554441,PASS,V6-G0-A1,317
+G0(c),pdf_acquisition_coverage,DIAGNOSTIC,diagnostic only,2807,2808,0.9996438746438746,PASS,V6-G0-A1,1
+G0(c),historical_missing_pdf_count,DIAGNOSTIC,diagnostic only,1,1,1.0,PASS,V6-G0-A1,1

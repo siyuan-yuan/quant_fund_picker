@@ -1,0 +1,9 @@
+akshare==1.18.94
+numpy==2.4.6
+pandas==3.0.5
+pypdf==6.10.0
+pytest==9.1.1
+scikit-learn==1.9.0
+scipy==1.17.1
+statsmodels==0.15.0
+tushare==1.4.24
