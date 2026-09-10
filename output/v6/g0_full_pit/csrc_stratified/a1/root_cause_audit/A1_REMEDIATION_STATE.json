@@ -1,8 +1,8 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-09-10T06:28:01+00:00",
+  "updated_at": "2026-09-10T06:36:18+00:00",
   "phase": "a2_implementation_task_8_validation",
-  "status": "A2_TASK_7_RUNNER_COMPLETE",
+  "status": "A2_TASK_8_EXTERNAL_COHORT_BLOCKED",
   "immutable_first_adjudication": "a1/v2 G0 FAIL",
   "frozen_checkpoint_count": 1371,
   "frozen_checkpoint_sha256": "477b944f504b04bbeb2a24faa4192764fb3eba2ce0ccd5ea3e588bab33172efd",
@@ -140,7 +140,20 @@
     "real_a2_artifacts_generated": false,
     "git": "NO_GIT"
   },
-  "next_action": "Task 8 is the next approved recovery point. Do not run it automatically in this turn; it requires development audit, independent review, external 120-row cohort freeze/labels, family validation and reviewed denominator freeze before any A2 adjudication.",
+  "a2_task_8": {
+    "status": "BLOCKED_EXTERNAL_EVENT_COHORT",
+    "development_audit": "completed; 558 metadata rows, 7 development families, 8 title candidates classified LEGAL_TRANSFORMATION and 550 NOT_EVENT; audit SHA256 5ae90eebc81c081e50fabfa5266494be4b44b62cf304c305fa972caedff78ba7",
+    "external_cohort_attempt": "failed closed with no eligible external event-title rows; current metadata contains only the 60 sampled families, so no 120-row out-of-sample cohort can be fabricated",
+    "external_cohort_rule": "A2-EVENT-OOS-20260909, official metadata outside all 60 sampled families, broad event token, published no later than 2026-03-31, at most three rows per share code",
+    "tests": "116 passed in 21.45s; exit 0 for validation, runner, Gate and G0 regression",
+    "validation_code_sha256": "6778a5c38c49365654b8f8ee61c10d9ecb827d77e092a2db31466fafb28905cc",
+    "validation_test_sha256": "48ea685beb1de4b362bfa638106b2315d8784614ab939382cf8d5d8c0d289cfd",
+    "runner_code_sha256": "dcb6fc1ed9eef22d0bcfa59edbfc40a622bce687672dff0cf7722bb77bc9a2cf",
+    "real_outputs": "development_event_audit.csv only; no external cohort, labels, family validation, denominator, disposition, Gate metric or verdict",
+    "stop_condition": "Do not proceed to external labels, family validation or denominator freeze until an independently sourced external metadata cohort is available",
+    "git": "NO_GIT"
+  },
+  "next_action": "A2 is stopped at the external-cohort availability condition. Obtain or attach an official metadata source outside the 60 sampled families, then resume with --freeze-external-event-validation; do not infer or fabricate external rows and do not run adjudication.",
   "prohibitions": [
     "Do not modify or rerun a1/v2",
     "Do not create document_dispositions.csv or a Gate verdict in the shadow phase",

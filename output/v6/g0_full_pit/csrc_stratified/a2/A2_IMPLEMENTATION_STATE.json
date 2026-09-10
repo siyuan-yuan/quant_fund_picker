@@ -1,0 +1,23 @@
+{
+  "code_test_manifest_sha256": "1cc7fd910b4106879a98221f00c0b4c748391fee55034fc6caf00182925032c5",
+  "completed_phases": [
+    "validate-development"
+  ],
+  "input_sha256": "ae3d96e8a2d2885e8443096936b798bd5cfc227d9ef75cba71cddcf6ffca08c6",
+  "last_completed_phase": "validate-development",
+  "mode": "validate-development",
+  "next_command": "python -m v6.a2_runner --validate-development --sample output/v6/g0_full_pit/csrc_stratified_sample.csv --aliases output/v6/g0_full_pit/csrc_stratified_aliases.csv --metadata output/v6/g0_full_pit/csrc_stratified/metadata.jsonl --sections output/v6/g0_full_pit/csrc_stratified/a1/root_cause_audit/structured_section_v3_shadow/section_cache.jsonl --split output/v6/g0_full_pit/csrc_stratified/a1/root_cause_audit/structured_section_v3_dev_validation_split.csv --trade-calendar cache/tushare/bulk/trade_cal.csv --output output/v6/g0_full_pit/csrc_stratified/a2",
+  "phase": "a2_implementation_task_8_validation",
+  "row_counts": {
+    "aliases": 97,
+    "decision_dates": 243,
+    "metadata": 2813,
+    "sample": 60,
+    "sections": 2808,
+    "split": 60
+  },
+  "schema_version": 1,
+  "split_sha256": "740234f3fc765875bcfe2e3ce06588cf129cf39f14b6fef0241cb72fe7873615",
+  "status": "A2_TASK_8_EXTERNAL_COHORT_BLOCKED",
+  "stop_condition": "No eligible external event-title rows exist outside the 60 sampled families; do not fabricate cohort or proceed to labels/family validation/denominator freeze."
+}

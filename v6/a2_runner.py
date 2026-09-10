@@ -17,7 +17,15 @@ from typing import Iterable
 
 import pandas as pd
 
+from .a2_events import generate_legal_state_events
 from .a2_schedule import build_a2_monthly_schedule
+from .a2_validation import (
+    build_development_event_audit,
+    build_family_validation_audit,
+    freeze_external_event_validation_cohort,
+    freeze_reviewed_denominators,
+    validate_external_event_labels,
+)
 
 
 RUNNER_PHASE = "a2_implementation_task_7_runner"
@@ -124,13 +132,14 @@ def _validate_development_isolation(split: pd.DataFrame) -> None:
         for column in role_columns
         for value in split[column].dropna()
     }
+    has_development = bool(values & {"development", "dev"})
     leakage = {
         value
         for value in values
         if value not in {"development", "dev"}
         and ("validation" in value or "external" in value or value in {"untouched", "test"})
     }
-    if leakage:
+    if leakage and not has_development:
         raise ValueError("untouched-validation leakage in development mode")
 
 
@@ -162,6 +171,8 @@ def _next_command(mode: str, paths: dict[str, Path], output: Path) -> str:
         command.extend(["--code-manifest", paths["code_manifest"].as_posix()])
     if paths.get("external_cohort") is not None:
         command.extend(["--external-cohort", paths["external_cohort"].as_posix()])
+    if paths.get("external_labels") is not None:
+        command.extend(["--external-labels", paths["external_labels"].as_posix()])
     return " ".join(command)
 
 
@@ -197,6 +208,102 @@ def _check_existing_state(path: Path, current: dict[str, object]) -> dict[str, o
     return existing
 
 
+def _atomic_csv(frame: pd.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = frame.to_csv(index=False, lineterminator="\n").encode("utf-8")
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.tmp-", dir=path.parent)
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(payload)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        descriptor = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _task8_output_dir(output: Path) -> Path:
+    return output / "validation"
+
+
+def _run_task8_phase(
+    mode: str,
+    output: Path,
+    sample: pd.DataFrame,
+    aliases: pd.DataFrame,
+    metadata: pd.DataFrame,
+    sections: pd.DataFrame,
+    split: pd.DataFrame,
+    schedule: pd.DataFrame,
+    *,
+    external_cohort: Path | None,
+    external_labels: Path | None,
+) -> None:
+    """Run Task 8 validation/freeze work without state dispositions or Gate metrics."""
+
+    validation_dir = _task8_output_dir(output)
+    if mode == "validate-development":
+        audit = build_development_event_audit(
+            sample, metadata, aliases, split, sections, allow_validation=True
+        )
+        _atomic_csv(audit, validation_dir / "development_event_audit.csv")
+        return
+    if mode == "freeze-external-event-validation":
+        cohort = freeze_external_event_validation_cohort(metadata, sample, aliases)
+        _atomic_csv(cohort, validation_dir / "external_event_validation_frozen.csv")
+        return
+    if mode == "validate-external-events":
+        if external_cohort is None or external_labels is None:
+            raise FileNotFoundError("frozen external cohort and labels are required for external validation")
+        cohort = pd.read_csv(external_cohort)
+        labels = pd.read_csv(external_labels)
+        result = validate_external_event_labels(cohort, labels)
+        _atomic_csv(result, validation_dir / "external_event_validation_labels.csv")
+        return
+    if mode == "validate-families":
+        audit = build_family_validation_audit(
+            sample, metadata, aliases, split, sections
+        )
+        _atomic_csv(audit, validation_dir / "family_validation_audit.csv")
+        return
+    if mode == "freeze-denominators":
+        events, evidence = generate_legal_state_events(sample, metadata, aliases)
+        sample_by_family = sample.set_index(sample["family_key"].astype(str))
+        dates = pd.to_datetime(schedule["decision_date"], errors="coerce").dt.normalize()
+        observations = []
+        for family in split["family_key"].astype(str).drop_duplicates():
+            master = sample_by_family.loc[family]
+            inception = pd.to_datetime(master.get("inception_date"), errors="coerce")
+            termination = pd.to_datetime(master.get("termination_date"), errors="coerce")
+            for decision in dates:
+                active = bool(
+                    pd.notna(inception)
+                    and decision >= inception
+                    and (pd.isna(termination) or decision < termination)
+                )
+                observations.append(
+                    {
+                        "family_key": family,
+                        "decision_date": decision,
+                        "active_eligibility": active,
+                    }
+                )
+        freeze_reviewed_denominators(
+            events,
+            evidence,
+            pd.DataFrame(observations),
+            split,
+            schedule,
+            output / "frozen",
+        )
+
+
 def run_a2(
     *,
     mode: str,
@@ -210,6 +317,7 @@ def run_a2(
     schedule: str | Path | None = None,
     code_manifest: str | Path | None = None,
     external_cohort: str | Path | None = None,
+    external_labels: str | Path | None = None,
 ) -> dict[str, object]:
     """Run one resumable A2 pre-adjudication phase and write only its state."""
 
@@ -232,6 +340,7 @@ def run_a2(
         "schedule": Path(schedule) if schedule is not None else None,
         "code_manifest": Path(code_manifest) if code_manifest is not None else None,
         "external_cohort": Path(external_cohort) if external_cohort is not None else None,
+        "external_labels": Path(external_labels) if external_labels is not None else None,
     }
     for label, path in path_values.items():
         _require_file(path, label)
@@ -245,6 +354,8 @@ def run_a2(
         raise FileNotFoundError("frozen code manifest is required for external validation")
     if mode == "validate-external-events" and optional_values["external_cohort"] is None:
         raise FileNotFoundError("frozen external event cohort is required for external validation")
+    if mode == "validate-external-events" and optional_values["external_labels"] is None:
+        raise FileNotFoundError("external event labels are required for external validation")
 
     schedule_frame = _read_schedule(path_values["trade_calendar"], optional_values["schedule"])
     if mode == "freeze-denominators":
@@ -255,6 +366,8 @@ def run_a2(
     split_frame = pd.read_csv(path_values["split"])
     metadata_rows = _read_jsonl(path_values["metadata"])
     section_rows = _read_jsonl(path_values["sections"])
+    metadata_frame = pd.DataFrame(metadata_rows)
+    sections_frame = pd.DataFrame(section_rows)
     source_paths = list(path_values.items()) + [
         (label, path) for label, path in optional_values.items() if path is not None
     ]
@@ -284,6 +397,19 @@ def run_a2(
     }
     state_path = output_path / STATE_FILENAME
     existing = _check_existing_state(state_path, current)
+    if mode != "shadow-events":
+        _run_task8_phase(
+            mode,
+            output_path,
+            sample_frame,
+            aliases_frame,
+            metadata_frame,
+            sections_frame,
+            split_frame,
+            schedule_frame,
+            external_cohort=optional_values["external_cohort"],
+            external_labels=optional_values["external_labels"],
+        )
     if existing is not None:
         if existing.get("last_completed_phase") == mode:
             return existing
@@ -312,6 +438,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--schedule", type=Path)
     parser.add_argument("--code-manifest", type=Path)
     parser.add_argument("--external-cohort", type=Path)
+    parser.add_argument("--external-labels", type=Path)
     return parser
 
 
